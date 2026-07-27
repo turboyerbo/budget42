@@ -2,34 +2,15 @@
   command   = "npm run build"
   publish   = "dist"
 
-# React Router — redirect all paths to index.html
 [[redirects]]
   from   = "/*"
   to     = "/index.html"
   status = 200
 
-# Security & CSP headers
 [[headers]]
   for = "/*"
   [headers.values]
     X-Frame-Options        = "DENY"
     X-Content-Type-Options = "nosniff"
     Referrer-Policy        = "strict-origin-when-cross-origin"
-
-    # Content Security Policy
-    # script-src: our own JS only (Vite prod build never uses eval)
-    # style-src:  inline styles (React uses them) + Google Fonts CSS
-    # font-src:   Google Fonts files
-    # connect-src: Supabase REST (https) + Supabase Realtime (wss)
-    # img-src:    our SVG data-URI favicon + self
-    Content-Security-Policy = """
-      default-src 'self';
-      script-src  'self' 'unsafe-inline';
-      style-src   'self' 'unsafe-inline' https://fonts.googleapis.com;
-      font-src    'self' https://fonts.gstatic.com;
-      connect-src 'self'
-                  https://*.supabase.co
-                  wss://*.supabase.co;
-      img-src     'self' data:;
-      frame-ancestors 'none';
-    """
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.anthropic.com; img-src 'self' data:; frame-ancestors 'none';"
