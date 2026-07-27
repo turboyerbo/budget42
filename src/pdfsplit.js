@@ -7,7 +7,11 @@
  * each finish comfortably inside the limit, and they give us real progress to
  * show the user instead of a spinner that sits there for a minute.
  */
-import { PDFDocument } from 'pdf-lib';
+let _pdfLib = null;
+async function loadPdfLib() {
+  if (!_pdfLib) _pdfLib = (await import('pdf-lib')).PDFDocument;
+  return _pdfLib;
+}
 
 const CHUNK = 0x8000;
 
@@ -21,6 +25,7 @@ function bytesToBase64(bytes) {
 
 /** How many pages does this document have? */
 export async function pageCount(file) {
+  const PDFDocument = await loadPdfLib();
   const doc = await PDFDocument.load(await file.arrayBuffer(), { ignoreEncryption: true });
   return doc.getPageCount();
 }
@@ -30,6 +35,7 @@ export async function pageCount(file) {
  * for display.
  */
 export async function splitPDF(file, pagesPerBatch = 3) {
+  const PDFDocument = await loadPdfLib();
   const buf = await file.arrayBuffer();
   const src = await PDFDocument.load(buf, { ignoreEncryption: true });
   const total = src.getPageCount();

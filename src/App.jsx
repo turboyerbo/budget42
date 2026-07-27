@@ -19,6 +19,7 @@ import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
+import { detectRecurring, splitRecurring } from './recurring.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
@@ -68,38 +69,6 @@ const ICON_MAP = {
 };
 const PICKABLE_ICONS = Object.keys(ICON_MAP);
 
-const FIXED = [
-  {label:'Rent (STELA)',         amount:1900,  due:'Last day'},
-  {label:'Electricity (Metergy)',amount:150,   due:'~15th'},
-  {label:'TD Insurance',         amount:66.50, due:'End of month'},
-  {label:'Freedom Mobile',       amount:45.20, due:'~20th'},
-  {label:'Affirm Canada',        amount:51.51, due:'~23rd'},
-  {label:'BMO Plan Fee',         amount:17.95, due:'Last day'},
-];
-const SUBS = [
-  {label:'Claude.ai',      amount:31.64,due:'~30th'},
-  {label:'Apple (iCloud+)',amount:29.70,due:'~15th'},
-  {label:'YouTube Premium',amount:25.98,due:'~22nd'},
-  {label:'Dropbox',        amount:18.07,due:'~23rd'},
-  {label:'Amazon Prime',   amount:11.29,due:'~19th'},
-  {label:'Netflix',        amount:9.03, due:'~2nd'},
-  {label:'Google One',     amount:7.90, due:'~29th'},
-  {label:'Uber One',       amount:6.77, due:'~6th'},
-  {label:'Anthropic API',  amount:12.00,due:'varies'},
-  {label:'Prime Video',    amount:3.38, due:'~29th'},
-];
-const UPCOMING = [
-  {label:'Rent',               amount:1900, date:'Jul 31',crit:true, type:'bill'},
-  {label:'Centre for Mindbody',amount:275,  date:'Jul 21',crit:false,type:'medical'},
-  {label:'YouTube Premium',    amount:25.98,date:'Jul 22',crit:false,type:'sub'},
-  {label:'Affirm Canada',      amount:51.51,date:'Jul 23',crit:false,type:'bill'},
-  {label:'Claude.ai',          amount:31.64,date:'Jul 30',crit:false,type:'sub'},
-  {label:'TD Insurance',       amount:66.50,date:'Jul 31',crit:false,type:'bill'},
-  {label:'BMO Plan Fee',       amount:17.95,date:'Jul 31',crit:false,type:'bill'},
-  {label:'CTFS finance charge',amount:438,  date:'Aug 10',crit:true, type:'debt'},
-  {label:'Netflix',            amount:9.03, date:'Aug 2', crit:false,type:'sub'},
-  {label:'Freedom Mobile',     amount:45.20,date:'Aug 20',crit:false,type:'bill'},
-];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt   = n => '$' + Math.abs(n).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -750,15 +719,26 @@ function OtherReviewModal({ items, allCats, onSave, onClose }) {
 function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
-                  onChangeCategory,view,setView}) {
+                  onChangeCategory,view,setView,history}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
-  const totalFixed=FIXED.reduce((a,b)=>a+b.amount,0);
-  const totalSubs=SUBS.reduce((a,b)=>a+b.amount,0);
-  const committed=totalFixed+totalSubs+ccTarget;
+  // Recurring charges are worked out from your own history rather than kept in
+  // a hardcoded list. Only what has NOT yet been charged counts as committed —
+  // anything already charged is sitting in `spent`, and adding both double counts.
+  const recurring   = detectRecurring(history || []);
+  const { paid:paidBills, due:dueBills, dueTotal } = splitRecurring(recurring, everythingThisMonth);
+
+  // Same logic for the card payment: only pledge it if it hasn't gone out yet
+  const ccPaidThisMonth = everythingThisMonth
+    .filter(t=>(t.category||t.cat)==='cc_payment')
+    .reduce((a,t)=>a+t.amount,0);
+  const ccStillDue = Math.max(0, ccTarget - ccPaidThisMonth);
+
+  const committed = dueTotal + ccStillDue;
 
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
+  const everythingThisMonth=everything;   // both people, before the view filter
 
   // "Mine" shows only your own transactions. "Combined" shows the household.
   const allTx = view==='mine'
@@ -834,12 +814,19 @@ function HomeTab({txns,bankImports,ccTarget,setCcTarget,
           {surplus>=0?fmt(surplus):'–'+fmt(Math.abs(surplus))}
         </p>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
-          {[['Income',fmt(totalIncome)],['Committed',fmt(committed)],['Spent',fmt(totalSpent)]].map(([l,v])=>(
+          {[['Income',fmt(totalIncome),null],
+            ['Still to come',fmt(committed),dueBills.length],
+            ['Spent',fmt(totalSpent),null]].map(([l,v,n])=>(
             <div key={l}>
               <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
                 textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>{l}</p>
               <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
                 color:'rgba(255,255,255,0.95)'}}>{v}</p>
+              {n!=null&&n>0&&(
+                <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
+                  {n} bill{n===1?'':'s'} not yet charged
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -950,6 +937,80 @@ function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             </p>
           )}
         </div>
+      )}
+
+      {(dueBills.length>0||paidBills.length>0)&&(
+        <Card style={{padding:'8px 0'}}>
+          <button onClick={()=>setOpenCat(openCat==='__bills'?null:'__bills')}
+            style={{display:'flex',alignItems:'center',gap:10,padding:'10px 18px',
+              width:'100%',border:'none',background:'none',cursor:'pointer',textAlign:'left'}}>
+            <div style={{width:30,height:30,borderRadius:9,background:C.blue+'18',
+              display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <CalendarDays size={15} color={C.blue}/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{margin:0,fontSize:13,fontWeight:600,color:C.ink,fontFamily:SANS}}>
+                Recurring charges
+              </p>
+              <p style={{margin:'1px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
+                {paidBills.length} already charged · {dueBills.length} still to come
+              </p>
+            </div>
+            <span style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.ink}}>
+              {fmt(dueTotal)}
+            </span>
+            <ChevronRight size={14} color={C.sandDark}
+              style={{transform:openCat==='__bills'?'rotate(90deg)':'none',
+                transition:'transform 0.15s'}}/>
+          </button>
+
+          {openCat==='__bills'&&(
+            <div style={{background:C.sand,padding:'6px 0 10px'}}>
+              <p style={{margin:'0 18px 6px',fontSize:10,color:C.inkSoft,
+                fontFamily:SANS,lineHeight:1.6}}>
+                Worked out from your own statements — anything charged in at least two
+                different months for a steady amount. Only the ones that haven't been
+                charged yet count towards "still to come".
+              </p>
+              {dueBills.map(b=>(
+                <div key={b.key} style={{display:'flex',alignItems:'center',gap:8,
+                  padding:'7px 18px 7px 30px'}}>
+                  <div style={{width:6,height:6,borderRadius:99,background:C.blue,flexShrink:0}}/>
+                  <span style={{flex:1,fontSize:12,color:C.ink,fontFamily:SANS,
+                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {b.label}
+                  </span>
+                  <span style={{fontSize:10,color:C.inkSoft,fontFamily:SANS}}>
+                    ~{b.day}{b.day===1?'st':b.day===2?'nd':b.day===3?'rd':'th'}
+                  </span>
+                  <span style={{fontFamily:SERIF,fontSize:14,fontWeight:600,color:C.ink,
+                    minWidth:56,textAlign:'right'}}>{fmt(b.amount)}</span>
+                </div>
+              ))}
+              {paidBills.map(b=>(
+                <div key={b.key} style={{display:'flex',alignItems:'center',gap:8,
+                  padding:'7px 18px 7px 30px',opacity:0.5}}>
+                  <Check size={11} color={C.green} strokeWidth={3} style={{flexShrink:0}}/>
+                  <span style={{flex:1,fontSize:12,color:C.inkMid,fontFamily:SANS,
+                    textDecoration:'line-through',
+                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {b.label}
+                  </span>
+                  <span style={{fontSize:10,color:C.green,fontFamily:SANS}}>charged</span>
+                  <span style={{fontFamily:SERIF,fontSize:14,fontWeight:600,color:C.inkSoft,
+                    minWidth:56,textAlign:'right'}}>{fmt(b.amount)}</span>
+                </div>
+              ))}
+              {recurring.length===0&&(
+                <p style={{margin:'0 18px',fontSize:12,color:C.inkSoft,
+                  fontFamily:SANS,fontStyle:'italic'}}>
+                  Not enough history yet. Upload two or more months and your recurring
+                  bills will be spotted automatically.
+                </p>
+              )}
+            </div>
+          )}
+        </Card>
       )}
 
       <SL>Spending this month</SL>
@@ -1387,56 +1448,114 @@ function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveN
 }
 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
-function BillsTab() {
-  const tc={bill:C.blue,sub:C.purple,medical:C.red,debt:C.red};
-  const tl={bill:'Bill',sub:'Sub',medical:'Medical',debt:'⚠ Debt'};
+function BillsTab({history,txns,bankImports,allCats}) {
+  const recurring = detectRecurring(history || []);
+  const { paid, due, dueTotal, paidTotal } =
+    splitRecurring(recurring, [...txns, ...bankImports]);
+
+  const monthlyTotal = recurring.reduce((a, r) => a + r.amount, 0);
+
+  const Row = ({ b, done }) => {
+    const c = allCats.find(x => x.id === b.category) || { icon:'Package', color:C.inkSoft };
+    return (
+      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 18px',
+        opacity: done ? 0.55 : 1 }}>
+        <div style={{ width:30, height:30, borderRadius:9, background:c.color+'18',
+          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+          <CatIcon name={c.icon} size={15} color={c.color}/>
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <p style={{ margin:0, fontSize:14, color:C.ink, fontFamily:SANS,
+            textDecoration: done ? 'line-through' : 'none',
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+            {b.label}
+          </p>
+          <p style={{ margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
+            around the {b.day}{b.day===1?'st':b.day===2?'nd':b.day===3?'rd':'th'}
+            {' · seen in '}{b.monthsSeen} months
+            {b.varies ? ' · amount varies' : ''}
+          </p>
+        </div>
+        {done && <span style={{ fontSize:10, fontWeight:700, color:C.green,
+          fontFamily:SANS }}>CHARGED</span>}
+        <span style={{ fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.ink }}>
+          {fmt(b.amount)}
+        </span>
+      </div>
+    );
+  };
+
+  if (recurring.length === 0) return (
+    <div style={{ padding:'16px 16px 0' }}>
+      <Card style={{ textAlign:'center', padding:'40px 24px' }}>
+        <CalendarDays size={40} color={C.sandDark} style={{ marginBottom:12 }}/>
+        <p style={{ fontFamily:SERIF, fontSize:20, color:C.inkMid, margin:'0 0 6px' }}>
+          No recurring charges spotted yet
+        </p>
+        <p style={{ fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6, margin:0 }}>
+          Bills are worked out from your statements rather than typed in. Upload two
+          or more months and anything charged regularly for a steady amount will
+          appear here on its own.
+        </p>
+      </Card>
+    </div>
+  );
+
   return (
-    <div style={{padding:'16px 16px 0'}}>
-      <SL>Upcoming — next 30 days</SL>
-      <Card style={{padding:'4px 0'}}>
-        {UPCOMING.map((item,i)=>(
-          <div key={i}>
-            {i>0&&<Divider/>}
-            <div style={{display:'flex',alignItems:'center',gap:10,padding:'12px 18px',
-              background:item.crit?C.redLight:C.white}}>
-              <div style={{flex:1}}>
-                <p style={{margin:0,fontSize:14,fontWeight:item.crit?600:500,
-                  color:item.crit?C.red:C.ink,fontFamily:SANS}}>{item.label}</p>
-                <p style={{margin:'2px 0 0',fontSize:12,color:item.crit?C.red+'99':C.inkSoft,fontFamily:SANS}}>{item.date}</p>
-              </div>
-              <span style={{fontSize:10,fontWeight:600,padding:'2px 8px',borderRadius:99,
-                background:(tc[item.type]||C.inkSoft)+'18',color:tc[item.type]||C.inkSoft,
-                fontFamily:SANS}}>{tl[item.type]||item.type}</span>
-              <p style={{margin:0,fontFamily:SERIF,fontSize:16,fontWeight:600,
-                color:item.crit?C.red:C.ink}}>{fmt(item.amount)}</p>
-            </div>
+    <div style={{ padding:'16px 16px 0' }}>
+      <Card style={{ background:C.green, padding:'18px 20px' }}>
+        <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
+          letterSpacing:'0.1em', margin:'0 0 4px', fontFamily:SANS }}>
+          Still to come this month
+        </p>
+        <p style={{ fontFamily:SERIF, fontSize:38, fontWeight:600, color:'#fff',
+          margin:'0 0 12px', letterSpacing:'-0.02em', lineHeight:1 }}>
+          {fmt(dueTotal)}
+        </p>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div>
+            <p style={{ margin:0, fontSize:11, color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>
+              Already charged
+            </p>
+            <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
+              color:'rgba(255,255,255,0.95)' }}>{fmt(paidTotal)}</p>
           </div>
-        ))}
-      </Card>
-      <SL>Monthly fixed — {fmt(FIXED.reduce((a,b)=>a+b.amount,0))}/mo</SL>
-      <Card style={{padding:'4px 0'}}>
-        {FIXED.map((f,i)=>(
-          <div key={i}>{i>0&&<Divider/>}
-            <div style={{display:'flex',padding:'11px 18px'}}>
-              <span style={{flex:1,fontSize:14,color:C.ink,fontFamily:SANS}}>{f.label}</span>
-              <span style={{fontSize:12,color:C.inkSoft,marginRight:12,fontFamily:SANS}}>{f.due}</span>
-              <span style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.ink}}>{fmt(f.amount)}</span>
-            </div>
+          <div>
+            <p style={{ margin:0, fontSize:11, color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>
+              Full month
+            </p>
+            <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
+              color:'rgba(255,255,255,0.95)' }}>{fmt(monthlyTotal)}</p>
           </div>
-        ))}
+        </div>
       </Card>
-      <SL>Subscriptions — {fmt(SUBS.reduce((a,b)=>a+b.amount,0))}/mo</SL>
-      <Card style={{padding:'4px 0'}}>
-        {SUBS.map((s,i)=>(
-          <div key={i}>{i>0&&<Divider/>}
-            <div style={{display:'flex',padding:'11px 18px'}}>
-              <span style={{flex:1,fontSize:14,color:C.ink,fontFamily:SANS}}>{s.label}</span>
-              <span style={{fontSize:12,color:C.inkSoft,marginRight:12,fontFamily:SANS}}>{s.due}</span>
-              <span style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.ink}}>{fmt(s.amount)}</span>
-            </div>
-          </div>
-        ))}
-      </Card>
+
+      {due.length > 0 && <>
+        <SL>Not yet charged</SL>
+        <Card style={{ padding:'4px 0' }}>
+          {due.map((b,i) => (
+            <div key={b.key}>{i>0&&<Divider/>}<Row b={b}/></div>
+          ))}
+        </Card>
+      </>}
+
+      {paid.length > 0 && <>
+        <SL>Already charged this month</SL>
+        <Card style={{ padding:'4px 0' }}>
+          {paid.map((b,i) => (
+            <div key={b.key}>{i>0&&<Divider/>}<Row b={b} done/></div>
+          ))}
+        </Card>
+      </>}
+
+      <p style={{ fontSize:11, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6,
+        padding:'0 4px', marginBottom:20 }}>
+        These are detected from your own statements: anything charged in at least two
+        different months, on a similar day, for a similar amount. Nothing here is typed
+        in, so it stays accurate as your bills change.
+      </p>
     </div>
   );
 }
@@ -2610,6 +2729,7 @@ export default function App() {
   const [view,       setView      ]=useState('combined');
   const [aiOn,       setAiOn      ]=useState(null); // null = still checking
   const [aiDiag,     setAiDiag    ]=useState(null);
+  const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -2655,8 +2775,9 @@ export default function App() {
 
   async function loadAll(){
     try{
-      const [t,b,s,ai]=await Promise.all([getTxns(year,month),getBankImports(year,month),
-        getSettings(year,month),getAllBankImports()]);
+      const [t,b,s,ai,hist]=await Promise.all([getTxns(year,month),getBankImports(year,month),
+        getSettings(year,month),getAllBankImports(),getAllBankImportsRaw()]);
+      setHistory(hist);
       setTxns(t);setImports(b);
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
       if(ai.length>20){const nt=computeTargets(ai);if(Object.keys(nt).length>0)setSuggested(nt);}
@@ -2799,6 +2920,7 @@ export default function App() {
     {id:'home',   label:'Home',   Icon:Home},
     {id:'add',    label:'Add',    Icon:Plus,    accent:true},
     {id:'history',label:'History',Icon:History},
+    {id:'bills',  label:'Bills',  Icon:CalendarDays},
     {id:'charts', label:'Charts', Icon:PieChart},
     {id:'upload', label:'Upload', Icon:Upload},
   ];
@@ -2849,7 +2971,7 @@ export default function App() {
       {/* Content */}
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
           setCcTarget={setCcTarget} allCats={allCats} catTargets={catTargets}
-          view={view} setView={setView}
+          view={view} setView={setView} history={history}
           onSaveSettings={saveSettings} suggested={suggested} onAcceptSuggested={acceptSuggested}
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
           onReviewOther={openReview}
@@ -2858,6 +2980,8 @@ export default function App() {
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
+      {tab==='bills'   && <BillsTab history={history} txns={txns}
+          bankImports={imports} allCats={allCats}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
@@ -2900,9 +3024,9 @@ export default function App() {
                     boxShadow:tab==='add'?`0 4px 16px ${C.green}55`:'none',transition:'all 0.2s'}}>
                     <Icon size={20} color="#fff"/>
                   </div>
-                :<Icon size={22} color={tab===id?C.green:C.sandDark} strokeWidth={tab===id?2:1.5}/>}
+                :<Icon size={20} color={tab===id?C.green:C.sandDark} strokeWidth={tab===id?2:1.5}/>}
               {!accent&&<span style={{fontSize:10,fontFamily:SANS,fontWeight:tab===id?600:400,
-                color:tab===id?C.green:C.inkSoft,letterSpacing:'0.02em'}}>{label}</span>}
+                color:tab===id?C.green:C.inkSoft,letterSpacing:'0'}}>{label}</span>}
             </button>
           ))}
         </div>

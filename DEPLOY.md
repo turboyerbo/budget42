@@ -566,3 +566,58 @@ A broken reference fails the build instead of reaching the browser. Verified by
 deliberately renaming the constant and confirming the build refuses.
 
 Netlify runs `npm run build`, so this protects deploys too.
+
+---
+
+## v18 — "Committed" was double counting, and is now derived
+
+### The bug
+
+`Committed` came from two hardcoded arrays in `App.jsx`: `FIXED` (rent,
+insurance, phone) and `SUBS` (Netflix, Claude, Dropbox). Their total was
+subtracted from income every month.
+
+But those same charges arrive in the imported statements, so they were already
+inside `Spent`. Rent was being subtracted twice. On a screen showing income
+$5,478 and spent $5,057, the app reported minus $1,965 available when the real
+figure was plus $421.
+
+They also could not be edited, so as bills changed the number quietly drifted
+further from reality.
+
+### The model now
+
+`src/recurring.js` works out recurring charges from your own statements: a
+merchant appearing in at least two different months, on a similar day, for a
+similar amount.
+
+Then the question becomes "what is still to come this month" rather than "what
+do I owe monthly". A bill already charged is spending. A bill not yet charged
+is a commitment. Only the second is subtracted, so nothing is counted twice.
+
+The hero now reads **Still to come**, with "3 bills not yet charged" underneath,
+and a card below lists them with the ones already charged struck through.
+
+Two guards stop habits being mistaken for bills:
+
+- **Amount spread**, not distance from the median. Grocery runs of 130 / 160 /
+  190 all sit within 25% of the median individually, yet are obviously variable.
+- **Day clustering.** Bills land on roughly the same date; shopping does not.
+  Month-end wraparound (the 30th and the 1st) is handled.
+
+Verified: rent, Netflix, phone and a variable electricity bill are detected;
+scattered grocery shops and payroll are not.
+
+The credit-card target gets the same treatment. If a payment has already gone
+out this month, only the remainder is pledged.
+
+### Bills tab restored
+
+It had been dropped from the navigation back in v5 and left as dead code, still
+holding the hardcoded arrays. It is now a real screen built from detected
+recurring charges. `FIXED`, `SUBS` and `UPCOMING` are deleted.
+
+### Bundle
+
+`pdf-lib` is loaded on demand rather than at startup, so the initial bundle
+stays around 500KB instead of 940KB.
