@@ -19,7 +19,7 @@ import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
-import { detectPartnerTransfers, findSharedMoments, summariseTogether } from './together.js';
+import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -56,6 +56,8 @@ const DEFAULT_CATS = [
   // Tracked but NOT counted as spending — moving money is not spending it
   {id:'cc_payment',   label:'Credit card payments', icon:'CreditCard', target:0, color:'#57534e', excluded:true},
   {id:'transfer',     label:'Transfers',      icon:'Landmark',       target:0,   color:'#78716c', excluded:true},
+  // Money coming IN. Excluded from spending, and what the budget draws on.
+  {id:'income',       label:'Income',         icon:'Leaf',           target:0,   color:'#1a7a4a', excluded:true, isIncome:true},
 ];
 const COLOR_SWATCHES = ['#1a7a4a','#1d4ed8','#7c3aed','#b45309','#0369a1',
   '#be185d','#c0392b','#065f46','#4f46e5','#0891b2','#9d174d','#57534e','#6b7280'];
@@ -744,18 +746,36 @@ function OtherReviewModal({ items, allCats, onSave, onClose }) {
 }
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
-function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
+function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
-                  onChangeCategory}) {
+                  onChangeCategory,view,setView}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
-  const totalIncome=Object.values(income).reduce((a,b)=>a+b,0);
   const totalFixed=FIXED.reduce((a,b)=>a+b.amount,0);
   const totalSubs=SUBS.reduce((a,b)=>a+b.amount,0);
   const committed=totalFixed+totalSubs+ccTarget;
-  const allTx=[...txns,...bankImports];
+
+  const me=firstName(profile?.name);
+  const everything=[...txns,...bankImports];
+
+  // "Mine" shows only your own transactions. "Combined" shows the household.
+  const allTx = view==='mine'
+    ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
+    : everything;
+
   const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
+
+  // Income is no longer typed in — it is read off the statements
+  const incomeRows=allTx.filter(t=>(t.category||t.cat)==='income');
+  const totalIncome=incomeRows.reduce((a,t)=>a+t.amount,0);
+
+  // Who contributed what, derived rather than declared
+  const incomeByPerson={};
+  incomeRows.forEach(t=>{
+    const k=firstName(t.who)||'unattributed';
+    incomeByPerson[k]=(incomeByPerson[k]||0)+t.amount;
+  });
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
   // Money moved between accounts is tracked but never counted as spending
@@ -785,10 +805,29 @@ function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
 
   return (
     <div style={{padding:'16px 16px 0'}}>
+      {/* Whose money are we looking at */}
+      <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
+        marginBottom:12}}>
+        {[['mine','Just me'],['combined','Combined']].map(([k,l])=>(
+          <button key={k} onClick={()=>setView(k)} style={{flex:1,border:'none',
+            borderRadius:9,padding:'8px 0',fontSize:13,fontWeight:600,cursor:'pointer',
+            fontFamily:SANS,background:view===k?C.white:'transparent',
+            color:view===k?C.ink:C.inkSoft,
+            boxShadow:view===k?'0 1px 3px rgba(0,0,0,0.1)':'none',
+            display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
+            {k==='combined'&&<Heart size={12} color={view===k?'#be185d':C.inkSoft}
+              fill={view===k?'#be185d':'none'}/>}
+            {l}
+          </button>
+        ))}
+      </div>
+
       {/* Hero */}
       <Card style={{background:C.green,padding:'20px 20px'}}>
         <p style={{fontSize:11,color:'rgba(255,255,255,0.7)',textTransform:'uppercase',
-          letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>Available this month</p>
+          letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>
+          {view==='combined'?'Available to the two of you':'Available to you'}
+        </p>
         <p style={{fontFamily:SERIF,fontSize:44,fontWeight:600,color:'#fff',margin:'0 0 16px',
           letterSpacing:'-0.02em',lineHeight:1}}>
           {surplus>=0?fmt(surplus):'–'+fmt(Math.abs(surplus))}
@@ -1046,31 +1085,90 @@ function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
 
       <SL>Income this month</SL>
       <Card style={{padding:'8px 0'}}>
-        {[['jordan','Jordan — NORR salary (est.)'],['ness','Ness — contribution'],['sunlife','SunLife reimbursement']].map(([k,l],i)=>(
-          <div key={k}>
-            {i>0&&<Divider/>}
-            <div style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px'}}>
-              {k!=='sunlife'?<div style={{width:30,height:30,borderRadius:'50%',
-                  background:k==='jordan'?'#1d4ed8':'#be185d',color:'#fff',
-                  display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:600}}>
-                  {k==='jordan'?'JY':'NMK'}</div>:
-                <div style={{width:30,height:30,borderRadius:'50%',background:C.greenLight,
-                  display:'flex',alignItems:'center',justifyContent:'center'}}>
-                  <Leaf size={14} color={C.green}/>
-                </div>}
-              <span style={{flex:1,fontSize:14,color:C.ink,fontFamily:SANS}}>{l}</span>
-              <div style={{display:'flex',alignItems:'center',gap:4}}>
-                <span style={{fontSize:14,color:C.green,fontFamily:SERIF}}>$</span>
-                <input type="number" value={income[k]}
-                  onChange={e=>{const n={...income,[k]:parseFloat(e.target.value)||0};setIncome(n);onSaveSettings(n,ccTarget);}}
-                  style={{width:90,border:`1px solid ${C.sandDark}`,borderRadius:8,padding:'5px 8px',
-                    fontSize:14,fontWeight:600,color:C.ink,textAlign:'right',
-                    background:C.sand,fontFamily:SERIF,outline:'none'}}/>
-              </div>
-            </div>
+        {incomeRows.length===0?(
+          <div style={{padding:'16px 18px'}}>
+            <p style={{margin:'0 0 4px',fontSize:13,color:C.inkMid,fontFamily:SANS}}>
+              No income recorded yet this month.
+            </p>
+            <p style={{margin:0,fontSize:12,color:C.inkSoft,fontFamily:SANS,lineHeight:1.6}}>
+              Income is read straight off your statements. Upload a statement that
+              includes a deposit and it will appear here automatically — no need to
+              type in what anyone contributed.
+            </p>
           </div>
-        ))}
+        ):(
+          <>
+            {Object.entries(incomeByPerson)
+              .sort((a,b)=>b[1]-a[1])
+              .map(([person,amt],i)=>(
+              <div key={person}>
+                {i>0&&<Divider/>}
+                <div style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px'}}>
+                  <UserAvatar name={person} size={30}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,color:C.ink,fontFamily:SANS,
+                      textTransform:'capitalize'}}>{person}</p>
+                    <p style={{margin:'1px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
+                      {incomeRows.filter(t=>(firstName(t.who)||'unattributed')===person).length}{' '}
+                      deposit{incomeRows.filter(t=>(firstName(t.who)||'unattributed')===person).length===1?'':'s'}
+                    </p>
+                  </div>
+                  <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.green}}>
+                    {fmt(amt)}
+                  </p>
+                </div>
+              </div>
+            ))}
+            <Divider/>
+            <button onClick={()=>setOpenCat(openCat==='income'?null:'income')}
+              style={{display:'flex',alignItems:'center',gap:8,padding:'10px 18px',
+                width:'100%',border:'none',background:'none',cursor:'pointer'}}>
+              <span style={{flex:1,textAlign:'left',fontSize:12,color:C.inkSoft,fontFamily:SANS}}>
+                {openCat==='income'?'Hide deposits':'Show every deposit'}
+              </span>
+              <ChevronRight size={14} color={C.sandDark}
+                style={{transform:openCat==='income'?'rotate(90deg)':'none',
+                  transition:'transform 0.15s'}}/>
+            </button>
+            {openCat==='income'&&(
+              <div style={{background:C.sand,padding:'2px 0 8px'}}>
+                {rowsFor('income').map(tx=>(
+                  <div key={tx.id} style={{display:'flex',alignItems:'center',gap:8,
+                    padding:'8px 18px 8px 30px',opacity:busyId===tx.id?0.45:1}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:12,color:C.ink,fontFamily:SANS,
+                        overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                        {tx.note||tx.description||'Deposit'}
+                      </p>
+                      <p style={{margin:'1px 0 0',fontSize:10,color:C.inkSoft,fontFamily:SANS}}>
+                        {tx.date}{tx.source?' · '+instLabel(tx.source):''}
+                        {tx.who?' · '+tx.who:''}
+                      </p>
+                    </div>
+                    <p style={{margin:0,fontFamily:SERIF,fontSize:14,fontWeight:600,
+                      color:C.green,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
+                    {busyId===tx.id?<Spinner size={13}/>:(
+                      <select value="income"
+                        onChange={e=>{if(e.target.value!=='income')reassign(tx,e.target.value);}}
+                        style={{border:`1px solid ${C.sandDark}`,borderRadius:7,
+                          padding:'3px 5px',fontSize:10,fontWeight:600,color:C.inkMid,
+                          background:C.white,cursor:'pointer',fontFamily:SANS,maxWidth:104}}>
+                        {allCats.map(x=><option key={x.id} value={x.id}>{x.label}</option>)}
+                      </select>
+                    )}
+                  </div>
+                ))}
+                <p style={{margin:'6px 18px 0 30px',fontSize:10,color:C.inkSoft,
+                  fontFamily:SANS,lineHeight:1.5}}>
+                  Something in here that isn't really income? Change its category and it
+                  moves out.
+                </p>
+              </div>
+            )}
+          </>
+        )}
       </Card>
+
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
     </div>
   );
@@ -1343,7 +1441,8 @@ function BillsTab() {
 }
 
 // ─── CHARTS TAB ───────────────────────────────────────────────────────────────
-function ChartsTab({txns,bankImports,allCats,year,month}) {
+function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
+  const me=firstName(profile?.name);
   const [view,setView]=useState('month'); // 'month' | 'year'
   const [annualData,setAnnualData]=useState([]);
   const [annualLoaded,setAnnualLoaded]=useState(false);
@@ -1353,7 +1452,9 @@ function ChartsTab({txns,bankImports,allCats,year,month}) {
   },[]);
 
   // Monthly data
-  const allTx=[...txns,...bankImports];
+  const allTx=(personView==='mine'
+    ? [...txns,...bankImports].filter(t=>!firstName(t.who)||firstName(t.who)===me)
+    : [...txns,...bankImports]);
   const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
   const monthly={};
   allTx.forEach(t=>{const k=t.category||t.cat;
@@ -1521,11 +1622,8 @@ function UploadTab({showToast, onImported, allCats}) {
       if (ans === 'Keep first only'  && dupBatch.secondId === row.id) return false;
       if (ans === 'Keep second only' && dupBatch.firstId  === row.id) return false;
     }
-    const cr = issues.find(i => i.type === 'credit_check' && i.row.id === row.id);
-    if (cr) {
-      const ans = answers[cr.id] ?? cr.default;
-      if (ans.startsWith('Yes')) return false;
-    }
+    // Income is kept and filed, not discarded — the budget is built from it
+    // (the retag itself happens in the .map below)
     const lg = issues.find(i => i.type === 'large_transaction' && i.row.id === row.id);
     if (lg) {
       const ans = answers[lg.id] ?? lg.default;
@@ -1533,13 +1631,17 @@ function UploadTab({showToast, onImported, allCats}) {
     }
     if (edits[row.id]?.skip) return false;
     return true;
-  }).map(row => ({
-    ...row,
-    category: edits[row.id]?.cat  || row.category,
-    source:   edits[row.id]?.src  || row.source,
-    note:     edits[row.id]?.note || row.note || '',
-    who,
-  }));
+  }).map(row => {
+    const cr = issues.find(i => i.type === 'credit_check' && i.row.id === row.id);
+    const isIncome = cr && (answers[cr.id] ?? cr.default).startsWith('Yes');
+    return {
+      ...row,
+      category: edits[row.id]?.cat || (isIncome ? 'income' : row.category),
+      source:   edits[row.id]?.src || row.source,
+      note:     edits[row.id]?.note || row.note || '',
+      who,
+    };
+  });
 
   const byMonth = {};
   finalRows.forEach(r => {
@@ -2447,6 +2549,7 @@ export default function App() {
   const [otherItems, setOtherItems]=useState([]);
   const [notifs,     setNotifs    ]=useState([]);
   const [showActivity,setShowActivity]=useState(false);
+  const [view,       setView      ]=useState('combined');
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -2678,8 +2781,9 @@ export default function App() {
       </div>
 
       {/* Content */}
-      {tab==='home'    && <HomeTab txns={txns} bankImports={imports} income={income} ccTarget={ccTarget}
-          setIncome={setIncome} setCcTarget={setCcTarget} allCats={allCats} catTargets={catTargets}
+      {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
+          setCcTarget={setCcTarget} allCats={allCats} catTargets={catTargets}
+          view={view} setView={setView}
           onSaveSettings={saveSettings} suggested={suggested} onAcceptSuggested={acceptSuggested}
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
           onReviewOther={openReview}
@@ -2688,7 +2792,8 @@ export default function App() {
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
-      {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats} year={year} month={month}/>}
+      {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
+          year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll} allCats={allCats}/>}
 
       {/* Partner activity panel */}

@@ -209,10 +209,10 @@ export function detectCredits(rows, handledIds) {
       summary:   `${money(row.amount)} · ${row.description}`,
       question:
         `Was "${row.description}" (${money(row.amount)} on ${row.date}) money you ` +
-        `RECEIVED rather than money you SPENT? Getting this right keeps your ` +
-        `spending history honest.`,
-      options: ['Yes — this is income, skip it', 'No — this is spending, keep it'],
-      default: 'Yes — this is income, skip it',
+        `RECEIVED rather than money you SPENT? It gets filed as income rather than ` +
+        `discarded, so your budget knows what actually came in.`,
+      options: ['Yes — file it as income', 'No — this is spending'],
+      default: 'Yes — file it as income',
     });
   });
   return issues;

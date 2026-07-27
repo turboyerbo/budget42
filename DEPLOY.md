@@ -365,3 +365,40 @@ statement was uploaded by both of you. The tell is the amount and the account:
 if those match too, it is almost certainly a duplicate import, so it is routed
 to the duplicate checker instead of being celebrated as an outing. Two different
 amounts on two different cards at the same restaurant is a real date.
+
+---
+
+## v12 — income derived from statements, and a Combined view
+
+### The bug underneath this
+
+Income transactions were being *discarded* at import. The credit check offered
+"Yes — this is income, skip it", and skip meant dropped. So there was nothing in
+the database to build a real income figure from, which is why income had to be
+typed in by hand.
+
+Credits are now filed under a new `income` category (excluded from spending,
+like card payments and transfers) rather than thrown away.
+
+### No more manual income fields
+
+The three inputs (Jordan's salary, Ness's contribution, SunLife) are gone.
+Income is now read off the statements and grouped by person automatically, with
+a "Show every deposit" drill-down. If something lands in income that isn't
+income, change its category and it moves out.
+
+Nobody declares what anyone contributed. It comes from the deposits.
+
+### Just me / Combined
+
+A toggle at the top of Home switches between your own transactions and the
+household's. It drives the hero figures, the category bars, the income
+breakdown and the Charts tab. `budget_settings` still stores the credit-card
+payment target; the `income` jsonb column is now unused and can be ignored.
+
+### Note for existing data
+
+Statements imported before this version had their income rows dropped at import
+time. Those deposits are not recoverable from the database. Re-import any
+statement whose income you want reflected, and the duplicate checker will keep
+the spending rows from being counted twice.

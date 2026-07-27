@@ -17,8 +17,8 @@ import { normalizeDesc } from './validate.js';
 const daysApart = (a, b) =>
   Math.abs(new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000;
 
-const firstName = w => String(w || '').trim().split(/\s+/)[0].toLowerCase();
-const samePerson = (a, b) => firstName(a) && firstName(a) === firstName(b);
+export const firstName = w => String(w || '').trim().split(/\s+/)[0].toLowerCase();
+export const samePerson = (a, b) => firstName(a) && firstName(a) === firstName(b);
 
 const TRANSFER_WORDS =
   /e-?transfer|etransfer|interac|send money|transfer to|transfer from|virement|zelle/i;
