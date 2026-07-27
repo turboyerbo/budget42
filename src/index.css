@@ -1,43 +1,46 @@
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+/* ── Reset ──────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-body {
-  background: #f8fafc;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  overscroll-behavior: none;
-}
-
-input[type=number]::-webkit-inner-spin-button,
-input[type=number]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-}
-
-input[type=number] {
-  -moz-appearance: textfield;
-}
-
-input, button, select, textarea {
-  font-family: inherit;
-}
-
-button {
-  -webkit-tap-highlight-color: transparent;
-  cursor: pointer;
-}
-
-/* Make it feel like a native app on iOS when added to home screen */
+/* ── Root scrolling fix ─────────────────────────────────────────────────────── */
+/* Do NOT set overflow:hidden here — that kills scrolling on iPhone */
 html {
   height: 100%;
-  overflow: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  min-height: 100%;
+  background: #f5f3ef;   /* warm off-white, not clinical blue-grey */
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #1a1a18;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior-y: contain;
+}
+#root {
+  min-height: 100%;
 }
 
-#root {
-  height: 100%;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+/* ── Typography helpers ──────────────────────────────────────────────────────── */
+.serif {
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+}
+
+/* ── Form elements ───────────────────────────────────────────────────────────── */
+input, button, select, textarea { font-family: inherit; }
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
+input[type=number] { -moz-appearance: textfield; }
+
+/* ── Touch feedback ──────────────────────────────────────────────────────────── */
+button { -webkit-tap-highlight-color: transparent; cursor: pointer; }
+a     { -webkit-tap-highlight-color: transparent; }
+
+/* ── Animations ──────────────────────────────────────────────────────────────── */
+@keyframes spin   { to { transform: rotate(360deg); } }
+@keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
 }
