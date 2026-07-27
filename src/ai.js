@@ -112,3 +112,39 @@ export function computeTargets(allImports) {
   });
   return out;
 }
+
+/**
+ * Suggest a category for a single transaction.
+ * Returns { category: string, reason: string } or null on failure.
+ */
+export async function suggestCategory(description, amount, catIds) {
+  if (!KEY) return null;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content:
+            `Categorise this Canadian bank transaction into exactly one of these IDs:\n` +
+            `${catIds.join(', ')}\n\n` +
+            `Transaction: "${description}"  Amount: $${amount}\n\n` +
+            `Reply ONLY with valid JSON, no markdown:\n{"category":"<id>","reason":"<one short sentence>"}`,
+        }],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = (data.content?.[0]?.text || '').replace(/```json?|```/g, '').trim();
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}

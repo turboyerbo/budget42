@@ -105,3 +105,34 @@ export function subscribeToMonth(year, month, onTxn, onSettings, onImport) {
     .subscribe();
   return () => supabase.removeChannel(ch);
 }
+
+// ── Update single bank import (category + note) ───────────────────────────────
+export async function updateBankImport(id, updates) {
+  const { error } = await supabase
+    .from('bank_imports')
+    .update(updates)
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Update single manual transaction (note) ───────────────────────────────────
+export async function updateTransaction(id, updates) {
+  const { error } = await supabase
+    .from('transactions')
+    .update(updates)
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Get all "other" imports for a month (for review modal) ───────────────────
+export async function getOtherImports(year, month) {
+  const { data, error } = await supabase
+    .from('bank_imports')
+    .select('*')
+    .eq('year', year)
+    .eq('month', month)
+    .eq('category', 'other')
+    .order('date', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}

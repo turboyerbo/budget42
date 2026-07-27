@@ -9,10 +9,11 @@ import {
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
          getBankImports, insertBankImports, deleteBankImport, getAllBankImports,
+         updateBankImport, updateTransaction, getOtherImports,
          subscribeToMonth, signUp, signIn, signOut, onAuthChange, updateUserMeta } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
-import { aiCategorize, AI_AVAILABLE, computeTargets } from './ai.js';
+import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory } from './ai.js';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C = {
@@ -486,10 +487,263 @@ function AddCatModal({onSave,onClose}) {
   );
 }
 
+
+// ─── OtherReviewModal ─────────────────────────────────────────────────────────
+// Shows all transactions still in "Other" so the user can re-categorise them.
+// Each row has: description, date, amount, category dropdown, note field, AI button.
+function OtherReviewModal({ items, allCats, onSave, onClose }) {
+  // Local edits: { id: { category, note } }
+  const [edits,   setEdits]   = useState(() =>
+    Object.fromEntries(items.map(t => [t.id, { category: t.category || 'other', note: t.note || '' }]))
+  );
+  const [aiStatus, setAiStatus] = useState({}); // { id: 'loading' | { category, reason } | 'error' }
+  const [saving,   setSaving]   = useState(false);
+
+  function edit(id, patch) {
+    setEdits(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  }
+
+  async function askAI(tx) {
+    if (!AI_AVAILABLE) return;
+    setAiStatus(prev => ({ ...prev, [tx.id]: 'loading' }));
+    const catIds = allCats.map(c => c.id);
+    const result = await suggestCategory(tx.description, tx.amount, catIds);
+    if (result?.category) {
+      setAiStatus(prev => ({ ...prev, [tx.id]: result }));
+    } else {
+      setAiStatus(prev => ({ ...prev, [tx.id]: 'error' }));
+    }
+  }
+
+  function acceptAI(id) {
+    const sug = aiStatus[id];
+    if (sug && sug !== 'loading' && sug !== 'error') {
+      edit(id, { category: sug.category });
+    }
+  }
+
+  async function saveAll() {
+    setSaving(true);
+    try {
+      await Promise.all(
+        items.map(tx =>
+          updateBankImport(tx.id, {
+            category: edits[tx.id]?.category || tx.category,
+            note:     edits[tx.id]?.note     || tx.note || '',
+          })
+        )
+      );
+      onSave();
+    } catch (err) {
+      console.error('Save failed:', err);
+    }
+    setSaving(false);
+  }
+
+  const changed = items.filter(tx =>
+    edits[tx.id]?.category !== (tx.category || 'other') ||
+    (edits[tx.id]?.note || '') !== (tx.note || '')
+  ).length;
+
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:600,
+      display:'flex', flexDirection:'column', justifyContent:'flex-end' }}>
+      {/* Backdrop */}
+      <div onClick={onClose}
+        style={{ position:'absolute', inset:0, background:'rgba(26,26,24,0.6)' }}/>
+
+      {/* Sheet */}
+      <div style={{ position:'relative', background:C.sand, borderRadius:'20px 20px 0 0',
+        maxHeight:'92dvh', display:'flex', flexDirection:'column',
+        animation:'slideUp 0.25s ease', boxShadow:'0 -8px 32px rgba(0,0,0,0.2)' }}>
+
+        {/* Header */}
+        <div style={{ padding:'20px 20px 14px', borderBottom:`1px solid ${C.sandMid}`,
+          flexShrink:0, background:C.white, borderRadius:'20px 20px 0 0' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:6 }}>
+            <div style={{ flex:1 }}>
+              <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
+                Review uncategorised transactions
+              </h2>
+              <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
+                {items.length} {items.length === 1 ? 'item' : 'items'} landed in "Other".
+                Assign each to the right category and add a note so you know what it was.
+              </p>
+            </div>
+            <button onClick={onClose}
+              style={{ border:'none', background:'none', padding:6, cursor:'pointer', flexShrink:0 }}>
+              <X size={22} color={C.inkSoft}/>
+            </button>
+          </div>
+          {AI_AVAILABLE && (
+            <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd', borderRadius:10,
+              padding:'8px 12px', display:'flex', gap:8, alignItems:'center' }}>
+              <Sparkles size={13} color={C.purple}/>
+              <p style={{ margin:0, fontSize:12, color:'#5b21b6', fontFamily:SANS }}>
+                Tap <b>Ask AI</b> on any row for an instant category suggestion.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Scrollable list */}
+        <div style={{ overflowY:'auto', flex:1, padding:'12px 16px' }}>
+          {items.map((tx, i) => {
+            const catVal  = edits[tx.id]?.category || 'other';
+            const noteVal = edits[tx.id]?.note || '';
+            const cat     = allCats.find(c => c.id === catVal) || { color:C.inkSoft, icon:'Package' };
+            const ai      = aiStatus[tx.id];
+            const isOther = catVal === 'other';
+
+            return (
+              <div key={tx.id} style={{ background:C.white, borderRadius:14,
+                padding:'14px 16px', marginBottom:10,
+                boxShadow:'0 1px 4px rgba(0,0,0,0.05), 0 0 0 1px rgba(0,0,0,0.04)',
+                border: isOther ? `1.5px solid ${C.amber}55` : `1.5px solid ${C.green}33` }}>
+
+                {/* Top row: description + amount */}
+                <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
+                  <div style={{ width:36, height:36, borderRadius:10, background:cat.color+'18',
+                    display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                    <CatIcon name={cat.icon} size={18} color={cat.color}/>
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.ink,
+                      fontFamily:SANS, lineHeight:1.3 }}>{tx.description}</p>
+                    <p style={{ margin:'3px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
+                      {tx.date} · {tx.source}
+                    </p>
+                  </div>
+                  <p style={{ margin:0, fontFamily:SERIF, fontSize:18, fontWeight:700,
+                    color:C.ink, flexShrink:0 }}>{fmt(tx.amount)}</p>
+                </div>
+
+                {/* Category selector */}
+                <div style={{ marginBottom:8 }}>
+                  <label style={{ fontSize:11, color:C.inkSoft, textTransform:'uppercase',
+                    letterSpacing:'0.08em', fontFamily:SANS, display:'block', marginBottom:4 }}>
+                    Category {isOther && <span style={{ color:C.amber }}>— needs review</span>}
+                  </label>
+                  <select value={catVal}
+                    onChange={e => edit(tx.id, { category: e.target.value })}
+                    style={{ width:'100%', border:`1.5px solid ${isOther?C.amber:cat.color}`,
+                      borderRadius:9, padding:'8px 10px', fontSize:13, fontWeight:600,
+                      color:isOther?C.amber:cat.color, background:C.white,
+                      fontFamily:SANS, cursor:'pointer', outline:'none' }}>
+                    {allCats.map(c => (
+                      <option key={c.id} value={c.id}>{c.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* AI suggestion pill */}
+                {AI_AVAILABLE && (
+                  <div style={{ marginBottom:8 }}>
+                    {!ai && (
+                      <button onClick={() => askAI(tx)}
+                        style={{ border:`1px solid ${C.purple}`, borderRadius:8, padding:'5px 12px',
+                          background:'#f5f3ff', color:C.purple, fontSize:12, fontWeight:600,
+                          cursor:'pointer', fontFamily:SANS,
+                          display:'flex', alignItems:'center', gap:5 }}>
+                        <Sparkles size={12} color={C.purple}/>
+                        Ask AI to suggest a category
+                      </button>
+                    )}
+                    {ai === 'loading' && (
+                      <div style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 0' }}>
+                        <Spinner size={13}/>
+                        <span style={{ fontSize:12, color:C.inkSoft, fontFamily:SANS }}>
+                          Claude is thinking…
+                        </span>
+                      </div>
+                    )}
+                    {ai === 'error' && (
+                      <p style={{ margin:0, fontSize:12, color:C.red, fontFamily:SANS }}>
+                        AI couldn't categorise this one. Try picking manually.
+                      </p>
+                    )}
+                    {ai && ai !== 'loading' && ai !== 'error' && (
+                      <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd',
+                        borderRadius:9, padding:'8px 12px' }}>
+                        <p style={{ margin:'0 0 4px', fontSize:12, color:'#5b21b6',
+                          fontFamily:SANS, fontWeight:600 }}>
+                          AI suggests:&nbsp;
+                          <span style={{ color:allCats.find(c=>c.id===ai.category)?.color||C.ink }}>
+                            {allCats.find(c=>c.id===ai.category)?.label || ai.category}
+                          </span>
+                        </p>
+                        <p style={{ margin:'0 0 8px', fontSize:11, color:'#7c3aed', fontFamily:SANS }}>
+                          {ai.reason}
+                        </p>
+                        <div style={{ display:'flex', gap:6 }}>
+                          <button onClick={() => acceptAI(tx.id)}
+                            style={{ border:'none', borderRadius:7, padding:'5px 12px',
+                              background:C.green, color:'#fff', fontSize:12,
+                              fontWeight:600, cursor:'pointer', fontFamily:SANS }}>
+                            Accept
+                          </button>
+                          <button onClick={() => setAiStatus(prev => ({ ...prev, [tx.id]: null }))}
+                            style={{ border:`1px solid ${C.sandDark}`, borderRadius:7,
+                              padding:'5px 10px', background:'#fff', fontSize:12,
+                              color:C.inkSoft, cursor:'pointer', fontFamily:SANS }}>
+                            Dismiss
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Note field */}
+                <div>
+                  <label style={{ fontSize:11, color:C.inkSoft, textTransform:'uppercase',
+                    letterSpacing:'0.08em', fontFamily:SANS, display:'block', marginBottom:4 }}>
+                    Your note (what was this?)
+                  </label>
+                  <input
+                    type="text"
+                    value={noteVal}
+                    onChange={e => edit(tx.id, { note: e.target.value })}
+                    placeholder={`e.g. "Groceries at No Frills" or "Birthday dinner"`}
+                    style={{ width:'100%', border:`1px solid ${C.sandDark}`, borderRadius:9,
+                      padding:'8px 12px', fontSize:13, color:C.ink, background:C.sand,
+                      fontFamily:SANS, outline:'none', boxSizing:'border-box',
+                      caretColor:C.green }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ height:20 }}/>
+        </div>
+
+        {/* Save footer */}
+        <div style={{ padding:'12px 16px 24px', borderTop:`1px solid ${C.sandMid}`,
+          background:C.white, flexShrink:0 }}>
+          <button onClick={saveAll} disabled={saving}
+            style={{ width:'100%', border:'none', padding:'15px', borderRadius:14,
+              background:C.green, color:'#fff', fontSize:15, fontWeight:700,
+              cursor:'pointer', fontFamily:SANS,
+              display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
+            {saving ? <><Spinner/>Saving…</> :
+              changed > 0
+                ? `Save ${changed} change${changed > 1 ? 's' : ''}`
+                : 'Done — close'}
+          </button>
+          <p style={{ margin:'8px 0 0', fontSize:11, color:C.inkSoft,
+            textAlign:'center', fontFamily:SANS }}>
+            Items you leave as "Other" can be reviewed again from the Home tab.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
 function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
-                  onAddCat,onDeleteCat,profile}) {
+                  onAddCat,onDeleteCat,profile,onReviewOther,otherCount}) {
   const totalIncome=Object.values(income).reduce((a,b)=>a+b,0);
   const totalFixed=FIXED.reduce((a,b)=>a+b.amount,0);
   const totalSubs=SUBS.reduce((a,b)=>a+b.amount,0);
@@ -569,6 +823,27 @@ function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
             Apply all
           </button>
         </div>
+      )}
+
+      {/* Other category alert — shown when imported transactions need review */}
+      {otherCount > 0 && (
+        <button onClick={onReviewOther} style={{ width:'100%', border:`1.5px solid ${C.amber}`,
+          borderRadius:14, padding:'12px 16px', marginBottom:12, background:'#fffbeb',
+          cursor:'pointer', textAlign:'left', display:'flex', alignItems:'center', gap:12 }}>
+          <div style={{ width:36, height:36, borderRadius:10, background:C.amber+'22',
+            display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+            <AlertCircle size={18} color={C.amber}/>
+          </div>
+          <div style={{ flex:1 }}>
+            <p style={{ margin:0, fontSize:13, fontWeight:700, color:C.amber, fontFamily:SANS }}>
+              {otherCount} transaction{otherCount>1?'s':''} need{otherCount===1?'s':''} categorising
+            </p>
+            <p style={{ margin:'2px 0 0', fontSize:12, color:'#92400e', fontFamily:SANS }}>
+              These are in "Other" and may be skewing your budget. Tap to review.
+            </p>
+          </div>
+          <ChevronRight size={18} color={C.amber}/>
+        </button>
       )}
 
       <SL>Spending this month</SL>
@@ -736,9 +1011,10 @@ function AddTab({profile,allCats,onAdd}) {
 }
 
 // ─── HISTORY TAB ──────────────────────────────────────────────────────────────
-function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport}) {
-  const [filter,setFilter]=useState('all');
-  const [srcFil,setSrcFil]=useState('all');
+function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveNote}) {
+  const [filter,   setFilter]   = useState('all');
+  const [srcFil,   setSrcFil]   = useState('all');
+  const [editNote, setEditNote] = useState(null); // { id, type, value }
   const all=[
     ...txns.map(t=>({...t,_type:'manual'})),
     ...bankImports.map(t=>({...t,_type:'import'})),
@@ -797,9 +1073,43 @@ function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport}) {
                       <p style={{margin:0,fontSize:14,fontWeight:500,color:C.ink,fontFamily:SANS,
                         overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
                         {tx.note||tx.description||c.label}</p>
-                      <p style={{margin:0,fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
-                        {tx._type==='import'?`Imported · ${tx.source}`:c.label}
-                        {tx.who?' · '+tx.who:''}</p>
+                      {/* Editable note field */}
+                      {editNote?.id===tx.id ? (
+                        <div style={{display:'flex',gap:6,marginTop:4}} onClick={e=>e.stopPropagation()}>
+                          <input
+                            autoFocus
+                            type="text"
+                            value={editNote.value}
+                            onChange={e=>setEditNote(prev=>({...prev,value:e.target.value}))}
+                            onKeyDown={e=>{
+                              if(e.key==='Enter'){onSaveNote(tx.id,tx._type,editNote.value);setEditNote(null);}
+                              if(e.key==='Escape')setEditNote(null);
+                            }}
+                            placeholder="What was this transaction?"
+                            style={{flex:1,border:`1px solid ${C.green}`,borderRadius:7,padding:'4px 8px',
+                              fontSize:12,color:C.ink,background:C.sand,fontFamily:SANS,outline:'none'}}
+                          />
+                          <button onClick={()=>{onSaveNote(tx.id,tx._type,editNote.value);setEditNote(null);}}
+                            style={{border:'none',background:C.green,color:'#fff',borderRadius:7,
+                              padding:'4px 8px',fontSize:12,cursor:'pointer',fontFamily:SANS}}>
+                            Save
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={()=>setEditNote({id:tx.id,type:tx._type,value:tx.note||''})}
+                          style={{border:'none',background:'none',padding:0,cursor:'pointer',
+                            textAlign:'left',width:'100%',marginTop:2}}>
+                          <p style={{margin:0,fontSize:11,fontFamily:SANS,
+                            color:tx.note?C.green:C.inkSoft+'88',fontStyle:tx.note?'normal':'italic'}}>
+                            {tx.note
+                              ? tx.note
+                              : (tx._type==='import'
+                                  ? `${tx.source} import · tap to add note`
+                                  : `${c.label} · tap to add note`)}
+                            {tx.who?' · '+tx.who:''}
+                          </p>
+                        </button>
+                      )}
                     </div>
                     <UserAvatar name={tx.who||'?'} size={22}/>
                     <p style={{margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,color:C.ink,
@@ -1290,6 +1600,8 @@ export default function App() {
   const [catTargets, setCatTargets]=useState({});
   const [suggested,  setSuggested ]=useState({});
   const [toast,      setToast     ]=useState(null);
+  const [showReview, setShowReview]=useState(false);
+  const [otherItems, setOtherItems]=useState([]);
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -1340,6 +1652,26 @@ export default function App() {
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
       if(ai.length>20){const nt=computeTargets(ai);if(Object.keys(nt).length>0)setSuggested(nt);}
     }catch(e){showToast('Load error: '+e.message);}
+  }
+
+  async function openReview() {
+    try {
+      const items = await getOtherImports(year, month);
+      setOtherItems(items);
+      setShowReview(true);
+    } catch(e) { showToast('Could not load items: '+e.message); }
+  }
+
+  async function handleSaveNote(id, type, note) {
+    try {
+      if (type === 'import') {
+        await updateBankImport(id, { note });
+        setImports(prev => prev.map(t => t.id === id ? { ...t, note } : t));
+      } else {
+        await updateTransaction(id, { note });
+        setTxns(prev => prev.map(t => t.id === id ? { ...t, note } : t));
+      }
+    } catch(e) { showToast('Could not save note'); }
   }
 
   useEffect(()=>{
@@ -1436,12 +1768,28 @@ export default function App() {
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} income={income} ccTarget={ccTarget}
           setIncome={setIncome} setCcTarget={setCcTarget} allCats={allCats} catTargets={catTargets}
           onSaveSettings={saveSettings} suggested={suggested} onAcceptSuggested={acceptSuggested}
-          onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}/>}
+          onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
+          onReviewOther={openReview}
+          otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
-          onDeleteTxn={removeTxn} onDeleteImport={removeImport}/>}
+          onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats} year={year} month={month}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll} allCats={allCats}/>}
+
+      {/* OtherReviewModal */}
+      {showReview && otherItems.length > 0 && (
+        <OtherReviewModal
+          items={otherItems}
+          allCats={allCats}
+          onSave={async () => {
+            setShowReview(false);
+            await loadAll();
+            showToast('Categories saved');
+          }}
+          onClose={() => setShowReview(false)}
+        />
+      )}
 
       {/* Bottom nav */}
       <div style={{position:'fixed',bottom:0,left:0,right:0,background:C.white,

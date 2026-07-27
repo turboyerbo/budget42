@@ -58,6 +58,7 @@ create table if not exists bank_imports (
   year int not null,
   month int not null,
   who text default 'jordan',
+  note text default '',          -- user-added description
   created_at timestamptz default now()
 );
 
@@ -195,3 +196,11 @@ VITE_ANTHROPIC_API_KEY = sk-ant-...
 ```
 Get from console.anthropic.com → API Keys. The app works without it but
 unknown merchants will land in "Other" instead of being categorised automatically.
+
+### If upgrading from v4/v5 — run this migration
+
+If you already have the tables from a previous version, run this in SQL Editor:
+
+```sql
+alter table bank_imports add column if not exists note text default '';
+```
