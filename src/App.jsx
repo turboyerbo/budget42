@@ -18,7 +18,7 @@ import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
-import { checkAI } from './claude.js';
+import { checkAI, aiDiagnostics } from './claude.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
@@ -1570,7 +1570,7 @@ function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
 // One button. No bank picker — the AI reads the statement and works out which
 // institution it came from, including documents containing several accounts.
 // Pipeline: pick → [processing] → identify (only if unsure) → validate → review → done
-function UploadTab({showToast, onImported, allCats, aiOn}) {
+function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
   const [who,       setWho]      = useState('jordan');
   const [step,      setStep]     = useState('pick');
   const [fileType,  setFileType] = useState(null);
@@ -1879,21 +1879,42 @@ function UploadTab({showToast, onImported, allCats, aiOn}) {
           </p>
         </div>
       )}
-      {aiOn === false && !csvFailed && (
-        <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:12,
-          padding:'12px 14px', marginBottom:14 }}>
-          <p style={{ margin:'0 0 4px', fontSize:13, fontWeight:700,
-            color:C.amber, fontFamily:SANS }}>
-            Claude isn't connected yet
-          </p>
-          <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS, lineHeight:1.6 }}>
-            CSV upload still works. For PDF reading and smart categorisation, add{' '}
-            <b>ANTHROPIC_API_KEY</b> to your Netlify environment variables and redeploy.
-            There is no <code>VITE_</code> prefix — that prefix is what would leak the
-            key into the browser.
-          </p>
-        </div>
-      )}
+      {aiOn === false && !csvFailed && (() => {
+        const d = aiDiag || {};
+        const rejected = d.reason === 'rejected';
+        return (
+          <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:12,
+            padding:'12px 14px', marginBottom:14 }}>
+            <p style={{ margin:'0 0 4px', fontSize:13, fontWeight:700,
+              color:C.amber, fontFamily:SANS }}>
+              {rejected ? 'Anthropic rejected the API key'
+                        : d.reason === 'missing' ? "Claude isn't connected yet"
+                        : 'Claude is unavailable'}
+            </p>
+            <p style={{ margin:'0 0 8px', fontSize:12, color:'#92400e',
+              fontFamily:SANS, lineHeight:1.6 }}>
+              {rejected
+                ? 'The variable is set, but the value is being refused. Almost always ' +
+                  'this is a key that got truncated when pasted, or one that has been ' +
+                  'revoked. Create a fresh key and paste the whole string.'
+                : d.reason === 'missing'
+                ? <>CSV upload still works. For PDF reading, add <b>ANTHROPIC_API_KEY</b> to
+                    your Netlify environment variables and redeploy. No <code>VITE_</code>{' '}
+                    prefix — that is what would leak the key into the browser.</>
+                : (d.message || 'Could not reach Anthropic from the server.')}
+            </p>
+            {d.present && (
+              <div style={{ background:'rgba(0,0,0,0.05)', borderRadius:7, padding:'7px 10px',
+                fontFamily:'monospace', fontSize:11, color:'#92400e', lineHeight:1.7 }}>
+                <div>key: {d.startsWith} {d.endsWith}</div>
+                <div>length: {d.length} {d.length < 40 ? '← looks truncated' : ''}</div>
+                <div>prefix ok: {d.looksValid ? 'yes' : 'no — should start sk-ant-'}</div>
+                {d.hadWhitespace && <div>note: stray whitespace was trimmed</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {csvFailed && (
         <div style={{ background:'#fffbeb', border:'1.5px solid #b45309',
@@ -2579,6 +2600,7 @@ export default function App() {
   const [showActivity,setShowActivity]=useState(false);
   const [view,       setView      ]=useState('combined');
   const [aiOn,       setAiOn      ]=useState(null); // null = still checking
+  const [aiDiag,     setAiDiag    ]=useState(null);
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -2724,7 +2746,9 @@ export default function App() {
   }
 
   // Ask the serverless function whether the key is configured server-side
-  useEffect(()=>{ checkAI().then(setAiOn).catch(()=>setAiOn(false)); },[]);
+  useEffect(()=>{ checkAI()
+    .then(ok=>{ setAiOn(ok); setAiDiag(aiDiagnostics()); })
+    .catch(()=>setAiOn(false)); },[]);
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(null),2600);}
   function changeMonth(dir){let m=month+dir,y=year;if(m<0){m=11;y--;}if(m>11){m=0;y++;}setMonth(m);setYear(y);}
@@ -2827,7 +2851,7 @@ export default function App() {
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
-          allCats={allCats} aiOn={aiOn}/>}
+          allCats={allCats} aiOn={aiOn} aiDiag={aiDiag}/>}
 
       {/* Partner activity panel */}
       {showActivity && (

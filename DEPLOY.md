@@ -464,3 +464,35 @@ screen says plainly whether Claude is connected rather than guessing.
 
 The CSP no longer needs `https://api.anthropic.com` in `connect-src`, since the
 browser only ever talks to your own domain now.
+
+---
+
+## v15 — key validation and diagnostics
+
+### The problem with v14's health check
+
+It only checked that the environment variable existed and was non-empty. A
+truncated or revoked key passes that test, so the UI cheerfully said "Claude
+connected" and then failed with a 401 on the first real request. Misleading.
+
+The health check now makes a one-token call to Haiku to prove the key actually
+works before claiming it does.
+
+### Whitespace and quotes are stripped
+
+Pasting a key from a browser dialog into a Netlify form frequently drags along a
+trailing newline, a leading space, or a pair of quotes. Every one of those
+produces a 401 that is indistinguishable from a wrong key. The function now
+trims whitespace and strips surrounding quotes before use.
+
+### Diagnostics in the UI
+
+When the key is refused, the upload screen shows the first 11 and last 4
+characters, the length, whether the `sk-ant-` prefix is present, and whether
+whitespace had to be trimmed. Enough to spot a truncated paste at a glance
+without revealing the secret.
+
+### Checking it yourself
+
+Visit `https://your-site.netlify.app/api/claude?verify=1` in a browser. It
+returns JSON showing whether the key is present and whether Anthropic accepts it.
