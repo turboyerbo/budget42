@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "eslint src netlify && vite build",
+    "build": "eslint src netlify && node test/run.mjs && vite build",
     "preview": "vite preview",
-    "lint": "eslint src netlify"
+    "lint": "eslint src netlify",
+    "test": "node test/run.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

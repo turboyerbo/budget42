@@ -621,3 +621,83 @@ recurring charges. `FIXED`, `SUBS` and `UPCOMING` are deleted.
 
 `pdf-lib` is loaded on demand rather than at startup, so the initial bundle
 stays around 500KB instead of 940KB.
+
+---
+
+## v19 — the white-screen fix, and tests that would have caught it
+
+### The bug
+
+`HomeTab` computed `committed` from `everythingThisMonth` several lines above
+where that variable was declared. Reading a `const` before its declaration is a
+temporal dead zone error, so React threw during render and the whole app showed
+a blank screen.
+
+`no-undef` could not see it, because the name does exist — just not yet.
+
+### Two guards added
+
+**`no-use-before-define`** in eslint. Verified by reintroducing the bug and
+confirming the lint fails.
+
+**A smoke test that actually renders.** `npm test` mounts every tab with mock
+data using `renderToString`. A build only proves the code parses; all three
+runtime bugs shipped in the last few versions parsed perfectly and then threw on
+first render.
+
+Coverage includes both view modes, and the empty-history case, which is what a
+new user sees.
+
+Verified by reintroducing the exact bug: the smoke test fails with
+`Cannot access 'everythingThisMonth' before initialization` across all three
+HomeTab cases.
+
+Both now run as part of `npm run build`:
+
+```json
+"build": "eslint src netlify && node test/run.mjs && vite build"
+```
+
+Netlify runs `npm run build`, so a broken render fails the deploy rather than
+reaching a phone.
+
+The tab components are exported now solely so the test can render them in
+isolation.
+
+---
+
+## v20 — telling which build is actually running
+
+### Diagnosing "the fix didn't work"
+
+The reported error referenced bundle `index-PbR8mguP.js`, the identical hash
+from before the fix. A Vite bundle hash is derived from its content, so an
+unchanged hash means unchanged code: the browser was running the old build.
+
+That is hard to spot, so v20 makes it obvious.
+
+**Console stamp on boot:**
+
+```
+Budget For Two v20   built 2026-07-27 22:05 UTC
+```
+
+**Footer on the Upload screen** showing the same thing, for checking on a phone
+where there is no console.
+
+If that timestamp does not move after a deploy, nothing new has loaded and the
+problem is the deploy, not the code.
+
+### Cache headers
+
+`index.html` is now `max-age=0, must-revalidate`, while hashed assets in
+`/assets/*` are `immutable` for a year. Previously `index.html` could be served
+from cache, which pins the browser to whichever bundle that old HTML references
+no matter how many times you deploy.
+
+### Test coverage completed
+
+Every renderable component is now in the smoke test, including screens only
+reachable through interaction: AuthScreen, AddTab, AddCatModal,
+OtherReviewModal, ActivityPanel, and UploadTab in its key-rejected state. All
+pass, so there is no second temporal dead zone hiding in an unrendered branch.

@@ -184,7 +184,7 @@ function Spinner({size=16}) {
 
 // ─── Processing Modal ─────────────────────────────────────────────────────────
 // Shows during CSV upload so users know exactly what's happening and don't close the window
-function ProcessingModal({stage, fileName, rowCount, aiCount}) {
+export function ProcessingModal({stage, fileName, rowCount, aiCount}) {
   const stages = {
     reading: {
       title: 'Reading your statement',
@@ -238,7 +238,7 @@ function ProcessingModal({stage, fileName, rowCount, aiCount}) {
 }
 
 // ─── Auth Screen (Sign Up / Sign In) ─────────────────────────────────────────
-function AuthScreen({onAuth}) {
+export function AuthScreen({onAuth}) {
   const [mode,     setMode]    = useState('signup'); // 'signup' | 'signin'
   const [name,     setName]    = useState('');
   const [email,    setEmail]   = useState('');
@@ -405,7 +405,7 @@ function AuthScreen({onAuth}) {
 }
 
 // ─── Add Category Modal ───────────────────────────────────────────────────────
-function AddCatModal({onSave,onClose}) {
+export function AddCatModal({onSave,onClose}) {
   const [label, setLabel] = useState('');
   const [target,setTarget]= useState(100);
   const [icon,  setIcon]  = useState('Tag');
@@ -466,7 +466,7 @@ function AddCatModal({onSave,onClose}) {
 // ─── OtherReviewModal ─────────────────────────────────────────────────────────
 // Shows all transactions still in "Other" so the user can re-categorise them.
 // Each row has: description, date, amount, category dropdown, note field, AI button.
-function OtherReviewModal({ items, allCats, onSave, onClose }) {
+export function OtherReviewModal({ items, allCats, onSave, onClose }) {
   // Local edits: { id: { category, note } }
   const [edits,   setEdits]   = useState(() =>
     Object.fromEntries(items.map(t => [t.id, { category: t.category || 'other', note: t.note || '' }]))
@@ -716,12 +716,16 @@ function OtherReviewModal({ items, allCats, onSave, onClose }) {
 }
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
-function HomeTab({txns,bankImports,ccTarget,setCcTarget,
+export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
+  const me=firstName(profile?.name);
+  const everything=[...txns,...bankImports];
+  const everythingThisMonth=everything;   // both people, before the view filter
+
   // Recurring charges are worked out from your own history rather than kept in
   // a hardcoded list. Only what has NOT yet been charged counts as committed —
   // anything already charged is sitting in `spent`, and adding both double counts.
@@ -736,9 +740,6 @@ function HomeTab({txns,bankImports,ccTarget,setCcTarget,
 
   const committed = dueTotal + ccStillDue;
 
-  const me=firstName(profile?.name);
-  const everything=[...txns,...bankImports];
-  const everythingThisMonth=everything;   // both people, before the view filter
 
   // "Mine" shows only your own transactions. "Combined" shows the household.
   const allTx = view==='mine'
@@ -1237,7 +1238,7 @@ function HomeTab({txns,bankImports,ccTarget,setCcTarget,
 }
 
 // ─── ADD TAB ──────────────────────────────────────────────────────────────────
-function AddTab({profile,allCats,onAdd}) {
+export function AddTab({profile,allCats,onAdd}) {
   const [cat,   setCat]   = useState(null);
   const [amount,setAmount]= useState('');
   const [note,  setNote]  = useState('');
@@ -1321,7 +1322,7 @@ function AddTab({profile,allCats,onAdd}) {
 }
 
 // ─── HISTORY TAB ──────────────────────────────────────────────────────────────
-function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveNote}) {
+export function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveNote}) {
   const { shared:sharedMoments } = findSharedMoments([...txns,...bankImports]);
   const [filter,   setFilter]   = useState('all');
   const [srcFil,   setSrcFil]   = useState('all');
@@ -1448,7 +1449,7 @@ function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveN
 }
 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
-function BillsTab({history,txns,bankImports,allCats}) {
+export function BillsTab({history,txns,bankImports,allCats}) {
   const recurring = detectRecurring(history || []);
   const { paid, due, dueTotal, paidTotal } =
     splitRecurring(recurring, [...txns, ...bankImports]);
@@ -1561,7 +1562,7 @@ function BillsTab({history,txns,bankImports,allCats}) {
 }
 
 // ─── CHARTS TAB ───────────────────────────────────────────────────────────────
-function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
+export function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
   const me=firstName(profile?.name);
   const [view,setView]=useState('month'); // 'month' | 'year'
   const [annualData,setAnnualData]=useState([]);
@@ -1689,7 +1690,7 @@ function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
 // One button. No bank picker — the AI reads the statement and works out which
 // institution it came from, including documents containing several accounts.
 // Pipeline: pick → [processing] → identify (only if unsure) → validate → review → done
-function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
+export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
   const [who,       setWho]      = useState('jordan');
   const [step,      setStep]     = useState('pick');
   const [fileType,  setFileType] = useState(null);
@@ -2130,6 +2131,10 @@ function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
       <p style={{ textAlign:'center', fontSize:12, color:C.inkSoft,
         marginTop:10, fontFamily:SANS, lineHeight:1.6 }}>
         CSV or PDF · The bank is detected automatically
+      </p>
+      <p style={{ textAlign:'center', fontSize:10, color:C.sandDark,
+        marginTop:14, marginBottom:16, fontFamily:'monospace' }}>
+        {__APP_VERSION__} · built {__BUILD_ID__}
       </p>
     </div>
   );
@@ -2629,7 +2634,7 @@ function describeChange(payload, allCats) {
   return { who:name, text:`${name} made a change` };
 }
 
-function ActivityPanel({ items, onClose, onClear }) {
+export function ActivityPanel({ items, onClose, onClear }) {
   return (
     <div style={{ position:'fixed', inset:0, zIndex:700,
       display:'flex', flexDirection:'column', justifyContent:'flex-end' }}>
