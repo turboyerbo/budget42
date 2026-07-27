@@ -1709,10 +1709,19 @@ function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
         return;
       }
       setModal({ title:'Claude is reading your statement',
-        sub:'Working out which bank it is from and pulling every transaction off each page. This takes 10–30 seconds.' });
+        sub:'Working out which bank it is from and pulling the transactions off each page.' });
       await tick();
       try {
-        const result = await parsePDFStatement(file);
+        const result = await parsePDFStatement(file, p => {
+          // Long documents are read in batches of pages so each request stays
+          // well inside the serverless time limit
+          setModal(p.batches > 1
+            ? { title:`Reading pages ${p.from}–${p.to} of ${p.total}`,
+                sub:`Batch ${p.batch} of ${p.batches}. Long statements are read a few pages `
+                  + `at a time so nothing times out. Please keep this page open.` }
+            : { title:'Claude is reading your statement',
+                sub:'Pulling the transactions off each page.' });
+        });
         setAccounts(result.accounts || []);
         setWarnings(result.warnings || []);
         if (!result.rows.length) {

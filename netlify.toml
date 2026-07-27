@@ -3,6 +3,12 @@
   publish   = "dist"
   functions = "netlify/functions"
 
+# Netlify caps synchronous functions at 10s by default. PDF reading is split
+# into small page batches client-side so each call finishes well inside this,
+# but the headroom helps on slower statements.
+[functions]
+  node_bundler = "esbuild"
+
 [[redirects]]
   from   = "/*"
   to     = "/index.html"

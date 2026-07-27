@@ -496,3 +496,40 @@ without revealing the secret.
 
 Visit `https://your-site.netlify.app/api/claude?verify=1` in a browser. It
 returns JSON showing whether the key is present and whether Anthropic accepts it.
+
+---
+
+## v16 — PDFs are read in page batches
+
+### Why 504 happened
+
+Moving the API key server-side put every Claude call behind a Netlify function,
+and those have an execution ceiling of roughly 10 seconds. Sending a twelve-page
+statement in one request runs well past that, so the gateway gave up and
+returned 504. Calling Anthropic directly from the browser had no such limit,
+which is why this only appeared after v14.
+
+### The fix
+
+`src/pdfsplit.js` splits the document client-side with `pdf-lib` into batches of
+three pages. Each batch is a separate short request that finishes comfortably
+inside the limit. Verified against a ten-page document: four batches, no pages
+lost.
+
+Side benefits:
+
+- Real progress instead of a spinner. The modal now reads "Reading pages 4-6 of
+  10 · batch 2 of 4".
+- One failed batch no longer destroys the whole import. The pages that worked
+  are kept and a warning names the pages that did not.
+
+Account keys are namespaced per batch before merging, since Claude numbers them
+`acct1` independently in each request and they would otherwise collide.
+
+### If you still hit a timeout
+
+Reduce the batch size in `pdf.js`:
+
+```js
+const batches = await splitPDF(file, 3);   // try 2, or 1
+```

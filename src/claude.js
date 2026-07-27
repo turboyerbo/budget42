@@ -56,6 +56,13 @@ export async function callClaude(payload) {
       'belongs to a different account. Create a fresh key and paste the whole thing.'
     );
   }
+  if (res.status === 504 || res.status === 502) {
+    throw new Error(
+      'That request took longer than the server allows. Long PDFs are read a few ' +
+      'pages at a time to avoid this, so if you are seeing it, the statement pages ' +
+      'may be unusually dense. Try exporting a shorter date range.'
+    );
+  }
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.json())?.error?.message || ''; } catch {}
