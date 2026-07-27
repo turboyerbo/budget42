@@ -1,3 +1,4 @@
+import { MODEL_SMART, MODEL_FAST } from './models.js';
 /**
  * Claude API integration for smart transaction categorisation.
  * Called for transactions the rule-based system couldn't categorise
@@ -25,7 +26,7 @@ export async function aiCategorize(transactions, catIds) {
       'anthropic-version':  '2023-06-01',
     },
     body: JSON.stringify({
-      model:      'claude-sonnet-4-6',
+      model:      MODEL_FAST,
       max_tokens: 1024,
       messages: [{
         role:    'user',
@@ -128,7 +129,7 @@ export async function suggestCategory(description, amount, catIds) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: MODEL_FAST,
         max_tokens: 200,
         messages: [{
           role: 'user',
@@ -189,7 +190,7 @@ export async function spendingInsight(newRows, historical, catLabels) {
       headers: { 'Content-Type':'application/json', 'x-api-key':KEY,
                  'anthropic-version':'2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: MODEL_SMART,
         max_tokens: 500,
         messages: [{ role:'user', content:
           `A user just imported a bank statement into their household budget app.\n` +

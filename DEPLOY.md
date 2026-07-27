@@ -402,3 +402,23 @@ Statements imported before this version had their income rows dropped at import
 time. Those deposits are not recoverable from the database. Re-import any
 statement whose income you want reflected, and the duplicate checker will keep
 the spending rows from being counted twice.
+
+---
+
+## v13 — corrected model strings
+
+The app was calling `claude-sonnet-4-6`, which is not in the current model
+lineup. Every AI feature would have failed with a 400 invalid model error the
+moment an API key was added.
+
+Models now live in `src/models.js`:
+
+```js
+export const MODEL_SMART = 'claude-sonnet-5';            // PDF vision, insight
+export const MODEL_FAST  = 'claude-haiku-4-5-20251001';  // categorising, bank ID
+```
+
+Reading a multi-page PDF and reasoning about spending patterns uses the
+stronger model. Sorting a merchant name into one of fifteen buckets does not,
+and those calls happen in bulk, so they use the cheaper faster one. Change both
+in one file if the lineup moves again.

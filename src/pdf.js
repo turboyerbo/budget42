@@ -1,3 +1,4 @@
+import { MODEL_SMART } from './models.js';
 /**
  * PDF bank statement parser using Claude's native document vision.
  * When a CSV fails or a bank's CSV export is unusable, the user can
@@ -103,7 +104,7 @@ RULES — follow exactly:
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model:      'claude-sonnet-4-6',
+      model:      MODEL_SMART,
       max_tokens: 8192,
       messages: [{
         role: 'user',

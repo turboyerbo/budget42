@@ -1,3 +1,4 @@
+import { MODEL_FAST } from './models.js';
 /**
  * Bank / account auto-detection.
  * The user should never have to tell us which bank a file came from —
@@ -66,7 +67,7 @@ export async function aiIdentifyBank(text) {
       headers:{ 'Content-Type':'application/json', 'x-api-key':KEY,
                 'anthropic-version':'2023-06-01' },
       body: JSON.stringify({
-        model:'claude-sonnet-4-6', max_tokens:200,
+        model:MODEL_FAST, max_tokens:200,
         messages:[{ role:'user', content:
           `This is the beginning of a Canadian bank or credit card statement.\n` +
           `Identify which institution it is from. Valid ids: ${ids.join(', ')}\n\n` +
