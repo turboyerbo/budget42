@@ -106,6 +106,20 @@ export function subscribeToMonth(year, month, onTxn, onSettings, onImport) {
   return () => supabase.removeChannel(ch);
 }
 
+// Listen for ANY change across the whole budget, regardless of month.
+// Used to notify the other partner that an update was made.
+export function subscribeToPartnerActivity(onChange) {
+  const ch = supabase.channel('partner-activity')
+    .on('postgres_changes',{event:'*',schema:'public',table:'transactions'},
+      p => onChange({ ...p, table:'transactions' }))
+    .on('postgres_changes',{event:'*',schema:'public',table:'bank_imports'},
+      p => onChange({ ...p, table:'bank_imports' }))
+    .on('postgres_changes',{event:'*',schema:'public',table:'budget_settings'},
+      p => onChange({ ...p, table:'budget_settings' }))
+    .subscribe();
+  return () => supabase.removeChannel(ch);
+}
+
 // ── Update single bank import (category + note) ───────────────────────────────
 export async function updateBankImport(id, updates) {
   const { error } = await supabase
@@ -133,6 +147,15 @@ export async function getOtherImports(year, month) {
     .eq('month', month)
     .eq('category', 'other')
     .order('date', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+// Full fields needed for duplicate detection
+export async function getAllBankImportsRaw() {
+  const { data, error } = await supabase
+    .from('bank_imports')
+    .select('id,date,amount,description,category,source');
   if (error) throw error;
   return data || [];
 }

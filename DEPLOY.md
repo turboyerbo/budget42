@@ -204,3 +204,41 @@ If you already have the tables from a previous version, run this in SQL Editor:
 ```sql
 alter table bank_imports add column if not exists note text default '';
 ```
+
+---
+
+## v7 — PDF upload, smart data checks, partner notifications
+
+### Required Netlify environment variable
+
+PDF parsing and AI categorisation both run through the Claude API:
+
+```
+VITE_ANTHROPIC_API_KEY = sk-ant-...
+```
+
+Without it the app still works, but PDF upload is disabled and unrecognised
+merchants land in "Other" instead of being categorised automatically.
+
+### Supabase realtime — required for partner notifications
+
+The bell icon in the header only lights up if realtime is enabled on all three
+tables. If you set this up in an earlier version you already have it. To confirm,
+run in SQL Editor:
+
+```sql
+alter publication supabase_realtime add table transactions;
+alter publication supabase_realtime add table budget_settings;
+alter publication supabase_realtime add table bank_imports;
+```
+
+Re-running these is harmless if they're already added.
+
+### No new tables in v7
+
+v7 adds no schema changes. If you're coming from v5 or earlier, you still need
+the one v6 migration:
+
+```sql
+alter table bank_imports add column if not exists note text default '';
+```
