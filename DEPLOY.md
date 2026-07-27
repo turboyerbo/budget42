@@ -533,3 +533,36 @@ Reduce the batch size in `pdf.js`:
 ```js
 const batches = await splitPDF(file, 3);   // try 2, or 1
 ```
+
+---
+
+## v17 — two runtime bugs, and a guard against repeating them
+
+### `PROMPT is not defined`
+
+The v16 rewrite of `pdf.js` replaced the whole function body, and the prompt
+constant lived inside it. Every PDF upload threw a ReferenceError before doing
+any work. `vite build` reported success because an undefined reference is a
+runtime error, not a syntax error.
+
+The prompt now sits at module scope where refactoring the caller cannot remove it.
+
+### `income is not defined`
+
+Same class of bug, introduced back in v12. Removing the manual income editor
+left one reference behind in the CTFS payment-target input, so editing that
+field had been throwing since then. `saveSettings` now takes only the
+credit-card target, since income is derived from transactions.
+
+### The guard
+
+`eslint` with `no-undef` now runs as part of `npm run build`:
+
+```json
+"build": "eslint src netlify && vite build"
+```
+
+A broken reference fails the build instead of reaching the browser. Verified by
+deliberately renaming the constant and confirming the build refuses.
+
+Netlify runs `npm run build`, so this protects deploys too.

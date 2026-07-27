@@ -18,6 +18,70 @@ export const PDF_AVAILABLE = true;
  *   rawCount  — how many raw transactions Claude found before filtering
  *   warnings  — human-readable notes from Claude about the document
  */
+
+// Sent with every page batch. Kept at module scope so it is defined exactly
+// once and cannot go missing when the calling code is refactored.
+const PROMPT = `You are analyzing a Canadian bank or credit card statement PDF.
+
+IMPORTANT: this document may contain MORE THAN ONE account (for example a
+chequing statement and a credit card statement bundled together, or several
+months). Identify every account present and tag each transaction with the
+account it belongs to. You may be given only a few pages of a longer statement;
+that is expected. Report what you can see.
+
+Return a JSON object with this exact structure:
+{
+  "accounts": [
+    {
+      "key": "acct1",
+      "institution": "BMO|CTFS|WS_JOINT|WS_PERS|PC_MC|CIBC|UNKNOWN",
+      "institutionName": "the name printed on the statement",
+      "accountLabel": "e.g. Chequing ****4073",
+      "kind": "bank|credit",
+      "period": "statement period if visible",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "warnings": ["anything the user should double-check"],
+  "transactions": [
+    {
+      "account": "acct1",
+      "date": "YYYY-MM-DD",
+      "description": "exact merchant/payee name",
+      "amount": 87.43,
+      "type": "debit",
+      "confidence": "high|medium|low"
+    }
+  ]
+}
+
+INSTITUTION MAPPING — map what is printed on the statement to these ids:
+- Bank of Montreal / BMO            -> BMO
+- Canadian Tire / Triangle / CTFS   -> CTFS
+- Wealthsimple, joint account       -> WS_JOINT
+- Wealthsimple, personal account    -> WS_PERS
+- PC Financial / President's Choice -> PC_MC
+- CIBC                              -> CIBC
+- anything else / not stated        -> UNKNOWN
+
+RULES — follow exactly:
+- date: must be YYYY-MM-DD. If only month/day is visible, infer the year from the statement period.
+- amount: always a positive number (absolute value).
+- type: "debit" = money spent/withdrawn/charged. "credit" = money received/deposited/refunded.
+- account: must match one of the "key" values you defined in "accounts".
+- If only one account is present, still return the accounts array with a single entry.
+- If no account details are visible on these pages, use key "acct1" and institution "UNKNOWN".
+- confidence: "low" if the row was hard to read (blurry, cut off, partial).
+- INCLUDE: purchases, withdrawals, transfers out, service charges, interest charges.
+- INCLUDE as type "credit": deposits, payroll, refunds, e-transfers received.
+- EXCLUDE: opening balance, closing balance, running totals, page headers.
+- EXCLUDE rows that are purely labels with no transaction (e.g. "Previous balance").
+- If a transaction appears twice on the same date for the same amount, include BOTH
+  and add a warning — the user will confirm whether it is a real repeat purchase.
+- Do NOT skip any transaction. Better to include an uncertain row than to miss it.
+- If these pages contain no transactions at all, return an empty transactions array.
+- Return ONLY the JSON object. No markdown, no explanation.`;
+
 export async function parsePDFStatement(file, onProgress) {
   if (file.size > 25 * 1024 * 1024) {
     throw new Error('That PDF is larger than 25MB. Try splitting it, or export a shorter date range.');

@@ -859,7 +859,7 @@ function HomeTab({txns,bankImports,ccTarget,setCcTarget,
           <div style={{display:'flex',alignItems:'center',gap:6}}>
             <span style={{fontSize:12,color:'#9b2c2c',fontFamily:SANS}}>Payment target: $</span>
             <input type="number" value={ccTarget}
-              onChange={e=>{const v=parseFloat(e.target.value)||0;setCcTarget(v);onSaveSettings(income,v);}}
+              onChange={e=>{const v=parseFloat(e.target.value)||0;setCcTarget(v);onSaveSettings(v);}}
               style={{width:68,border:`1px solid ${C.red}44`,borderRadius:7,padding:'3px 7px',
                 fontSize:13,fontWeight:600,color:C.red,background:'#fff',fontFamily:SANS}}/>
           </div>
@@ -2746,11 +2746,12 @@ export default function App() {
 
   // ── Debounced settings save ──────────────────────────────────────────────────
   const saveRef=useRef(null);
-  async function saveSettings(incomeVal,ccVal){
-    const inc=incomeVal??income; const cc=ccVal??ccTarget;
+  async function saveSettings(ccVal){
+    const cc = ccVal ?? ccTarget;
     if(saveRef.current)clearTimeout(saveRef.current);
     saveRef.current=setTimeout(async()=>{
-      try{await upsertSettings(year,month,inc,cc);}catch{}
+      // income is derived from transactions now; only the CC target is stored
+      try{await upsertSettings(year,month,{},cc);}catch{}
     },800);
   }
 
