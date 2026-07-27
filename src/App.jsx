@@ -99,21 +99,43 @@ function parseCSVRow(line) {
 
 function parseStatementCSV(text, source) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  let headerIdx = -1; let headers = [];
+  let headerIdx = -1; let headers = []; let rawHeaders = [];
 
-  // Find header row
-  for (let i = 0; i < Math.min(15, lines.length); i++) {
-    const cols = parseCSVRow(lines[i]).map(c => c.toLowerCase().replace(/[^a-z0-9_ ]/g,'').trim());
+  // Find header row — scan first 20 lines
+  for (let i = 0; i < Math.min(20, lines.length); i++) {
+    const raw  = parseCSVRow(lines[i]);
+    // Strip to lowercase alphanumeric + underscore + space for matching
+    const cols = raw.map(c => c.replace(/['"]/g,'').toLowerCase().replace(/[^a-z0-9_ ]/g,'').trim());
     const hasDate = cols.some(c => c.includes('date'));
-    const hasAmt  = cols.some(c => c.includes('amount') || c.includes('cad') || c.includes('net_cash'));
-    const hasDesc = cols.some(c => c.includes('desc') || c.includes('name'));
-    if (hasDate && hasAmt) { headerIdx = i; headers = cols; break; }
+    const hasAmt  = cols.some(c =>
+      c === 'cad' || c.startsWith('cad') ||
+      c.includes('amount') || c.includes('cash') || c === 'usd'
+    );
+    if (hasDate && hasAmt && cols.some(c => c.length > 1)) {
+      headerIdx = i; headers = cols; rawHeaders = raw; break;
+    }
   }
   if (headerIdx < 0) return [];
 
-  const dateIdx = headers.findIndex(c => c.includes('transaction_date') || c.includes('transaction date') || c === 'date');
-  const descIdx = headers.findIndex(c => c.includes('description') || c.includes('desc') || c.includes('name'));
-  const amtIdx  = headers.findIndex(c => c === 'cad$' || c === 'amount' || c === 'net_cash_amount' || c.includes('amount'));
+  const dateIdx = headers.findIndex(c =>
+    c === 'transaction_date' || c === 'transaction date' || c === 'date' || c.includes('transaction date')
+  );
+  const descIdx = headers.findIndex(c =>
+    c === 'description' || c.includes('description') || c.includes('desc') ||
+    (c.includes('name') && !c.includes('account') && !c.includes('currency'))
+  );
+  // FIX: 'CAD$' → strip special chars → 'cad' (not 'cad$'). Also catch net_cash_amount.
+  const amtIdx = headers.findIndex(c =>
+    c === 'cad' || c === 'cad$' || c === 'amount' ||
+    c === 'net_cash_amount' || c.includes('amount') ||
+    (c.startsWith('cad') && c.length <= 5)
+  );
+
+  // Guard: bail if any required column wasn't found
+  if (dateIdx < 0 || descIdx < 0 || amtIdx < 0) {
+    console.warn('[CSV parser] column detection failed', { dateIdx, descIdx, amtIdx, headers });
+    return [];
+  }
 
   const rows = [];
   for (let i = headerIdx + 1; i < lines.length; i++) {
@@ -121,8 +143,8 @@ function parseStatementCSV(text, source) {
     if (cols.length < 3) continue;
     const date = cols[dateIdx]?.replace(/['"]/g,'').trim();
     const desc = cols[descIdx]?.replace(/['"]/g,'').trim();
-    const raw  = cols[amtIdx]?.replace(/['"$, ]/g,'').trim();
-    if (!date || !desc || !raw || isNaN(parseFloat(raw))) continue;
+    const raw  = cols[amtIdx]?.replace(/['"$,+ ]/g,'').trim(); // strip $, commas, + sign
+    if (!date || !desc || !raw || raw === '' || isNaN(parseFloat(raw))) continue;
 
     const amount = Math.abs(parseFloat(raw));
     if (amount < 0.50) continue; // skip tiny amounts
@@ -138,6 +160,43 @@ function parseStatementCSV(text, source) {
     });
   }
   return rows;
+}
+
+// ─── B42 Logo ─────────────────────────────────────────────────────────────────
+
+function B42Logo({ size = 48 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <rect width="64" height="64" rx="14" fill="#16a34a" />
+      <text
+        x="32" y="44"
+        fontFamily="Georgia, 'Times New Roman', serif"
+        fontSize="26"
+        fontWeight="700"
+        fill="white"
+        textAnchor="middle"
+        letterSpacing="-1"
+      >b42</text>
+    </svg>
+  );
+}
+
+// Compact inline badge for the header bar
+function B42Badge() {
+  return (
+    <svg width="36" height="22" viewBox="0 0 64 40" xmlns="http://www.w3.org/2000/svg">
+      <rect width="64" height="40" rx="8" fill="#16a34a" />
+      <text
+        x="32" y="29"
+        fontFamily="Georgia, 'Times New Roman', serif"
+        fontSize="22"
+        fontWeight="700"
+        fill="white"
+        textAnchor="middle"
+        letterSpacing="-1"
+      >b42</text>
+    </svg>
+  );
 }
 
 // ─── UI Atoms ─────────────────────────────────────────────────────────────────
@@ -186,7 +245,7 @@ function SetupScreen() {
   return (
     <div style={{ minHeight:'100dvh', display:'flex', flexDirection:'column',
       alignItems:'center', justifyContent:'center', padding:32, background:'#f8fafc' }}>
-      <div style={{ fontSize:52, marginBottom:8 }}>⚙️</div>
+      <div style={{ marginBottom:16 }}><B42Logo size={64} /></div>
       <h1 style={{ fontSize:22, fontWeight:800, margin:'0 0 8px', color:'#0f172a' }}>
         Supabase not connected
       </h1>
@@ -210,12 +269,12 @@ function UserPicker({ onPick }) {
   return (
     <div style={{ minHeight:'100dvh', display:'flex', flexDirection:'column',
       alignItems:'center', justifyContent:'center', padding:32, background:'#f8fafc' }}>
-      <div style={{ fontSize:52, marginBottom:6 }}>🏠</div>
-      <h1 style={{ fontSize:26, fontWeight:800, margin:'0 0 6px', color:'#0f172a', letterSpacing:'-0.03em' }}>
-        Home budget
+      <div style={{ marginBottom:16 }}><B42Logo size={72} /></div>
+      <h1 style={{ fontSize:28, fontWeight:800, margin:'0 0 4px', color:'#0f172a', letterSpacing:'-0.04em' }}>
+        Budget For Two
       </h1>
-      <p style={{ fontSize:15, color:'#64748b', margin:'0 0 40px', textAlign:'center' }}>
-        Jordan & Ness — live shared tracking
+      <p style={{ fontSize:13, color:'#16a34a', fontWeight:600, margin:'0 0 32px', letterSpacing:'0.06em', textTransform:'uppercase' }}>
+        Jordan &amp; Ness
       </p>
       {Object.values(USERS).map(u => (
         <button key={u.key} onClick={() => onPick(u.key)} style={{
@@ -965,19 +1024,23 @@ export default function App() {
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
 
       {/* Header */}
-      <div style={{ background:'#fff', borderBottom:'1px solid #f1f5f9', padding:'10px 14px 8px',
+      <div style={{ background:'#fff', borderBottom:'1px solid #f1f5f9', padding:'8px 14px',
         position:'sticky', top:0, zIndex:10, display:'flex', alignItems:'center', gap:8 }}>
+        {/* b42 badge */}
+        <B42Badge />
+        {/* Month navigation */}
         <button onClick={()=>changeMonth(-1)} style={{ border:'1px solid #e5e7eb', borderRadius:8,
-          padding:'5px 10px', background:'#fff', fontSize:16, color:'#374151', lineHeight:1, cursor:'pointer' }}>‹</button>
+          padding:'4px 9px', background:'#fff', fontSize:16, color:'#374151', lineHeight:1, cursor:'pointer' }}>‹</button>
         <div style={{ flex:1, textAlign:'center' }}>
-          <p style={{ margin:0, fontSize:16, fontWeight:800, color:'#0f172a', letterSpacing:'-0.02em' }}>
+          <p style={{ margin:0, fontSize:14, fontWeight:800, color:'#0f172a', letterSpacing:'-0.02em' }}>
             {MONTHS[month]} {year}
           </p>
         </div>
         <button onClick={()=>changeMonth(1)} style={{ border:'1px solid #e5e7eb', borderRadius:8,
-          padding:'5px 10px', background:'#fff', fontSize:16, color:'#374151', lineHeight:1, cursor:'pointer' }}>›</button>
+          padding:'4px 9px', background:'#fff', fontSize:16, color:'#374151', lineHeight:1, cursor:'pointer' }}>›</button>
+        {/* User switcher */}
         <button onClick={switchUser} style={{ border:'none', borderRadius:99, padding:'5px 10px 5px 6px',
-          background:u.bg, display:'flex', alignItems:'center', gap:5, marginLeft:4, cursor:'pointer' }}>
+          background:u.bg, display:'flex', alignItems:'center', gap:5, cursor:'pointer' }}>
           <Avatar who={user} size={20} />
           <span style={{ fontSize:11, fontWeight:800, color:u.color }}>{u.name}</span>
         </button>
