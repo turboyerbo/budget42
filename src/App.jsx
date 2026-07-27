@@ -18,6 +18,7 @@ import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
+import { checkAI } from './claude.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
@@ -1569,7 +1570,7 @@ function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
 // One button. No bank picker — the AI reads the statement and works out which
 // institution it came from, including documents containing several accounts.
 // Pipeline: pick → [processing] → identify (only if unsure) → validate → review → done
-function UploadTab({showToast, onImported, allCats}) {
+function UploadTab({showToast, onImported, allCats, aiOn}) {
   const [who,       setWho]      = useState('jordan');
   const [step,      setStep]     = useState('pick');
   const [fileType,  setFileType] = useState(null);
@@ -1701,8 +1702,10 @@ function UploadTab({showToast, onImported, allCats}) {
     setFileType(isPDF ? 'pdf' : 'csv');
 
     if (isPDF) {
-      if (!PDF_AVAILABLE) {
-        setError('PDF reading needs VITE_ANTHROPIC_API_KEY set in your Netlify environment variables.');
+      if (aiOn === false) {
+        setError('PDF reading needs ANTHROPIC_API_KEY set in your Netlify environment '
+          + 'variables. Note: no VITE_ prefix — the key stays on the server. '
+          + 'CSV upload works without it.');
         return;
       }
       setModal({ title:'Claude is reading your statement',
@@ -1867,6 +1870,31 @@ function UploadTab({showToast, onImported, allCats}) {
         </p>
       </div>
 
+      {aiOn === true && !csvFailed && (
+        <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd', borderRadius:12,
+          padding:'10px 14px', marginBottom:14, display:'flex', gap:8, alignItems:'center' }}>
+          <Sparkles size={13} color={C.purple}/>
+          <p style={{ margin:0, fontSize:12, color:'#5b21b6', fontFamily:SANS }}>
+            Claude connected — PDF reading, smart categorisation and data checks are active.
+          </p>
+        </div>
+      )}
+      {aiOn === false && !csvFailed && (
+        <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:12,
+          padding:'12px 14px', marginBottom:14 }}>
+          <p style={{ margin:'0 0 4px', fontSize:13, fontWeight:700,
+            color:C.amber, fontFamily:SANS }}>
+            Claude isn't connected yet
+          </p>
+          <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS, lineHeight:1.6 }}>
+            CSV upload still works. For PDF reading and smart categorisation, add{' '}
+            <b>ANTHROPIC_API_KEY</b> to your Netlify environment variables and redeploy.
+            There is no <code>VITE_</code> prefix — that prefix is what would leak the
+            key into the browser.
+          </p>
+        </div>
+      )}
+
       {csvFailed && (
         <div style={{ background:'#fffbeb', border:'1.5px solid #b45309',
           borderRadius:14, padding:'16px', marginBottom:14 }}>
@@ -1889,7 +1917,7 @@ function UploadTab({showToast, onImported, allCats}) {
               )}
             </div>
           </div>
-          {PDF_AVAILABLE ? (
+          {aiOn !== false ? (
             <label style={{ display:'block', padding:'14px', borderRadius:11,
               background:C.amber, cursor:'pointer', textAlign:'center',
               fontSize:14, fontWeight:700, color:'#fff', fontFamily:SANS,
@@ -1901,7 +1929,7 @@ function UploadTab({showToast, onImported, allCats}) {
             </label>
           ) : (
             <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS }}>
-              Add <b>VITE_ANTHROPIC_API_KEY</b> to your Netlify environment variables
+              Add <b>ANTHROPIC_API_KEY</b> to your Netlify environment variables
               to enable PDF reading.
             </p>
           )}
@@ -2550,6 +2578,7 @@ export default function App() {
   const [notifs,     setNotifs    ]=useState([]);
   const [showActivity,setShowActivity]=useState(false);
   const [view,       setView      ]=useState('combined');
+  const [aiOn,       setAiOn      ]=useState(null); // null = still checking
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -2694,6 +2723,9 @@ export default function App() {
     },800);
   }
 
+  // Ask the serverless function whether the key is configured server-side
+  useEffect(()=>{ checkAI().then(setAiOn).catch(()=>setAiOn(false)); },[]);
+
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(null),2600);}
   function changeMonth(dir){let m=month+dir,y=year;if(m<0){m=11;y--;}if(m>11){m=0;y++;}setMonth(m);setYear(y);}
   async function addTxn(tx){await insertTxn({...tx,id:uid(),ts:Date.now(),year,month});}
@@ -2794,7 +2826,8 @@ export default function App() {
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
-      {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll} allCats={allCats}/>}
+      {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
+          allCats={allCats} aiOn={aiOn}/>}
 
       {/* Partner activity panel */}
       {showActivity && (

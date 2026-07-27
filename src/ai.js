@@ -1,31 +1,25 @@
 import { MODEL_SMART, MODEL_FAST } from './models.js';
+import { callClaude, textOf } from './claude.js';
 /**
  * Claude API integration for smart transaction categorisation.
  * Called for transactions the rule-based system couldn't categorise
  * (those landing in 'other').
  *
- * Requires VITE_ANTHROPIC_API_KEY in environment variables.
+ * Runs through the /api/claude proxy, so no key is present in the browser.
  */
 
-const KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
-export const AI_AVAILABLE = !!KEY;
+// The server decides this now; the client no longer holds a key
+export const AI_AVAILABLE = true;
 
 export async function aiCategorize(transactions, catIds) {
-  if (!KEY || transactions.length === 0) return {};
+  if (transactions.length === 0) return {};
 
   const catList  = catIds.join(', ');
   const txList   = transactions
     .map((t, i) => `${i}: ${t.description}  $${t.amount.toFixed(2)}`)
     .join('\n');
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type':       'application/json',
-      'x-api-key':          KEY,
-      'anthropic-version':  '2023-06-01',
-    },
-    body: JSON.stringify({
+  const data = await callClaude({
       model:      MODEL_FAST,
       max_tokens: 1024,
       messages: [{
@@ -58,15 +52,9 @@ Return ONLY a JSON array — no explanation, no markdown fences:
 Transactions:
 ${txList}`,
       }],
-    }),
-  });
+    });
 
-  if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
-
-  const data  = await res.json();
-  const text  = data.content?.[0]?.text || '[]';
-  const clean = text.replace(/```json?|```/g, '').trim();
-  const arr   = JSON.parse(clean);
+  const arr = JSON.parse(textOf(data) || '[]');
 
   // Map index → category
   const out = {};
@@ -119,16 +107,8 @@ export function computeTargets(allImports) {
  * Returns { category: string, reason: string } or null on failure.
  */
 export async function suggestCategory(description, amount, catIds) {
-  if (!KEY) return null;
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
+    const data = await callClaude({
         model: MODEL_FAST,
         max_tokens: 200,
         messages: [{
@@ -139,12 +119,9 @@ export async function suggestCategory(description, amount, catIds) {
             `Transaction: "${description}"  Amount: $${amount}\n\n` +
             `Reply ONLY with valid JSON, no markdown:\n{"category":"<id>","reason":"<one short sentence>"}`,
         }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const text = (data.content?.[0]?.text || '').replace(/```json?|```/g, '').trim();
-    return JSON.parse(text);
+      });
+    const txt = textOf(data);
+    return JSON.parse(txt);
   } catch {
     return null;
   }
@@ -156,7 +133,7 @@ export async function suggestCategory(description, amount, catIds) {
  * `historical` — all prior bank_imports (year, month, category, amount)
  */
 export async function spendingInsight(newRows, historical, catLabels) {
-  if (!KEY || !newRows?.length) return null;
+  if (!newRows?.length) return null;
 
   // Summarise locally so we send numbers, not hundreds of raw rows
   const byCat = {};
@@ -185,11 +162,7 @@ export async function spendingInsight(newRows, historical, catLabels) {
   const total = Math.round(newRows.reduce((a, r) => a + r.amount, 0));
 
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json', 'x-api-key':KEY,
-                 'anthropic-version':'2023-06-01' },
-      body: JSON.stringify({
+    const data = await callClaude({
         model: MODEL_SMART,
         max_tokens: 500,
         messages: [{ role:'user', content:
@@ -205,10 +178,7 @@ export async function spendingInsight(newRows, historical, catLabels) {
           `with more statements.\n\n` +
           `Reply ONLY with JSON, no markdown:\n` +
           `{"headline":"<one sentence summary>","points":["<observation>","<observation>"]}` }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
+      });
     const txt  = (data.content?.[0]?.text || '').replace(/```json?|```/g,'').trim();
     return JSON.parse(txt);
   } catch {

@@ -1,13 +1,13 @@
 import { MODEL_SMART } from './models.js';
+import { callClaude, textOf } from './claude.js';
 /**
  * PDF bank statement parser using Claude's native document vision.
  * When a CSV fails or a bank's CSV export is unusable, the user can
  * upload their statement PDF instead and Claude extracts all transactions.
  */
 
-const KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
-
-export const PDF_AVAILABLE = !!KEY;
+// Availability is now decided by the server, not by a bundled key
+export const PDF_AVAILABLE = true;
 
 /** Convert a File/Blob to base64 string */
 async function toBase64(file) {
@@ -29,8 +29,6 @@ async function toBase64(file) {
  *   warnings  — human-readable notes from Claude about the document
  */
 export async function parsePDFStatement(file) {
-  if (!KEY) throw new Error('VITE_ANTHROPIC_API_KEY is required for PDF parsing.');
-
   if (file.size > 25 * 1024 * 1024) {
     throw new Error('That PDF is larger than 25MB. Try splitting it, or export a shorter date range.');
   }
@@ -96,37 +94,19 @@ RULES — follow exactly:
 - Do NOT skip any transaction. Better to include an uncertain row than to miss it.
 - Return ONLY the JSON object. No markdown, no explanation.`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type':      'application/json',
-      'x-api-key':         KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model:      MODEL_SMART,
-      max_tokens: 8192,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type:   'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-          },
-          { type: 'text', text: PROMPT },
-        ],
-      }],
-    }),
+  const data = await callClaude({
+    model:      MODEL_SMART,
+    max_tokens: 8192,
+    messages: [{
+      role: 'user',
+      content: [
+        { type:'document', source:{ type:'base64', media_type:'application/pdf', data:base64 } },
+        { type:'text', text: PROMPT },
+      ],
+    }],
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API error ${res.status}: ${err.slice(0, 200)}`);
-  }
-
-  const data = await res.json();
-  const text = (data.content?.[0]?.text || '').replace(/```json?|```/g, '').trim();
-  const parsed = JSON.parse(text);
+  const parsed = JSON.parse(textOf(data));
 
   const rawCount = parsed.transactions?.length || 0;
   const warnings = parsed.warnings || [];

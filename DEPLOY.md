@@ -422,3 +422,45 @@ Reading a multi-page PDF and reasoning about spending patterns uses the
 stronger model. Sorting a merchant name into one of fifteen buckets does not,
 and those calls happen in bulk, so they use the cheaper faster one. Change both
 in one file if the lineup moves again.
+
+---
+
+## v14 — the API key moved to the server
+
+### Why this was necessary
+
+`VITE_` prefixed variables are compiled into the browser bundle. Two consequences:
+
+1. Anyone could open the site, press F12 and read the key.
+2. **Netlify's secret scanner detects the key value in the build output and
+   fails the deploy.** If your builds have been failing or the key never seemed
+   to take effect, this is very likely why.
+
+### New setup
+
+In Netlify → Site configuration → Environment variables:
+
+```
+ANTHROPIC_API_KEY = sk-ant-...
+```
+
+**No `VITE_` prefix.** That prefix is exactly what caused the problem. If you
+already added `VITE_ANTHROPIC_API_KEY`, delete it.
+
+Then redeploy. You can now also delete any `SECRETS_SCAN_*` workarounds, since
+there is no longer a secret in the bundle to scan for.
+
+### How it works
+
+`netlify/functions/claude.js` runs on Netlify's servers, holds the key, and
+forwards requests to Anthropic. The browser calls `/api/claude` instead of
+calling Anthropic directly.
+
+The function restricts requests to the two models this app uses and caps
+`max_tokens`, so an exposed endpoint cannot be turned into an open bill.
+
+The app asks the function on load whether a key is configured, and the upload
+screen says plainly whether Claude is connected rather than guessing.
+
+The CSP no longer needs `https://api.anthropic.com` in `connect-src`, since the
+browser only ever talks to your own domain now.

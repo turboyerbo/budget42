@@ -1,4 +1,5 @@
 import { MODEL_FAST } from './models.js';
+import { callClaude, textOf } from './claude.js';
 /**
  * Bank / account auto-detection.
  * The user should never have to tell us which bank a file came from —
@@ -6,7 +7,6 @@ import { MODEL_FAST } from './models.js';
  * free), then fall back to asking Claude, then finally ask the user.
  */
 
-const KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
 // Known institutions. `id` is what gets stored on each transaction row.
 export const INSTITUTIONS = [
@@ -59,28 +59,19 @@ export function fingerprintBank(text) {
  * Cheap — we only send the first chunk of the file.
  */
 export async function aiIdentifyBank(text) {
-  if (!KEY) return { id:'UNKNOWN', confidence:'none', how:null };
   const ids = INSTITUTIONS.filter(i => i.id !== 'UNKNOWN').map(i => i.id);
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json', 'x-api-key':KEY,
-                'anthropic-version':'2023-06-01' },
-      body: JSON.stringify({
-        model:MODEL_FAST, max_tokens:200,
-        messages:[{ role:'user', content:
-          `This is the beginning of a Canadian bank or credit card statement.\n` +
-          `Identify which institution it is from. Valid ids: ${ids.join(', ')}\n\n` +
-          `--- STATEMENT ---\n${(text||'').slice(0,3000)}\n--- END ---\n\n` +
-          `Reply ONLY with JSON, no markdown:\n` +
-          `{"id":"<one id, or UNKNOWN>","confidence":"high|medium|none",` +
-          `"how":"<short reason, e.g. 'Logo text and account format match CIBC'>"}` }],
-      }),
+    const data = await callClaude({
+      model: MODEL_FAST, max_tokens: 200,
+      messages:[{ role:'user', content:
+        `This is the beginning of a Canadian bank or credit card statement.\n` +
+        `Identify which institution it is from. Valid ids: ${ids.join(', ')}\n\n` +
+        `--- STATEMENT ---\n${(text||'').slice(0,3000)}\n--- END ---\n\n` +
+        `Reply ONLY with JSON, no markdown:\n` +
+        `{"id":"<one id, or UNKNOWN>","confidence":"high|medium|none",` +
+        `"how":"<short reason>"}` }],
     });
-    if (!res.ok) return { id:'UNKNOWN', confidence:'none', how:null };
-    const data = await res.json();
-    const txt  = (data.content?.[0]?.text || '').replace(/```json?|```/g,'').trim();
-    const out  = JSON.parse(txt);
+    const out = JSON.parse(textOf(data));
     if (!ids.includes(out.id)) return { id:'UNKNOWN', confidence:'none', how:null };
     return out;
   } catch {
