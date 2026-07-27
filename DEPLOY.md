@@ -270,3 +270,36 @@ After each import Claude compares what was just added against the monthly averag
 from all previous statements and writes a short summary. This needs
 `VITE_ANTHROPIC_API_KEY`; without it the import still succeeds and the insight
 panel is simply skipped.
+
+---
+
+## v9 — duplicate and internal-transfer handling
+
+### The root cause of inflated spending
+
+Two bugs were compounding:
+
+1. **`parse.js` discarded the +/- sign** on every CSV amount. A credit-card
+   payment is a *credit* on the card statement and a *debit* on the chequing
+   statement. With the sign gone, both looked like purchases — so paying $1,200
+   off a card added $2,400 of phantom spending.
+
+2. **Income and transfer rows were dropped during parsing**, before validation
+   ran. That meant the two halves of a transfer could never be matched to each
+   other. Those rows are now kept and tagged instead.
+
+### What happens now
+
+Transfers are paired automatically: a debit and a credit of the same amount,
+within three days, on two *different* accounts, is one movement of money. Both
+halves are excluded.
+
+Duplicate matching now normalises the merchant name first, so
+`SQ *BLUE BOTTLE 8891` and `SQ *BLUE BOTTLE` are recognised as the same shop.
+Processor prefixes (`SQ *`, `TST*`, `PAYPAL *`), store numbers and reference
+numbers are stripped before comparison.
+
+Anything unambiguous is fixed silently and listed in a green summary card with
+a **Keep it** button next to each row, so nothing is hidden and every automatic
+decision can be reversed. Only genuinely uncertain cases become questions —
+in the common case the user answers nothing at all.

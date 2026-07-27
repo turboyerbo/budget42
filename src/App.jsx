@@ -1314,6 +1314,7 @@ function UploadTab({showToast, onImported, allCats}) {
   const [parsed,    setParsed]   = useState([]);
   const [edits,     setEdits]    = useState({});
   const [issues,    setIssues]   = useState([]);
+  const [autoFixed, setAutoFixed]= useState([]);
   const [answers,   setAnswers]  = useState({});
   const [accounts,  setAccounts] = useState([]);   // detected institutions
   const [askBank,   setAskBank]  = useState(null); // { text } when we must ask
@@ -1328,6 +1329,19 @@ function UploadTab({showToast, onImported, allCats}) {
   const tick = () => new Promise(r => setTimeout(r, 50));
 
   const finalRows = parsed.filter(row => {
+    // Internal transfer — excluding it removes BOTH halves of the pair
+    const tr = issues.find(i => i.type === 'internal_transfer' &&
+      i.pairIds && i.pairIds.includes(row.id));
+    if (tr) {
+      const ans = answers[tr.id] ?? tr.default;
+      if (ans.startsWith('Yes')) return false;
+    }
+    // Standalone card payment / transfer with no partner in this batch
+    const pay = issues.find(i => i.type === 'card_payment' && i.row.id === row.id);
+    if (pay) {
+      const ans = answers[pay.id] ?? pay.default;
+      if (ans.startsWith('Skip')) return false;
+    }
     const dupEx = issues.find(i => i.type === 'duplicate_existing' && i.row.id === row.id);
     if (dupEx) {
       const ans = answers[dupEx.id] ?? dupEx.default;
@@ -1393,14 +1407,16 @@ function UploadTab({showToast, onImported, allCats}) {
 
     let existing = [];
     try { existing = await getAllBankImportsRaw(); } catch {}
-    const found = buildValidationReport(rawRows, existing);
+    const report = buildValidationReport(rawRows, existing);
 
     setModal(null);
     setParsed(rawRows.map(r => ({ ...r, who })));
     setEdits({});
-    setIssues(found);
-    setAnswers(Object.fromEntries(found.map(i => [i.id, i.default])));
-    setStep(found.length > 0 ? 'validate' : 'review');
+    setIssues(report.all);
+    setAutoFixed(report.autoFixed);
+    // Every issue starts on its safe default; auto-fixed ones simply aren't asked
+    setAnswers(Object.fromEntries(report.all.map(i => [i.id, i.default])));
+    setStep(report.all.length > 0 ? 'validate' : 'review');
   }
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -1509,6 +1525,7 @@ function UploadTab({showToast, onImported, allCats}) {
 
   function reset() {
     setStep('pick'); setParsed([]); setEdits({}); setIssues([]); setAnswers({});
+    setAutoFixed([]);
     setError(null); setCsvFailed(false); setAccounts([]); setWarnings([]);
     setFileType(null); setModal(null); setAskBank(null); setPendingCSV(null);
     setInsight(null);
@@ -1721,113 +1738,207 @@ function UploadTab({showToast, onImported, allCats}) {
   );
 
   // ── VALIDATE ────────────────────────────────────────────────────────────────
-  if (step === 'validate') return (
-    <div style={{ padding:'16px 16px 0' }}>
-      {Overlay}
-      <div style={{ marginBottom:12 }}>
-        <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
-          Quick data check
-        </h2>
-        <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
-          Found {parsed.length} transactions. Please answer {issues.length}{' '}
-          question{issues.length!==1?'s':''} so your history stays accurate.
-        </p>
-      </div>
+  if (step === 'validate') {
+    const questions   = issues.filter(i => !i.autoFixed);
+    const excluded    = parsed.length - finalRows.length;
+    const transferSum = autoFixed
+      .filter(i => i.type === 'internal_transfer')
+      .reduce((a, i) => a + i.row.amount, 0);
 
-      {accounts.length > 0 && (
-        <div style={{ display:'flex', gap:7, flexWrap:'wrap', marginBottom:12 }}>
-          {accounts.map((a,i) => (
-            <Chip key={i} id={a.institution}
-              label={a.institutionName || instLabel(a.institution)}
-              sub={a.accountLabel || a.period || ''}/>
-          ))}
+    const TYPE_META = {
+      internal_transfer:  { icon:'🔄', label:'Money moved between your accounts', color:C.green },
+      card_payment:       { icon:'💳', label:'Card payment or transfer',          color:C.green },
+      duplicate_in_batch: { icon:'🔁', label:'Same transaction twice in this file',color:C.blue },
+      duplicate_existing: { icon:'📋', label:'Already in your budget',            color:C.blue },
+      credit_check:       { icon:'💰', label:'Looks like income',                 color:C.green },
+      large_transaction:  { icon:'🔍', label:'Unusually large',                   color:C.amber },
+    };
+
+    return (
+      <div style={{ padding:'16px 16px 0' }}>
+        {Overlay}
+        <div style={{ marginBottom:12 }}>
+          <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
+            Checking your data
+          </h2>
+          <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
+            Found {parsed.length} transactions.
+            {questions.length === 0
+              ? ' Everything was resolved automatically.'
+              : ` ${questions.length} need${questions.length===1?'s':''} your call.`}
+          </p>
         </div>
-      )}
 
-      {warnings.length > 0 && (
-        <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd',
-          borderRadius:12, padding:'10px 14px', marginBottom:12 }}>
-          {warnings.map((w,i) => (
-            <p key={i} style={{ margin: i?'4px 0 0':0, fontSize:11,
-              color:'#5b21b6', fontFamily:SANS, lineHeight:1.6 }}>⚠ {w}</p>
-          ))}
-        </div>
-      )}
+        {accounts.length > 0 && (
+          <div style={{ display:'flex', gap:7, flexWrap:'wrap', marginBottom:12 }}>
+            {accounts.map((a,i) => (
+              <Chip key={i} id={a.institution}
+                label={a.institutionName || instLabel(a.institution)}
+                sub={a.accountLabel || a.period || ''}/>
+            ))}
+          </div>
+        )}
 
-      {issues.map((issue, idx) => {
-        const ans   = answers[issue.id] ?? issue.default;
-        const icons = { duplicate_in_batch:'🔁', duplicate_existing:'📋',
-                        credit_check:'💰', large_transaction:'🔍' };
-        const cols  = { duplicate_in_batch:C.blue, duplicate_existing:C.blue,
-                        credit_check:C.green, large_transaction:C.amber };
-        const bc = cols[issue.type] || C.amber;
-        return (
-          <div key={issue.id} style={{ background:C.white, borderRadius:14,
-            padding:'16px', marginBottom:12,
-            boxShadow:'0 1px 4px rgba(0,0,0,0.05), 0 0 0 1px rgba(0,0,0,0.04)',
-            borderLeft:'4px solid ' + bc }}>
-            <div style={{ display:'flex', gap:10, alignItems:'flex-start', marginBottom:10 }}>
-              <div style={{ width:30, height:30, borderRadius:99, background:bc+'18',
-                display:'flex', alignItems:'center', justifyContent:'center',
-                fontSize:16, flexShrink:0 }}>{icons[issue.type] || '❓'}</div>
+        {/* ── Auto-fixed summary ── */}
+        {autoFixed.length > 0 && (
+          <div style={{ background:C.greenLight, border:`1px solid ${C.green}44`,
+            borderRadius:14, padding:'14px 16px', marginBottom:14 }}>
+            <div style={{ display:'flex', gap:9, alignItems:'flex-start', marginBottom:10 }}>
+              <div style={{ width:28, height:28, borderRadius:99, background:C.green,
+                display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                <Check size={16} color="#fff" strokeWidth={3}/>
+              </div>
               <div style={{ flex:1 }}>
-                <p style={{ margin:'0 0 2px', fontSize:10, color:bc,
-                  textTransform:'uppercase', letterSpacing:'0.08em',
-                  fontFamily:SANS, fontWeight:700 }}>
-                  Check {idx + 1} of {issues.length}
+                <p style={{ margin:0, fontSize:14, fontWeight:700, color:C.green, fontFamily:SANS }}>
+                  {autoFixed.length} issue{autoFixed.length!==1?'s':''} fixed automatically
                 </p>
-                <p style={{ margin:0, fontSize:14, color:C.ink,
-                  fontFamily:SANS, lineHeight:1.65 }}>{issue.question}</p>
-              </div>
-            </div>
-            <div style={{ background:C.sand, borderRadius:9, padding:'10px 14px',
-              marginBottom:12, display:'flex', justifyContent:'space-between',
-              alignItems:'center', gap:8 }}>
-              <div style={{ minWidth:0 }}>
-                <p style={{ margin:0, fontSize:13, fontWeight:600, color:C.ink,
-                  fontFamily:SANS, overflow:'hidden',
-                  textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                  {issue.row.description}
-                </p>
-                <p style={{ margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
-                  {issue.row.date} · {instLabel(issue.row.source)}
+                <p style={{ margin:'3px 0 0', fontSize:12, color:C.green+'cc',
+                  fontFamily:SANS, lineHeight:1.6 }}>
+                  {transferSum > 0
+                    ? `Includes ${fmt(transferSum)} of transfers between your own accounts — ` +
+                      `counting those would have inflated your spending.`
+                    : `These were unambiguous, so we handled them without asking.`}
                 </p>
               </div>
-              <p style={{ margin:0, fontFamily:SERIF, fontSize:18, fontWeight:700,
-                color:C.ink, flexShrink:0 }}>${issue.row.amount.toFixed(2)}</p>
             </div>
-            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-              {issue.options.map(opt => (
-                <button key={opt}
-                  onClick={() => setAnswers(p => ({ ...p, [issue.id]: opt }))}
-                  style={{ border:'1.5px solid ' + (ans===opt ? C.green : C.sandDark),
-                    borderRadius:10, padding:'10px 14px', cursor:'pointer',
-                    background: ans===opt ? C.greenLight : C.white,
-                    display:'flex', alignItems:'center', gap:10, textAlign:'left' }}>
-                  <div style={{ width:18, height:18, borderRadius:'50%', flexShrink:0,
-                    border:'2px solid ' + (ans===opt ? C.green : C.sandDark),
-                    background: ans===opt ? C.green : 'transparent' }}/>
-                  <span style={{ fontSize:13, fontWeight: ans===opt?600:400,
-                    color: ans===opt?C.green:C.inkMid, fontFamily:SANS }}>{opt}</span>
-                </button>
-              ))}
+
+            <div style={{ background:'rgba(255,255,255,0.7)', borderRadius:10, padding:'4px 0' }}>
+              {autoFixed.map((i, idx) => {
+                const meta = TYPE_META[i.type] || { icon:'✓', label:'Resolved', color:C.green };
+                const kept = (answers[i.id] ?? i.default) !== i.default;
+                return (
+                  <div key={i.id} style={{ display:'flex', alignItems:'center', gap:9,
+                    padding:'8px 12px',
+                    borderTop: idx ? `1px solid ${C.sandMid}` : 'none' }}>
+                    <span style={{ fontSize:14, flexShrink:0, opacity: kept ? 0.35 : 1 }}>
+                      {meta.icon}
+                    </span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <p style={{ margin:0, fontSize:12, fontWeight:600, color:C.ink,
+                        fontFamily:SANS, textDecoration: kept ? 'line-through' : 'none',
+                        opacity: kept ? 0.5 : 1,
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {i.summary}
+                      </p>
+                      <p style={{ margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS }}>
+                        {meta.label}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setAnswers(p => ({ ...p,
+                        [i.id]: kept ? i.default : i.options.find(o => o !== i.default) }))}
+                      style={{ border:`1px solid ${C.sandDark}`, borderRadius:7,
+                        padding:'4px 10px', background:C.white, fontSize:11,
+                        fontWeight:600, color:C.inkMid, cursor:'pointer',
+                        fontFamily:SANS, flexShrink:0 }}>
+                      {kept ? 'Undo' : 'Keep it'}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        );
-      })}
+        )}
 
-      <button onClick={() => setStep('review')}
-        style={{ width:'100%', border:'none', padding:'16px', borderRadius:14,
-          background:C.green, color:'#fff', fontSize:15, fontWeight:700,
-          cursor:'pointer', fontFamily:SANS, marginBottom:8 }}>
-        All answered — review {finalRows.length} transactions →
-      </button>
-      <p style={{ textAlign:'center', fontSize:11, color:C.inkSoft,
-        fontFamily:SANS, margin:'0 0 16px' }}>
-        Your answers exclude {parsed.length - finalRows.length} transactions from import.
-      </p>
-    </div>
-  );
+        {warnings.length > 0 && (
+          <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd',
+            borderRadius:12, padding:'10px 14px', marginBottom:12 }}>
+            {warnings.map((w,i) => (
+              <p key={i} style={{ margin: i?'4px 0 0':0, fontSize:11,
+                color:'#5b21b6', fontFamily:SANS, lineHeight:1.6 }}>⚠ {w}</p>
+            ))}
+          </div>
+        )}
+
+        {/* ── Questions that genuinely need a human ── */}
+        {questions.length > 0 && (
+          <SL>Needs your call</SL>
+        )}
+
+        {questions.map((issue, idx) => {
+          const ans  = answers[issue.id] ?? issue.default;
+          const meta = TYPE_META[issue.type] || { icon:'❓', color:C.amber };
+          const bc   = meta.color;
+          return (
+            <div key={issue.id} style={{ background:C.white, borderRadius:14,
+              padding:'16px', marginBottom:12,
+              boxShadow:'0 1px 4px rgba(0,0,0,0.05), 0 0 0 1px rgba(0,0,0,0.04)',
+              borderLeft:`4px solid ${bc}` }}>
+              <div style={{ display:'flex', gap:10, alignItems:'flex-start', marginBottom:10 }}>
+                <div style={{ width:30, height:30, borderRadius:99, background:bc+'18',
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  fontSize:16, flexShrink:0 }}>{meta.icon}</div>
+                <div style={{ flex:1 }}>
+                  <p style={{ margin:'0 0 2px', fontSize:10, color:bc,
+                    textTransform:'uppercase', letterSpacing:'0.08em',
+                    fontFamily:SANS, fontWeight:700 }}>
+                    {idx + 1} of {questions.length} · {meta.label}
+                  </p>
+                  <p style={{ margin:0, fontSize:14, color:C.ink,
+                    fontFamily:SANS, lineHeight:1.65 }}>{issue.question}</p>
+                </div>
+              </div>
+
+              {/* Both sides of a pair, when there are two */}
+              <div style={{ background:C.sand, borderRadius:9, padding:'10px 14px',
+                marginBottom:12 }}>
+                {[issue.row, issue.against].filter(Boolean).map((r, ri) => (
+                  <div key={ri} style={{ display:'flex', justifyContent:'space-between',
+                    alignItems:'center', gap:8,
+                    paddingTop: ri ? 8 : 0, marginTop: ri ? 8 : 0,
+                    borderTop: ri ? `1px solid ${C.sandDark}` : 'none' }}>
+                    <div style={{ minWidth:0 }}>
+                      <p style={{ margin:0, fontSize:13, fontWeight:600, color:C.ink,
+                        fontFamily:SANS, overflow:'hidden',
+                        textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                        {r.description}
+                      </p>
+                      <p style={{ margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
+                        {r.date} · {instLabel(r.source)}
+                        {r._type === 'credit' ? ' · money in' : ' · money out'}
+                      </p>
+                    </div>
+                    <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:700,
+                      color:C.ink, flexShrink:0 }}>{fmt(r.amount)}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                {issue.options.map(opt => (
+                  <button key={opt}
+                    onClick={() => setAnswers(p => ({ ...p, [issue.id]: opt }))}
+                    style={{ border:`1.5px solid ${ans===opt ? C.green : C.sandDark}`,
+                      borderRadius:10, padding:'10px 14px', cursor:'pointer',
+                      background: ans===opt ? C.greenLight : C.white,
+                      display:'flex', alignItems:'center', gap:10, textAlign:'left' }}>
+                    <div style={{ width:18, height:18, borderRadius:'50%', flexShrink:0,
+                      border:`2px solid ${ans===opt ? C.green : C.sandDark}`,
+                      background: ans===opt ? C.green : 'transparent' }}/>
+                    <span style={{ fontSize:13, fontWeight: ans===opt?600:400,
+                      color: ans===opt?C.green:C.inkMid, fontFamily:SANS }}>{opt}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        <button onClick={() => setStep('review')}
+          style={{ width:'100%', border:'none', padding:'16px', borderRadius:14,
+            background:C.green, color:'#fff', fontSize:15, fontWeight:700,
+            cursor:'pointer', fontFamily:SANS, marginBottom:8 }}>
+          Continue — review {finalRows.length} transactions →
+        </button>
+        <p style={{ textAlign:'center', fontSize:11, color:C.inkSoft,
+          fontFamily:SANS, margin:'0 0 16px' }}>
+          {excluded > 0
+            ? `${excluded} transaction${excluded!==1?'s':''} will be left out of the import.`
+            : 'Nothing is being excluded.'}
+        </p>
+      </div>
+    );
+  }
 
   // ── REVIEW ──────────────────────────────────────────────────────────────────
   if (step === 'review') return (

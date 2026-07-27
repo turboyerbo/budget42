@@ -139,27 +139,49 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
     const desc = [d1, d2].filter(Boolean).join(' — ').trim();
     if (!desc) { skipped++; continue; }
 
-    // ── AMOUNT: always compute as a const — this was the crash bug ──────────
-    // For CIBC_ALT (separate debit/credit columns): skip if debit cell is blank
+    // ── AMOUNT + DIRECTION ──────────────────────────────────────────────────
+    // The SIGN matters. A credit-card payment shows as a credit on the card
+    // statement and a debit on the chequing statement; if we throw the sign
+    // away, the same money gets counted as spending twice. Keep it.
     const rawAmt = (cols[amtIdx] || '').replace(/['"$,+\s]/g,'').trim();
-    if (fmt === 'CIBC_ALT' && creditIdx >= 0 && (!rawAmt || rawAmt === '0')) {
-      skipped++; continue;           // blank debit cell = it's a credit (income)
+
+    let direction = 'debit';
+
+    if (fmt === 'CIBC_ALT' && creditIdx >= 0) {
+      // Separate debit / credit columns — whichever cell is filled wins
+      const rawCredit = (cols[creditIdx] || '').replace(/['"$,+\s]/g,'').trim();
+      const hasDebit  = rawAmt    && parseAmt(rawAmt)    !== 0;
+      const hasCredit = rawCredit && parseAmt(rawCredit) !== 0;
+      if (!hasDebit && !hasCredit) { skipped++; continue; }
+      direction = hasDebit ? 'debit' : 'credit';
+      var signedRaw = hasDebit ? rawAmt : rawCredit;
+    } else {
+      var signedRaw = rawAmt;
+      const signed = parseAmt(rawAmt);
+      // BMO / PC / Wealthsimple: negative = money out, positive = money in
+      direction = signed < 0 ? 'debit' : 'credit';
     }
-    const amount = Math.abs(parseAmt(rawAmt));
+
+    const amount = Math.abs(parseAmt(signedRaw));
     if (!amount || isNaN(amount) || amount < 0.50) { skipped++; continue; }
 
+    // Rows the categoriser recognises as income or an internal transfer are
+    // NOT dropped here any more — validation needs to see both halves of a
+    // transfer pair in order to match them up. They are tagged instead.
     const cat = categorize(desc);
-    if (cat === '_skip') { skipped++; continue; }
+    const looksInternal = cat === '_skip';
 
     rows.push({
       id:          uid(),
       date:        dateObj.toISOString().slice(0,10),
       description: desc,
       amount,
-      category:    cat,
+      category:    looksInternal ? 'other' : cat,
       source,
       month:       dateObj.getMonth(),
       year:        dateObj.getFullYear(),
+      _type:       direction,
+      _internal:   looksInternal,
     });
   }
 
