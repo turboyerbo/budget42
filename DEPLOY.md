@@ -303,3 +303,65 @@ Anything unambiguous is fixed silently and listed in a green summary card with
 a **Keep it** button next to each row, so nothing is hidden and every automatic
 decision can be reversed. Only genuinely uncertain cases become questions —
 in the common case the user answers nothing at all.
+
+---
+
+## v10 — category drill-down
+
+Tap any category on the Home tab to expand it and see every transaction making
+up that total. Each row shows the merchant, date, source account and amount,
+with a dropdown to move it to a different category. Changes save straight to
+Supabase and the bars update immediately.
+
+### Two new built-in categories
+
+`Credit card payments` and `Transfers` are marked `excluded: true`. They are
+tracked and visible, but never counted as spending — paying a card is moving
+money, not spending it. They show a small NOT SPENDING tag and are left out of
+the Home total, the donut chart and the annual bar chart.
+
+`parse.js` now routes obvious card payments into `cc_payment` at import time.
+This is deliberate redundancy: even if transfer pairing misses one half of a
+pair, an excluded category keeps it out of the spending total anyway.
+
+Custom categories are deleted from inside the expanded panel now — the row
+itself became a button, and a button cannot be nested inside another button.
+
+---
+
+## v11 — cross-partner reconciliation
+
+### REQUIRED migration
+
+Run this once in Supabase → SQL Editor before deploying:
+
+```sql
+alter table bank_imports add column if not exists direction text default 'debit';
+```
+
+Pairing an e-transfer means knowing whether an existing row was money in or
+money out. Without this column the app still runs, but partner transfers on
+rows imported before the migration cannot be matched.
+
+### What the second person's upload now does
+
+When Ness imports her CIBC statement, it is checked against everything Jordan
+has already imported:
+
+**Partner transfers.** Money out of one person's account matching money into
+the other's, same amount, within three days, is the two of you moving household
+money — not spending. If either description mentions an e-transfer it is
+excluded automatically; otherwise it becomes a question.
+
+**Shared moments.** Same merchant, same day, two different people means you
+were out together. Those get a heart in the category drill-down and in History,
+plus a summary card on Home: *"3 outings together · $312.40 spent side by side
+this month."*
+
+### The ambiguity that matters
+
+Same merchant and same day could mean a date — or it could mean the same
+statement was uploaded by both of you. The tell is the amount and the account:
+if those match too, it is almost certainly a duplicate import, so it is routed
+to the duplicate checker instead of being celebrated as an outing. Two different
+amounts on two different cards at the same restaurant is a real date.

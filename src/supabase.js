@@ -155,7 +155,15 @@ export async function getOtherImports(year, month) {
 export async function getAllBankImportsRaw() {
   const { data, error } = await supabase
     .from('bank_imports')
-    .select('id,date,amount,description,category,source');
+    .select('id,date,amount,description,category,source,who,direction');
+  if (error) throw error;
+  return data || [];
+}
+
+// Every field for a month — used to spot shared outings and partner transfers
+export async function getMonthImportsFull(year, month) {
+  const { data, error } = await supabase.from('bank_imports')
+    .select('*').eq('year', year).eq('month', month);
   if (error) throw error;
   return data || [];
 }

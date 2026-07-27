@@ -246,11 +246,12 @@ export function detectLargeTransactions(rows, handledIds) {
  * Returns { autoFixed, questions } so the UI can report confident corrections
  * as a summary and only interrupt the user for the ambiguous remainder.
  */
-export function buildValidationReport(newRows, existingRows) {
+export function buildValidationReport(newRows, existingRows, partnerIssues = []) {
   const transfers = detectInternalTransfers(newRows);
 
   const paired = new Set();
   transfers.forEach(t => t.pairIds.forEach(id => paired.add(id)));
+  partnerIssues.forEach(p => paired.add(p.row.id));
 
   const payments = detectStandalonePayments(newRows, paired);
   payments.forEach(p => paired.add(p.row.id));
@@ -264,7 +265,7 @@ export function buildValidationReport(newRows, existingRows) {
 
   const large = detectLargeTransactions(newRows, handled);
 
-  const all = [...transfers, ...payments, ...dupes, ...credits, ...large];
+  const all = [...partnerIssues, ...transfers, ...payments, ...dupes, ...credits, ...large];
 
   return {
     autoFixed: all.filter(i => i.autoFixed),

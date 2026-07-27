@@ -5,7 +5,7 @@ import {
   Home, Plus, History, CalendarDays, Upload, PieChart,
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
-  Bell, BellRing, Landmark, HelpCircle,
+  Bell, BellRing, Landmark, HelpCircle, Heart,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -19,6 +19,7 @@ import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
+import { detectPartnerTransfers, findSharedMoments, summariseTogether } from './together.js';
 import { buildValidationReport } from './validate.js';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -52,6 +53,9 @@ const DEFAULT_CATS = [
   {id:'salon',        label:'Salon & spa',    icon:'Scissors',       target:100, color:'#9d174d'},
   {id:'legal',        label:'Legal & fees',   icon:'Scale',          target:100, color:'#57534e'},
   {id:'other',        label:'Other',          icon:'Package',        target:200, color:'#6b7280'},
+  // Tracked but NOT counted as spending — moving money is not spending it
+  {id:'cc_payment',   label:'Credit card payments', icon:'CreditCard', target:0, color:'#57534e', excluded:true},
+  {id:'transfer',     label:'Transfers',      icon:'Landmark',       target:0,   color:'#78716c', excluded:true},
 ];
 const COLOR_SWATCHES = ['#1a7a4a','#1d4ed8','#7c3aed','#b45309','#0369a1',
   '#be185d','#c0392b','#065f46','#4f46e5','#0891b2','#9d174d','#57534e','#6b7280'];
@@ -742,15 +746,37 @@ function OtherReviewModal({ items, allCats, onSave, onClose }) {
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
 function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
-                  onAddCat,onDeleteCat,profile,onReviewOther,otherCount}) {
+                  onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
+                  onChangeCategory}) {
+  const [openCat, setOpenCat] = useState(null);   // which category is expanded
+  const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const totalIncome=Object.values(income).reduce((a,b)=>a+b,0);
   const totalFixed=FIXED.reduce((a,b)=>a+b.amount,0);
   const totalSubs=SUBS.reduce((a,b)=>a+b.amount,0);
   const committed=totalFixed+totalSubs+ccTarget;
   const allTx=[...txns,...bankImports];
+  const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
-  const totalSpent=Object.values(txByCat).reduce((a,b)=>a+b,0);
+  // Money moved between accounts is tracked but never counted as spending
+  const totalSpent=Object.entries(txByCat)
+    .filter(([k])=>!excludedIds.has(k))
+    .reduce((a,[,v])=>a+v,0);
+
+  // Same merchant, same day, both of you → you were out together
+  const { shared:sharedMoments } = findSharedMoments(allTx);
+  const together = summariseTogether(sharedMoments);
+
+  // Every transaction belonging to one category, newest first
+  const rowsFor=catId=>allTx
+    .filter(t=>(t.category||t.cat)===catId)
+    .sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  async function reassign(tx,newCat){
+    setBusyId(tx.id);
+    await onChangeCategory(tx, newCat);
+    setBusyId(null);
+  }
   const surplus=totalIncome-committed-totalSpent;
   const [showAdd,setShowAdd]=useState(false);
 
@@ -845,40 +871,165 @@ function HomeTab({txns,bankImports,income,ccTarget,setIncome,setCcTarget,
         </button>
       )}
 
+      {/* Time spent together — same place, same day, both of you */}
+      {together.count>0&&(
+        <div style={{background:'#fdf2f8',border:'1px solid #f9a8d4',borderRadius:14,
+          padding:'14px 16px',marginBottom:12}}>
+          <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:together.list.length?9:0}}>
+            <div style={{width:30,height:30,borderRadius:99,background:'#be185d',
+              display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <Heart size={15} color="#fff" fill="#fff"/>
+            </div>
+            <div style={{flex:1}}>
+              <p style={{margin:0,fontSize:14,fontWeight:700,color:'#be185d',fontFamily:SANS}}>
+                {together.count} {together.count===1?'outing':'outings'} together
+              </p>
+              <p style={{margin:'2px 0 0',fontSize:12,color:'#9d174d',fontFamily:SANS}}>
+                {fmt(together.total)} spent side by side this month
+              </p>
+            </div>
+          </div>
+          {together.list.slice(0,4).map((o,i)=>(
+            <div key={i} style={{display:'flex',alignItems:'center',gap:8,
+              padding:'6px 0 0',borderTop:i?'1px solid #f9a8d4':'none',
+              marginTop:i?6:0}}>
+              <Heart size={10} color="#be185d" fill="#be185d" style={{flexShrink:0}}/>
+              <span style={{flex:1,fontSize:12,color:'#831843',fontFamily:SANS,
+                overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                {o.merchant}
+              </span>
+              <span style={{fontSize:10,color:'#be185d',fontFamily:SANS}}>{o.date}</span>
+              <span style={{fontFamily:SERIF,fontSize:14,fontWeight:600,color:'#831843'}}>
+                {fmt(o.total)}
+              </span>
+            </div>
+          ))}
+          {together.list.length>4&&(
+            <p style={{margin:'8px 0 0',fontSize:11,color:'#be185d',fontFamily:SANS}}>
+              +{together.list.length-4} more
+            </p>
+          )}
+        </div>
+      )}
+
       <SL>Spending this month</SL>
       <Card style={{padding:'8px 0'}}>
         {allCats.map((cat,i)=>{
           const spent=txByCat[cat.id]||0;
           const target=catTargets[cat.id]||cat.target;
-          const over=spent>target;
+          const over=spent>target&&target>0;
+          const isOpen=openCat===cat.id;
+          const rows=isOpen?rowsFor(cat.id):[];
           return (
             <div key={cat.id}>
               {i>0&&<Divider/>}
-              <div style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px'}}>
+
+              {/* Tap the row to see what makes up the total */}
+              <button
+                onClick={()=>setOpenCat(isOpen?null:cat.id)}
+                style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px',
+                  width:'100%',border:'none',background:isOpen?C.sand:'transparent',
+                  cursor:'pointer',textAlign:'left'}}>
                 <div style={{width:32,height:32,borderRadius:9,background:cat.color+'18',
                   display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
                   <CatIcon name={cat.icon} size={16} color={cat.color}/>
                 </div>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
-                    <span style={{fontSize:14,color:C.ink,fontFamily:SANS,fontWeight:spent>0?500:400}}>{cat.label}</span>
+                    <span style={{fontSize:14,color:C.ink,fontFamily:SANS,
+                      fontWeight:spent>0?500:400,display:'flex',alignItems:'center',gap:6}}>
+                      {cat.label}
+                      {cat.excluded&&(
+                        <span style={{fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:99,
+                          background:C.sandMid,color:C.inkSoft,letterSpacing:'0.04em'}}>
+                          NOT SPENDING
+                        </span>
+                      )}
+                    </span>
                     <div style={{display:'flex',alignItems:'baseline',gap:4}}>
                       <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
                         color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
-                      <span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>
+                      {target>0&&<span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>}
+                      <ChevronRight size={14} color={C.sandDark}
+                        style={{transform:isOpen?'rotate(90deg)':'none',
+                          transition:'transform 0.15s',marginLeft:2}}/>
                     </div>
                   </div>
-                  <Bar spent={spent} target={target} color={cat.color}/>
+                  {target>0&&<Bar spent={spent} target={target} color={cat.color}/>}
                   {over&&<p style={{margin:'3px 0 0',fontSize:10,color:C.red,fontFamily:SANS}}>
                     {fmt(spent-target)} over</p>}
                 </div>
-                {cat.custom&&(
-                  <button onClick={()=>{if(window.confirm(`Remove "${cat.label}"?`))onDeleteCat(cat.id);}}
-                    style={{border:'none',background:'none',padding:4,cursor:'pointer',flexShrink:0}}>
-                    <X size={14} color={C.inkSoft}/>
-                  </button>
-                )}
-              </div>
+              </button>
+
+              {/* Drill-down: every transaction in this category */}
+              {isOpen&&(
+                <div style={{background:C.sand,padding:'2px 0 10px'}}>
+                  {rows.length===0?(
+                    <p style={{margin:0,padding:'10px 18px',fontSize:12,
+                      color:C.inkSoft,fontFamily:SANS,fontStyle:'italic'}}>
+                      Nothing in this category yet this month.
+                    </p>
+                  ):rows.map(tx=>(
+                    <div key={tx.id} style={{display:'flex',alignItems:'center',gap:8,
+                      padding:'8px 18px 8px 30px',opacity:busyId===tx.id?0.45:1}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <p style={{margin:0,fontSize:12,color:C.ink,fontFamily:SANS,
+                          overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
+                          display:'flex',alignItems:'center',gap:5}}>
+                          {sharedMoments.has(tx.id)&&(
+                            <Heart size={11} color="#be185d" fill="#be185d"
+                              style={{flexShrink:0}}/>
+                          )}
+                          <span style={{overflow:'hidden',textOverflow:'ellipsis',
+                            whiteSpace:'nowrap'}}>
+                            {tx.note||tx.description||cat.label}
+                          </span>
+                        </p>
+                        <p style={{margin:'1px 0 0',fontSize:10,fontFamily:SANS,
+                          color:sharedMoments.has(tx.id)?'#be185d':C.inkSoft}}>
+                          {tx.date}{tx.source?' · '+instLabel(tx.source):''}
+                          {tx.who?' · '+tx.who:''}
+                          {sharedMoments.has(tx.id)&&
+                            ` · together with ${sharedMoments.get(tx.id).partner}`}
+                        </p>
+                      </div>
+                      <p style={{margin:0,fontFamily:SERIF,fontSize:14,fontWeight:600,
+                        color:C.ink,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
+                      {busyId===tx.id
+                        ? <Spinner size={13}/>
+                        : (
+                          <select
+                            value={cat.id}
+                            onChange={e=>{
+                              if(e.target.value!==cat.id) reassign(tx,e.target.value);
+                            }}
+                            style={{border:`1px solid ${C.sandDark}`,borderRadius:7,
+                              padding:'3px 5px',fontSize:10,fontWeight:600,color:C.inkMid,
+                              background:C.white,cursor:'pointer',fontFamily:SANS,maxWidth:104}}>
+                            {allCats.map(x=><option key={x.id} value={x.id}>{x.label}</option>)}
+                          </select>
+                        )}
+                    </div>
+                  ))}
+                  {rows.length>0&&(
+                    <p style={{margin:'6px 18px 0 30px',fontSize:10,color:C.inkSoft,
+                      fontFamily:SANS,lineHeight:1.5}}>
+                      Change any dropdown to move that transaction to another category.
+                    </p>
+                  )}
+                  {cat.custom&&(
+                    <button
+                      onClick={()=>{if(window.confirm(`Remove the "${cat.label}" category?`)){
+                        setOpenCat(null); onDeleteCat(cat.id);}}}
+                      style={{display:'flex',alignItems:'center',gap:6,margin:'10px 18px 0 30px',
+                        border:`1px solid ${C.red}44`,borderRadius:8,padding:'5px 10px',
+                        background:C.white,cursor:'pointer',fontFamily:SANS,
+                        fontSize:11,fontWeight:600,color:C.red}}>
+                      <Trash2 size={12} color={C.red}/> Remove this category
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -1011,6 +1162,7 @@ function AddTab({profile,allCats,onAdd}) {
 
 // ─── HISTORY TAB ──────────────────────────────────────────────────────────────
 function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveNote}) {
+  const { shared:sharedMoments } = findSharedMoments([...txns,...bankImports]);
   const [filter,   setFilter]   = useState('all');
   const [srcFil,   setSrcFil]   = useState('all');
   const [editNote, setEditNote] = useState(null); // { id, type, value }
@@ -1070,8 +1222,14 @@ function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveN
                     </div>
                     <div style={{flex:1,minWidth:0}}>
                       <p style={{margin:0,fontSize:14,fontWeight:500,color:C.ink,fontFamily:SANS,
-                        overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                        {tx.note||tx.description||c.label}</p>
+                        display:'flex',alignItems:'center',gap:5,minWidth:0}}>
+                        {sharedMoments.has(tx.id)&&(
+                          <Heart size={12} color="#be185d" fill="#be185d" style={{flexShrink:0}}/>
+                        )}
+                        <span style={{overflow:'hidden',textOverflow:'ellipsis',
+                          whiteSpace:'nowrap'}}>
+                          {tx.note||tx.description||c.label}
+                        </span></p>
                       {/* Editable note field */}
                       {editNote?.id===tx.id ? (
                         <div style={{display:'flex',gap:6,marginTop:4}} onClick={e=>e.stopPropagation()}>
@@ -1196,8 +1354,10 @@ function ChartsTab({txns,bankImports,allCats,year,month}) {
 
   // Monthly data
   const allTx=[...txns,...bankImports];
+  const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
   const monthly={};
-  allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')monthly[k]=(monthly[k]||0)+t.amount;});
+  allTx.forEach(t=>{const k=t.category||t.cat;
+    if(k&&k!=='_skip'&&!excludedIds.has(k))monthly[k]=(monthly[k]||0)+t.amount;});
   const monthlyTotal=Object.values(monthly).reduce((a,b)=>a+b,0);
   const monthlySlices=allCats
     .map(c=>({id:c.id,label:c.label,color:c.color,value:monthly[c.id]||0}))
@@ -1206,7 +1366,9 @@ function ChartsTab({txns,bankImports,allCats,year,month}) {
 
   // Annual data
   const annual={};
-  annualData.forEach(({category,amount})=>{if(category&&category!=='_skip')annual[category]=(annual[category]||0)+amount;});
+  annualData.forEach(({category,amount})=>{
+    if(category&&category!=='_skip'&&!excludedIds.has(category))
+      annual[category]=(annual[category]||0)+amount;});
   const annualTotal=Object.values(annual).reduce((a,b)=>a+b,0);
   const annualSlices=allCats
     .map(c=>({id:c.id,label:c.label,color:c.color,value:annual[c.id]||0}))
@@ -1215,9 +1377,8 @@ function ChartsTab({txns,bankImports,allCats,year,month}) {
 
   // Monthly breakdown from annual
   const byMonth={};
-  annualData.filter(d=>d.year===year).forEach(({month:m,amount})=>{
-    byMonth[m]=(byMonth[m]||0)+amount;
-  });
+  annualData.filter(d=>d.year===year&&!excludedIds.has(d.category))
+    .forEach(({month:m,amount})=>{ byMonth[m]=(byMonth[m]||0)+amount; });
 
   const slices  = view==='month' ? monthlySlices  : annualSlices;
   const total   = view==='month' ? monthlyTotal   : annualTotal;
@@ -1336,6 +1497,12 @@ function UploadTab({showToast, onImported, allCats}) {
       const ans = answers[tr.id] ?? tr.default;
       if (ans.startsWith('Yes')) return false;
     }
+    // E-transfer between the two of you — household money moving, not spending
+    const pt = issues.find(i => i.type === 'partner_transfer' && i.row.id === row.id);
+    if (pt) {
+      const ans = answers[pt.id] ?? pt.default;
+      if (ans.startsWith('Yes')) return false;
+    }
     // Standalone card payment / transfer with no partner in this batch
     const pay = issues.find(i => i.type === 'card_payment' && i.row.id === row.id);
     if (pay) {
@@ -1407,10 +1574,16 @@ function UploadTab({showToast, onImported, allCats}) {
 
     let existing = [];
     try { existing = await getAllBankImportsRaw(); } catch {}
-    const report = buildValidationReport(rawRows, existing);
+
+    // Cross-check against the other person's already-imported statements:
+    // an e-transfer between the two of you is household money moving, not spending.
+    const tagged = rawRows.map(r => ({ ...r, who }));
+    const partnerIssues = detectPartnerTransfers(tagged, existing);
+
+    const report = buildValidationReport(tagged, existing, partnerIssues);
 
     setModal(null);
-    setParsed(rawRows.map(r => ({ ...r, who })));
+    setParsed(tagged);
     setEdits({});
     setIssues(report.all);
     setAutoFixed(report.autoFixed);
@@ -1501,7 +1674,10 @@ function UploadTab({showToast, onImported, allCats}) {
 
   async function confirmImport() {
     setSaving(true);
-    const toSave = finalRows.map(({ _type, _confidence, _fromPDF, _acctLabel, ...r }) => r);
+    const toSave = finalRows.map(({ _type, _confidence, _fromPDF, _acctLabel, _internal, ...r }) => ({
+      ...r,
+      direction: _type || 'debit',   // needed later to pair partner e-transfers
+    }));
     try {
       await insertBankImports(toSave);
       onImported();
@@ -1746,6 +1922,7 @@ function UploadTab({showToast, onImported, allCats}) {
       .reduce((a, i) => a + i.row.amount, 0);
 
     const TYPE_META = {
+      partner_transfer:   { icon:'💸', label:'Transfer between you two',          color:C.green },
       internal_transfer:  { icon:'🔄', label:'Money moved between your accounts', color:C.green },
       card_payment:       { icon:'💳', label:'Card payment or transfer',          color:C.green },
       duplicate_in_batch: { icon:'🔁', label:'Same transaction twice in this file',color:C.blue },
@@ -2331,6 +2508,26 @@ export default function App() {
     } catch(e) { showToast('Could not load items: '+e.message); }
   }
 
+  // Move one transaction to a different category. Works for both manual
+  // entries and imported rows, and updates local state immediately so the
+  // drill-down and the bars reflect the change without a round trip.
+  async function handleChangeCategory(tx, newCat) {
+    const isImport = tx.description !== undefined || tx.source !== undefined;
+    try {
+      if (isImport) {
+        await updateBankImport(tx.id, { category: newCat });
+        setImports(prev => prev.map(t => t.id === tx.id ? { ...t, category: newCat } : t));
+      } else {
+        await updateTransaction(tx.id, { cat: newCat });
+        setTxns(prev => prev.map(t => t.id === tx.id ? { ...t, cat: newCat } : t));
+      }
+      const label = allCats.find(c => c.id === newCat)?.label || newCat;
+      showToast(`Moved to ${label}`);
+    } catch (e) {
+      showToast('Could not move that transaction');
+    }
+  }
+
   async function handleSaveNote(id, type, note) {
     try {
       if (type === 'import') {
@@ -2486,7 +2683,8 @@ export default function App() {
           onSaveSettings={saveSettings} suggested={suggested} onAcceptSuggested={acceptSuggested}
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
           onReviewOther={openReview}
-          otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}/>}
+          otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}
+          onChangeCategory={handleChangeCategory}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}

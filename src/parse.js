@@ -170,13 +170,18 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
     // transfer pair in order to match them up. They are tagged instead.
     const cat = categorize(desc);
     const looksInternal = cat === '_skip';
+    // A payment to a card is money moving, not money spent. Land it in the
+    // excluded 'cc_payment' bucket so it can never inflate the spending total.
+    const isCardPayment =
+      direction === 'credit' &&
+      /payment|pmt|paiement|thank you|autopay|pre.?auth/i.test(desc);
 
     rows.push({
       id:          uid(),
       date:        dateObj.toISOString().slice(0,10),
       description: desc,
       amount,
-      category:    looksInternal ? 'other' : cat,
+      category:    isCardPayment ? 'cc_payment' : looksInternal ? 'other' : cat,
       source,
       month:       dateObj.getMonth(),
       year:        dateObj.getFullYear(),
