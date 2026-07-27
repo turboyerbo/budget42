@@ -67,7 +67,7 @@ function detectFormat(headers) {
   return 'GENERIC';
 }
 
-export function parseStatementCSV(text, source) {
+export function parseStatementCSV(text, source = 'UNKNOWN') {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return { rows:[], error:'File appears empty.' };
 

@@ -27,7 +27,7 @@ async function toBase64(file) {
  *   rawCount  — how many raw transactions Claude found before filtering
  *   warnings  — human-readable notes from Claude about the document
  */
-export async function parsePDFStatement(file, source) {
+export async function parsePDFStatement(file) {
   if (!KEY) throw new Error('VITE_ANTHROPIC_API_KEY is required for PDF parsing.');
 
   if (file.size > 25 * 1024 * 1024) {
@@ -39,15 +39,30 @@ export async function parsePDFStatement(file, source) {
 
   const PROMPT = `You are analyzing a Canadian bank or credit card statement PDF.
 
-Extract EVERY transaction line and return a JSON object with this exact structure:
+IMPORTANT: this document may contain MORE THAN ONE account (for example a
+chequing statement and a credit card statement bundled together, or several
+months). Identify every account present and tag each transaction with the
+account it belongs to.
+
+Return a JSON object with this exact structure:
 {
-  "account": "account name/number if visible",
-  "period": "statement period if visible",
-  "warnings": ["any notes about data quality or things the user should check"],
+  "accounts": [
+    {
+      "key": "acct1",
+      "institution": "BMO|CTFS|WS_JOINT|WS_PERS|PC_MC|CIBC|UNKNOWN",
+      "institutionName": "the name printed on the statement",
+      "accountLabel": "e.g. Chequing ****4073",
+      "kind": "bank|credit",
+      "period": "statement period if visible",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "warnings": ["anything the user should double-check"],
   "transactions": [
     {
+      "account": "acct1",
       "date": "YYYY-MM-DD",
-      "description": "exact merchant/payee name from statement",
+      "description": "exact merchant/payee name",
       "amount": 87.43,
       "type": "debit",
       "confidence": "high|medium|low"
@@ -55,18 +70,29 @@ Extract EVERY transaction line and return a JSON object with this exact structur
   ]
 }
 
+INSTITUTION MAPPING — map what is printed on the statement to these ids:
+- Bank of Montreal / BMO            -> BMO
+- Canadian Tire / Triangle / CTFS   -> CTFS
+- Wealthsimple, joint account       -> WS_JOINT
+- Wealthsimple, personal account    -> WS_PERS
+- PC Financial / President's Choice -> PC_MC
+- CIBC                              -> CIBC
+- anything else / not stated        -> UNKNOWN
+
 RULES — follow exactly:
-- date: must be YYYY-MM-DD. If only month/day visible, infer year from statement period.
-- amount: always a positive number (absolute value)
-- type: "debit" = money spent/withdrawn/charged. "credit" = money received/deposited/refund.
-- confidence: "low" if the row was hard to read (blurry, cut off, partial)
-- INCLUDE: all purchases, withdrawals, transfers out, service charges, interest charges
-- INCLUDE as type "credit": deposits, payroll, refunds, e-transfers received
-- EXCLUDE: opening balance, closing balance, running totals, page headers
-- EXCLUDE: rows that are purely labels with no transaction (e.g. "Previous balance")
-- If you see a transaction twice on the same date with the same amount, include BOTH 
-  and add a warning — the user should confirm if it's a duplicate or a real repeat purchase.
-- Do NOT skip any transaction. It is better to include uncertain rows than to miss them.
+- date: must be YYYY-MM-DD. If only month/day is visible, infer the year from the statement period.
+- amount: always a positive number (absolute value).
+- type: "debit" = money spent/withdrawn/charged. "credit" = money received/deposited/refunded.
+- account: must match one of the "key" values you defined in "accounts".
+- If only one account is present, still return the accounts array with a single entry.
+- confidence: "low" if the row was hard to read (blurry, cut off, partial).
+- INCLUDE: purchases, withdrawals, transfers out, service charges, interest charges.
+- INCLUDE as type "credit": deposits, payroll, refunds, e-transfers received.
+- EXCLUDE: opening balance, closing balance, running totals, page headers.
+- EXCLUDE rows that are purely labels with no transaction (e.g. "Previous balance").
+- If a transaction appears twice on the same date for the same amount, include BOTH
+  and add a warning — the user will confirm whether it is a real repeat purchase.
+- Do NOT skip any transaction. Better to include an uncertain row than to miss it.
 - Return ONLY the JSON object. No markdown, no explanation.`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -103,18 +129,21 @@ RULES — follow exactly:
 
   const rawCount = parsed.transactions?.length || 0;
   const warnings = parsed.warnings || [];
+  const accounts = parsed.accounts?.length
+    ? parsed.accounts
+    : [{ key:'acct1', institution:'UNKNOWN', institutionName:'', accountLabel:'', kind:'bank', confidence:'none' }];
+
+  const acctByKey = Object.fromEntries(accounts.map(a => [a.key, a]));
 
   // Build rows compatible with the rest of the app
   const { categorize } = await import('./categorize.js');
 
   const rows = (parsed.transactions || []).map(tx => {
-    // Parse date
     let date = tx.date || '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) date = new Date().toISOString().slice(0, 10);
 
     const dateObj = new Date(date + 'T00:00:00');
-    const month   = dateObj.getMonth();
-    const year    = dateObj.getFullYear();
+    const acct    = acctByKey[tx.account] || accounts[0];
 
     return {
       id:          uid(),
@@ -122,11 +151,12 @@ RULES — follow exactly:
       description: tx.description || '(unknown)',
       amount:      Math.abs(parseFloat(tx.amount) || 0),
       category:    categorize(tx.description || ''),
-      source,
-      month,
-      year,
-      _type:       tx.type || 'debit',      // 'debit' | 'credit'
+      source:      acct.institution || 'UNKNOWN',   // per-transaction institution
+      month:       dateObj.getMonth(),
+      year:        dateObj.getFullYear(),
+      _type:       tx.type || 'debit',
       _confidence: tx.confidence || 'high',
+      _acctLabel:  acct.accountLabel || '',
       _fromPDF:    true,
     };
   });
@@ -137,7 +167,6 @@ RULES — follow exactly:
     rows,
     rawCount,
     warnings,
-    account: parsed.account || '',
-    period:  parsed.period  || '',
+    accounts,
   };
 }

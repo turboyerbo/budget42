@@ -148,3 +148,69 @@ export async function suggestCategory(description, amount, catIds) {
     return null;
   }
 }
+
+/**
+ * After an import, explain in plain language how this changes the picture.
+ * `newRows`    — what was just imported
+ * `historical` — all prior bank_imports (year, month, category, amount)
+ */
+export async function spendingInsight(newRows, historical, catLabels) {
+  if (!KEY || !newRows?.length) return null;
+
+  // Summarise locally so we send numbers, not hundreds of raw rows
+  const byCat = {};
+  newRows.forEach(r => { byCat[r.category] = (byCat[r.category] || 0) + r.amount; });
+
+  const priorByCatMonth = {};
+  (historical || []).forEach(r => {
+    const k = r.category;
+    if (!priorByCatMonth[k]) priorByCatMonth[k] = {};
+    const mk = `${r.year}-${r.month}`;
+    priorByCatMonth[k][mk] = (priorByCatMonth[k][mk] || 0) + r.amount;
+  });
+
+  const compare = Object.entries(byCat).map(([cat, total]) => {
+    const months = Object.values(priorByCatMonth[cat] || {});
+    const avg = months.length
+      ? months.reduce((a, b) => a + b, 0) / months.length
+      : null;
+    return {
+      category: catLabels?.[cat] || cat,
+      thisImport: Math.round(total),
+      monthlyAverage: avg == null ? null : Math.round(avg),
+    };
+  }).sort((a, b) => b.thisImport - a.thisImport).slice(0, 10);
+
+  const total = Math.round(newRows.reduce((a, r) => a + r.amount, 0));
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'x-api-key':KEY,
+                 'anthropic-version':'2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        messages: [{ role:'user', content:
+          `A user just imported a bank statement into their household budget app.\n` +
+          `Total imported spending: $${total}\n\n` +
+          `Category breakdown (thisImport vs their monthlyAverage from past statements, ` +
+          `null means no history yet):\n${JSON.stringify(compare, null, 2)}\n\n` +
+          `Write 2-4 short observations about what this means for their spending. ` +
+          `Be concrete and specific — name categories and dollar figures. ` +
+          `Point out anything notably above or below their usual pattern. ` +
+          `Be warm and matter-of-fact, never preachy or judgemental about their choices. ` +
+          `If there is little history yet, say so plainly and note that accuracy improves ` +
+          `with more statements.\n\n` +
+          `Reply ONLY with JSON, no markdown:\n` +
+          `{"headline":"<one sentence summary>","points":["<observation>","<observation>"]}` }],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const txt  = (data.content?.[0]?.text || '').replace(/```json?|```/g,'').trim();
+    return JSON.parse(txt);
+  } catch {
+    return null;
+  }
+}

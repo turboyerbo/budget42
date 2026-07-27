@@ -5,7 +5,7 @@ import {
   Home, Plus, History, CalendarDays, Upload, PieChart,
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
-  Bell, BellRing,
+  Bell, BellRing, Landmark, HelpCircle,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -16,8 +16,9 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
-import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory } from './ai.js';
+import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
+import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { buildValidationReport } from './validate.js';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -91,13 +92,6 @@ const UPCOMING = [
   {label:'CTFS finance charge',amount:438,  date:'Aug 10',crit:true, type:'debt'},
   {label:'Netflix',            amount:9.03, date:'Aug 2', crit:false,type:'sub'},
   {label:'Freedom Mobile',     amount:45.20,date:'Aug 20',crit:false,type:'bill'},
-];
-const SOURCES = [
-  {id:'BMO',     label:'BMO Chequing'},
-  {id:'CTFS',    label:'Canadian Tire'},
-  {id:'WS_JOINT',label:'Wealthsimple Joint'},
-  {id:'PC_MC',   label:'PC Mastercard'},
-  {id:'CIBC',    label:'CIBC (Ness)'},
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -616,7 +610,7 @@ function OtherReviewModal({ items, allCats, onSave, onClose }) {
                     <p style={{ margin:0, fontSize:14, fontWeight:600, color:C.ink,
                       fontFamily:SANS, lineHeight:1.3 }}>{tx.description}</p>
                     <p style={{ margin:'3px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
-                      {tx.date} · {tx.source}
+                      {tx.date} · {instLabel(tx.source)}
                     </p>
                   </div>
                   <p style={{ margin:0, fontFamily:SERIF, fontSize:18, fontWeight:700,
@@ -1109,7 +1103,7 @@ function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveN
                             {tx.note
                               ? tx.note
                               : (tx._type==='import'
-                                  ? `${tx.source} import · tap to add note`
+                                  ? `${instLabel(tx.source)} · tap to add note`
                                   : `${c.label} · tap to add note`)}
                             {tx.who?' · '+tx.who:''}
                           </p>
@@ -1308,40 +1302,39 @@ function ChartsTab({txns,bankImports,allCats,year,month}) {
 }
 
 
-// ─── UPLOAD TAB v7 ────────────────────────────────────────────────────────────
-// Supports CSV and PDF. PDF uses Claude document vision.
-// Pipeline: pick → [processing modal] → validate issues → review → done
-// Smart checks: duplicates, income/credit, large transactions
+
+// ─── UPLOAD TAB v8 ────────────────────────────────────────────────────────────
+// One button. No bank picker — the AI reads the statement and works out which
+// institution it came from, including documents containing several accounts.
+// Pipeline: pick → [processing] → identify (only if unsure) → validate → review → done
 function UploadTab({showToast, onImported, allCats}) {
-  const [source,     setSource]    = useState('BMO');
-  const [who,        setWho]       = useState('jordan');
-  const [step,       setStep]      = useState('pick');
-  const [fileType,   setFileType]  = useState(null);
-  const [parsed,     setParsed]    = useState([]);
-  const [edits,      setEdits]     = useState({});
-  const [issues,     setIssues]    = useState([]);
-  const [answers,    setAnswers]   = useState({});
-  const [error,      setError]     = useState(null);
-  const [csvFailed,  setCsvFailed] = useState(false);
-  const [modal,      setModal]     = useState(null);
-  const [pdfMeta,    setPdfMeta]   = useState(null);
-  const [saving,     setSaving]    = useState(false);
+  const [who,       setWho]      = useState('jordan');
+  const [step,      setStep]     = useState('pick');
+  const [fileType,  setFileType] = useState(null);
+  const [parsed,    setParsed]   = useState([]);
+  const [edits,     setEdits]    = useState({});
+  const [issues,    setIssues]   = useState([]);
+  const [answers,   setAnswers]  = useState({});
+  const [accounts,  setAccounts] = useState([]);   // detected institutions
+  const [askBank,   setAskBank]  = useState(null); // { text } when we must ask
+  const [pendingCSV,setPendingCSV]=useState(null); // raw text awaiting bank choice
+  const [error,     setError]    = useState(null);
+  const [csvFailed, setCsvFailed]= useState(false);
+  const [modal,     setModal]    = useState(null);
+  const [warnings,  setWarnings] = useState([]);
+  const [insight,   setInsight]  = useState(null);
+  const [saving,    setSaving]   = useState(false);
 
   const tick = () => new Promise(r => setTimeout(r, 50));
 
-  // After issue resolution, compute which rows to actually import
   const finalRows = parsed.filter(row => {
-    // Duplicate against already-imported data (only ever tagged on this row)
     const dupEx = issues.find(i => i.type === 'duplicate_existing' && i.row.id === row.id);
     if (dupEx) {
       const ans = answers[dupEx.id] ?? dupEx.default;
       if (ans === 'Skip — already imported') return false;
     }
-    // Duplicate inside this batch — the issue covers a PAIR of rows, so check both
     const dupBatch = issues.find(i =>
-      i.type === 'duplicate_in_batch' &&
-      (i.secondId === row.id || i.firstId === row.id)
-    );
+      i.type === 'duplicate_in_batch' && (i.secondId === row.id || i.firstId === row.id));
     if (dupBatch) {
       const ans = answers[dupBatch.id] ?? dupBatch.default;
       if (ans === 'Keep first only'  && dupBatch.secondId === row.id) return false;
@@ -1362,6 +1355,7 @@ function UploadTab({showToast, onImported, allCats}) {
   }).map(row => ({
     ...row,
     category: edits[row.id]?.cat  || row.category,
+    source:   edits[row.id]?.src  || row.source,
     note:     edits[row.id]?.note || row.note || '',
     who,
   }));
@@ -1373,74 +1367,113 @@ function UploadTab({showToast, onImported, allCats}) {
     byMonth[k].push(r);
   });
 
-  // ── Main parse pipeline ──────────────────────────────────────────────────────
-  async function runPipeline(file) {
-    const isPDF = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
-    setError(null); setCsvFailed(false); setPdfMeta(null);
-    setFileType(isPDF ? 'pdf' : 'csv');
-    let rawRows = [];
+  // Which institutions ended up in this batch
+  const usedSources = [...new Set(finalRows.map(r => r.source))];
 
-    if (isPDF) {
-      if (!PDF_AVAILABLE) {
-        setError('PDF parsing requires VITE_ANTHROPIC_API_KEY in your Netlify environment variables.');
-        return;
-      }
-      setModal({ title: 'Claude is reading your PDF', sub: 'Analysing every page of your bank statement. This takes 10–30 seconds — please wait.' });
-      await tick();
-      try {
-        const result = await parsePDFStatement(file, source);
-        rawRows = result.rows;
-        setPdfMeta({ account: result.account, period: result.period, warnings: result.warnings });
-      } catch (err) {
-        setModal(null);
-        setError('PDF parsing failed: ' + err.message + '\n\nMake sure your VITE_ANTHROPIC_API_KEY is set in Netlify.');
-        return;
-      }
-    } else {
-      setModal({ title: 'Reading your file', sub: 'Parsing columns and extracting transaction data…' });
-      await tick();
-      const text = await file.text().catch(() => null);
-      if (!text) { setModal(null); setError('Could not read file.'); return; }
-      const { rows, error: pe, debug } = parseStatementCSV(text, source);
-      if (pe || rows.length === 0) {
-        setModal(null);
-        setCsvFailed(true);
-        setError((pe || 'No transactions found.') + '\n\nFormat: ' + (debug?.format || 'unknown') + ' · Headers: ' + (debug?.headers?.slice(0,5).join(', ') || 'none'));
-        return;
-      }
-      rawRows = rows;
-    }
-
-    setModal({ title: 'Categorising ' + rawRows.length + ' transactions', sub: 'Matching merchants to your budget categories using months of spending history…' });
+  // ── Shared tail of the pipeline: categorise → validate ──────────────────────
+  async function finishPipeline(rawRows) {
+    setModal({ title:'Categorising ' + rawRows.length + ' transactions',
+      sub:'Matching merchants to your budget categories using your spending history…' });
     await tick();
 
-    // AI pass for unrecognised merchants
     const others = rawRows.filter(r => r.category === 'other');
     if (AI_AVAILABLE && others.length > 0) {
-      setModal({ title: 'Asking Claude to help', sub: others.length + ' merchants weren\'t recognised. Getting AI category suggestions now…' });
+      setModal({ title:'Asking Claude to help',
+        sub: others.length + ' merchants weren\'t recognised. Getting category suggestions now…' });
       await tick();
       try {
-        const catIds = allCats.map(c => c.id);
-        const aiMap  = await aiCategorize(others, catIds);
+        const aiMap = await aiCategorize(others, allCats.map(c => c.id));
         rawRows.forEach(r => { if (aiMap[r.id]) r.category = aiMap[r.id]; });
       } catch {}
     }
 
-    // Smart validation pass
-    setModal({ title: 'Running smart checks', sub: 'Checking for duplicates, income transactions, and data anomalies…' });
+    setModal({ title:'Running smart checks',
+      sub:'Checking for duplicates, income transactions, and data anomalies…' });
     await tick();
 
-    let existingRows = [];
-    try { existingRows = await getAllBankImportsRaw(); } catch {}
-    const found = buildValidationReport(rawRows, existingRows);
+    let existing = [];
+    try { existing = await getAllBankImportsRaw(); } catch {}
+    const found = buildValidationReport(rawRows, existing);
 
     setModal(null);
-    const withWho = rawRows.map(r => ({ ...r, who }));
-    setParsed(withWho);
+    setParsed(rawRows.map(r => ({ ...r, who })));
     setEdits({});
     setIssues(found);
     setAnswers(Object.fromEntries(found.map(i => [i.id, i.default])));
     setStep(found.length > 0 ? 'validate' : 'review');
+  }
+
+  // ── Entry point ─────────────────────────────────────────────────────────────
+  async function runPipeline(file) {
+    const isPDF = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+    setError(null); setCsvFailed(false); setAccounts([]); setWarnings([]); setInsight(null);
+    setFileType(isPDF ? 'pdf' : 'csv');
+
+    if (isPDF) {
+      if (!PDF_AVAILABLE) {
+        setError('PDF reading needs VITE_ANTHROPIC_API_KEY set in your Netlify environment variables.');
+        return;
+      }
+      setModal({ title:'Claude is reading your statement',
+        sub:'Working out which bank it is from and pulling every transaction off each page. This takes 10–30 seconds.' });
+      await tick();
+      try {
+        const result = await parsePDFStatement(file);
+        setAccounts(result.accounts || []);
+        setWarnings(result.warnings || []);
+        if (!result.rows.length) {
+          setModal(null);
+          setError('Claude read the document but found no transactions in it.');
+          return;
+        }
+        await finishPipeline(result.rows);
+      } catch (err) {
+        setModal(null);
+        setError('Could not read that PDF: ' + err.message);
+      }
+      return;
+    }
+
+    // ── CSV path ──
+    setModal({ title:'Reading your statement', sub:'Identifying the bank and extracting transactions…' });
+    await tick();
+    const text = await file.text().catch(() => null);
+    if (!text) { setModal(null); setError('Could not read that file.'); return; }
+
+    const detected = await detectBank(text);
+
+    if (detected.id === 'UNKNOWN') {
+      // Genuinely can't tell — this is the only time we bother the user
+      setModal(null);
+      setPendingCSV(text);
+      setAskBank({ preview: text.split(/\r?\n/).slice(0, 4).join(' · ').slice(0, 160) });
+      setStep('identify');
+      return;
+    }
+
+    await parseCSVWith(text, detected);
+  }
+
+  async function parseCSVWith(text, detected) {
+    setModal({ title:'Reading your statement',
+      sub:'Recognised as ' + instLabel(detected.id) + '. Extracting transactions…' });
+    await tick();
+
+    const { rows, error: pe, debug } = parseStatementCSV(text, detected.id);
+    if (pe || rows.length === 0) {
+      setModal(null);
+      setCsvFailed(true);
+      setError((pe || 'No transactions found in that file.') +
+        '\n\nDetected: ' + instLabel(detected.id) +
+        ' · Columns: ' + (debug?.headers?.slice(0,5).join(', ') || 'none'));
+      return;
+    }
+
+    setAccounts([{ key:'csv', institution:detected.id,
+      institutionName:instLabel(detected.id), accountLabel:'',
+      kind:instKind(detected.id), confidence:detected.confidence,
+      how:detected.how }]);
+    await finishPipeline(rows);
   }
 
   async function handleFile(e) {
@@ -1452,24 +1485,37 @@ function UploadTab({showToast, onImported, allCats}) {
 
   async function confirmImport() {
     setSaving(true);
-    const toSave = finalRows.map(({ _type, _confidence, _fromPDF, ...r }) => r);
+    const toSave = finalRows.map(({ _type, _confidence, _fromPDF, _acctLabel, ...r }) => r);
     try {
       await insertBankImports(toSave);
       onImported();
-      showToast('Imported ' + toSave.length + ' transactions');
       setStep('done');
-    } catch (err) { showToast('Import failed — ' + err.message); }
+
+      // Generate the insight after saving so the user isn't kept waiting
+      if (AI_AVAILABLE) {
+        setInsight('loading');
+        try {
+          const hist = await getAllBankImports();
+          const labels = Object.fromEntries(allCats.map(c => [c.id, c.label]));
+          const out = await spendingInsight(toSave, hist, labels);
+          setInsight(out || null);
+        } catch { setInsight(null); }
+      }
+    } catch (err) {
+      showToast('Import failed — ' + err.message);
+    }
     setSaving(false);
   }
 
   function reset() {
-    setStep('pick'); setParsed([]); setEdits({}); setIssues([]);
-    setAnswers({}); setError(null); setCsvFailed(false);
-    setPdfMeta(null); setFileType(null); setModal(null);
+    setStep('pick'); setParsed([]); setEdits({}); setIssues([]); setAnswers({});
+    setError(null); setCsvFailed(false); setAccounts([]); setWarnings([]);
+    setFileType(null); setModal(null); setAskBank(null); setPendingCSV(null);
+    setInsight(null);
   }
 
-  // ── Processing overlay (shown during all async stages) ───────────────────────
-  const ProcessingOverlay = modal ? (
+  // ── Processing overlay ──────────────────────────────────────────────────────
+  const Overlay = modal ? (
     <div style={{ position:'fixed', inset:0, zIndex:800, background:'rgba(26,26,24,0.78)',
       display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
       <div style={{ background:C.white, borderRadius:20, padding:'32px 28px',
@@ -1485,20 +1531,31 @@ function UploadTab({showToast, onImported, allCats}) {
           <p style={{ margin:0, fontSize:12, fontWeight:700, color:C.red, fontFamily:SANS }}>
             ⚠ Do not close or refresh this page
           </p>
-          <p style={{ margin:'3px 0 0', fontSize:11, color:C.red+'99', fontFamily:SANS }}>
-            Your data is being processed. It will be ready shortly.
-          </p>
         </div>
       </div>
     </div>
   ) : null;
 
-  // ── PICK SCREEN ──────────────────────────────────────────────────────────────
+  // Small institution chip used in a few places
+  const Chip = ({ id, label, sub }) => (
+    <div style={{ display:'inline-flex', alignItems:'center', gap:7,
+      background: instColor(id) + '14', border:'1px solid ' + instColor(id) + '44',
+      borderRadius:99, padding:'5px 12px 5px 9px' }}>
+      {instKind(id) === 'credit'
+        ? <CreditCard size={13} color={instColor(id)}/>
+        : <Landmark   size={13} color={instColor(id)}/>}
+      <span style={{ fontSize:12, fontWeight:700, color:instColor(id), fontFamily:SANS }}>
+        {label || instLabel(id)}
+      </span>
+      {sub && <span style={{ fontSize:11, color:instColor(id) + 'aa', fontFamily:SANS }}>{sub}</span>}
+    </div>
+  );
+
+  // ── PICK ────────────────────────────────────────────────────────────────────
   if (step === 'pick') return (
     <div style={{ padding:'16px 16px 0' }}>
-      {ProcessingOverlay}
+      {Overlay}
 
-      {/* Welcome card */}
       <div style={{ background:'linear-gradient(135deg,#1a7a4a,#2d9d61)',
         borderRadius:16, padding:'20px 18px', marginBottom:14, color:'#fff' }}>
         <p style={{ margin:'0 0 6px', fontSize:16, fontWeight:700, fontFamily:SERIF }}>
@@ -1506,16 +1563,15 @@ function UploadTab({showToast, onImported, allCats}) {
         </p>
         <p style={{ margin:'0 0 10px', fontSize:13, fontFamily:SANS,
           color:'rgba(255,255,255,0.85)', lineHeight:1.6 }}>
-          Works with <b>CSV or PDF</b>. Every upload is cross-checked for duplicates
-          and income transactions before anything is saved.
-          The more months you upload, the smarter your budgets get.
+          Just pick the file — <b>CSV or PDF</b>. You don't need to tell us which bank
+          it's from; the statement says so and Claude reads it. One document can even
+          hold several accounts.
         </p>
         <p style={{ margin:0, fontSize:12, color:'rgba(255,255,255,0.65)', fontFamily:SANS }}>
-          💡 Having trouble with CSV? Try the PDF version — Claude reads it directly.
+          💡 Every upload is checked for duplicates and income before anything is saved.
         </p>
       </div>
 
-      {/* CSV failed → offer PDF */}
       {csvFailed && (
         <div style={{ background:'#fffbeb', border:'1.5px solid #b45309',
           borderRadius:14, padding:'16px', marginBottom:14 }}>
@@ -1524,13 +1580,12 @@ function UploadTab({showToast, onImported, allCats}) {
             <div>
               <p style={{ margin:'0 0 4px', fontSize:14, fontWeight:700,
                 color:C.amber, fontFamily:SANS }}>
-                That CSV didn\'t work — but that\'s okay
+                That CSV didn't work — but that's okay
               </p>
               <p style={{ margin:'0 0 8px', fontSize:13, color:'#92400e',
                 fontFamily:SANS, lineHeight:1.6 }}>
-                Banks don\'t always export clean CSV files — it\'s their problem, not yours.
-                Try uploading the <b>PDF version</b> of your statement instead.
-                Claude will read every page and extract all transactions automatically.
+                Banks don't always export a clean CSV — that's their problem, not yours.
+                Upload the <b>PDF version</b> instead and Claude will read it page by page.
               </p>
               {error && (
                 <div style={{ background:'rgba(0,0,0,0.05)', borderRadius:7,
@@ -1544,24 +1599,20 @@ function UploadTab({showToast, onImported, allCats}) {
               background:C.amber, cursor:'pointer', textAlign:'center',
               fontSize:14, fontWeight:700, color:'#fff', fontFamily:SANS,
               position:'relative', overflow:'hidden', boxSizing:'border-box' }}>
-              📄 Try uploading the PDF instead →
+              Try uploading the PDF instead →
               <input type="file" accept=".pdf,application/pdf" onChange={handleFile}
                 style={{ position:'absolute', top:0, left:0, width:'100%',
                   height:'100%', opacity:0, cursor:'pointer' }}/>
             </label>
           ) : (
-            <div style={{ background:'rgba(0,0,0,0.06)', borderRadius:9,
-              padding:'10px 12px' }}>
-              <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS }}>
-                To enable PDF parsing, add <b>VITE_ANTHROPIC_API_KEY</b> to your
-                Netlify environment variables and redeploy.
-              </p>
-            </div>
+            <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS }}>
+              Add <b>VITE_ANTHROPIC_API_KEY</b> to your Netlify environment variables
+              to enable PDF reading.
+            </p>
           )}
         </div>
       )}
 
-      {/* Generic error (non-CSV-fail) */}
       {error && !csvFailed && (
         <div style={{ background:C.redLight, border:'1px solid rgba(192,57,43,0.2)',
           borderRadius:12, padding:'12px 16px', marginBottom:14 }}>
@@ -1573,36 +1624,11 @@ function UploadTab({showToast, onImported, allCats}) {
         </div>
       )}
 
-      {AI_AVAILABLE && !csvFailed && (
-        <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd', borderRadius:12,
-          padding:'10px 14px', marginBottom:14, display:'flex', gap:8, alignItems:'center' }}>
-          <Sparkles size={13} color={C.purple}/>
-          <p style={{ margin:0, fontSize:12, color:'#5b21b6', fontFamily:SANS }}>
-            Claude AI connected — PDF reading, smart categorisation, and data validation active.
-          </p>
-        </div>
-      )}
-
-      <SL>Source account</SL>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
-        {SOURCES.map(s => (
-          <button key={s.id} onClick={() => setSource(s.id)} style={{
-            border: '1.5px solid ' + (source===s.id ? C.blue : C.sandDark),
-            borderRadius:12, padding:'12px 14px',
-            background: source===s.id ? '#eff6ff' : C.white,
-            cursor:'pointer', fontSize:13, fontWeight:600,
-            color: source===s.id ? C.blue : C.inkMid,
-            textAlign:'left', fontFamily:SANS }}>
-            {s.label}
-          </button>
-        ))}
-      </div>
-
-      <SL>Spending belongs to</SL>
-      <div style={{ display:'flex', gap:8, marginBottom:24 }}>
+      <SL>Whose spending is this?</SL>
+      <div style={{ display:'flex', gap:8, marginBottom:22 }}>
         {[['jordan','Jordan','#1d4ed8','#eff6ff'],['ness','Ness','#be185d','#fdf2f8']].map(([k,l,col,bg]) => (
           <button key={k} onClick={() => setWho(k)} style={{ flex:1,
-            border: '1.5px solid ' + (who===k ? col : C.sandDark),
+            border:'1.5px solid ' + (who===k ? col : C.sandDark),
             borderRadius:12, padding:'11px',
             background: who===k ? bg : C.white, cursor:'pointer',
             display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
@@ -1612,125 +1638,177 @@ function UploadTab({showToast, onImported, allCats}) {
               {k==='jordan'?'JY':'NMK'}
             </div>
             <span style={{ fontSize:13, fontWeight:600,
-              color:who===k?col:C.inkMid, fontFamily:SANS }}>{l}</span>
+              color: who===k ? col : C.inkMid, fontFamily:SANS }}>{l}</span>
           </button>
         ))}
       </div>
 
-      {/* Main upload button — accepts CSV AND PDF */}
-      <label style={{ display:'block', width:'100%', padding:'18px', borderRadius:14,
-        background:C.ink, cursor:'pointer', textAlign:'center', fontSize:15,
+      <label style={{ display:'block', width:'100%', padding:'20px', borderRadius:14,
+        background:C.ink, cursor:'pointer', textAlign:'center', fontSize:16,
         fontWeight:600, color:'#fff', fontFamily:SANS,
         boxSizing:'border-box', position:'relative', overflow:'hidden' }}>
-        <Upload size={18} style={{ verticalAlign:'middle', marginRight:10 }}/>
-        Choose file (CSV or PDF)
+        <Upload size={19} style={{ verticalAlign:'middle', marginRight:10 }}/>
+        Choose a statement
         <input type="file"
           accept=".csv,.CSV,.pdf,.PDF,text/csv,text/plain,application/pdf"
           onChange={handleFile}
           style={{ position:'absolute', top:0, left:0, width:'100%',
             height:'100%', opacity:0, cursor:'pointer' }}/>
       </label>
-      <p style={{ textAlign:'center', fontSize:12, color:C.inkSoft, marginTop:10, fontFamily:SANS }}>
-        CSV or PDF · BMO · CTFS · Wealthsimple · PC Mastercard · CIBC
+      <p style={{ textAlign:'center', fontSize:12, color:C.inkSoft,
+        marginTop:10, fontFamily:SANS, lineHeight:1.6 }}>
+        CSV or PDF · The bank is detected automatically
       </p>
     </div>
   );
 
-  // ── VALIDATE SCREEN — smart issue-by-issue confirmation ───────────────────────
+  // ── IDENTIFY — only shown when detection genuinely fails ────────────────────
+  if (step === 'identify') return (
+    <div style={{ padding:'16px 16px 0' }}>
+      {Overlay}
+      <Card style={{ padding:'20px 18px' }}>
+        <div style={{ display:'flex', gap:10, alignItems:'flex-start', marginBottom:12 }}>
+          <div style={{ width:34, height:34, borderRadius:10, background:C.amber+'1e',
+            display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+            <HelpCircle size={18} color={C.amber}/>
+          </div>
+          <div>
+            <h2 style={{ margin:0, fontFamily:SERIF, fontSize:21, fontWeight:600, color:C.ink }}>
+              Which bank is this from?
+            </h2>
+            <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft,
+              fontFamily:SANS, lineHeight:1.6 }}>
+              This one doesn't name the institution anywhere we could find, so we need
+              you to tell us just this once.
+            </p>
+          </div>
+        </div>
+
+        {askBank?.preview && (
+          <div style={{ background:C.sand, borderRadius:9, padding:'8px 12px',
+            marginBottom:14, fontFamily:'monospace', fontSize:11,
+            color:C.inkSoft, wordBreak:'break-all' }}>
+            {askBank.preview}…
+          </div>
+        )}
+
+        <div style={{ display:'flex', flexDirection:'column', gap:7 }}>
+          {INSTITUTIONS.filter(i => i.id !== 'UNKNOWN').map(inst => (
+            <button key={inst.id}
+              onClick={() => { setAskBank(null); setStep('pick');
+                parseCSVWith(pendingCSV, { id:inst.id, confidence:'high',
+                  how:'You told us this one' }); }}
+              style={{ border:'1.5px solid ' + C.sandDark, borderRadius:11,
+                padding:'12px 14px', background:C.white, cursor:'pointer',
+                display:'flex', alignItems:'center', gap:10, textAlign:'left' }}>
+              {inst.kind === 'credit'
+                ? <CreditCard size={16} color={inst.color}/>
+                : <Landmark   size={16} color={inst.color}/>}
+              <span style={{ fontSize:14, fontWeight:600, color:C.ink, fontFamily:SANS }}>
+                {inst.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      </Card>
+      <button onClick={reset}
+        style={{ border:'1px solid ' + C.sandDark, width:'100%', padding:'13px',
+          borderRadius:12, fontSize:14, background:C.white, color:C.inkMid,
+          cursor:'pointer', fontFamily:SANS, marginBottom:16 }}>
+        Cancel
+      </button>
+    </div>
+  );
+
+  // ── VALIDATE ────────────────────────────────────────────────────────────────
   if (step === 'validate') return (
     <div style={{ padding:'16px 16px 0' }}>
-      {ProcessingOverlay}
-
-      <div style={{ marginBottom:14 }}>
+      {Overlay}
+      <div style={{ marginBottom:12 }}>
         <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
           Quick data check
         </h2>
         <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
           Found {parsed.length} transactions. Please answer {issues.length}{' '}
-          question{issues.length!==1?'s':''} so we get your financial history exactly right.
+          question{issues.length!==1?'s':''} so your history stays accurate.
         </p>
       </div>
 
-      {pdfMeta?.account && (
+      {accounts.length > 0 && (
+        <div style={{ display:'flex', gap:7, flexWrap:'wrap', marginBottom:12 }}>
+          {accounts.map((a,i) => (
+            <Chip key={i} id={a.institution}
+              label={a.institutionName || instLabel(a.institution)}
+              sub={a.accountLabel || a.period || ''}/>
+          ))}
+        </div>
+      )}
+
+      {warnings.length > 0 && (
         <div style={{ background:'#f5f3ff', border:'1px solid #c4b5fd',
           borderRadius:12, padding:'10px 14px', marginBottom:12 }}>
-          <p style={{ margin:0, fontSize:12, color:'#5b21b6', fontFamily:SANS }}>
-            📄 {pdfMeta.account}{pdfMeta.period ? ' · ' + pdfMeta.period : ''}
-          </p>
-          {(pdfMeta.warnings||[]).map((w,i) => (
-            <p key={i} style={{ margin:'4px 0 0', fontSize:11, color:'#7c3aed', fontFamily:SANS }}>⚠ {w}</p>
+          {warnings.map((w,i) => (
+            <p key={i} style={{ margin: i?'4px 0 0':0, fontSize:11,
+              color:'#5b21b6', fontFamily:SANS, lineHeight:1.6 }}>⚠ {w}</p>
           ))}
         </div>
       )}
 
       {issues.map((issue, idx) => {
-        const ans  = answers[issue.id] ?? issue.default;
-        const icons = { duplicate_in_batch:'🔁', duplicate_existing:'📋', credit_check:'💰', large_transaction:'🔍' };
-        const colors = { duplicate_in_batch:C.blue, duplicate_existing:C.blue, credit_check:C.green, large_transaction:C.amber };
-        const borderColor = colors[issue.type] || C.amber;
-
+        const ans   = answers[issue.id] ?? issue.default;
+        const icons = { duplicate_in_batch:'🔁', duplicate_existing:'📋',
+                        credit_check:'💰', large_transaction:'🔍' };
+        const cols  = { duplicate_in_batch:C.blue, duplicate_existing:C.blue,
+                        credit_check:C.green, large_transaction:C.amber };
+        const bc = cols[issue.type] || C.amber;
         return (
           <div key={issue.id} style={{ background:C.white, borderRadius:14,
             padding:'16px', marginBottom:12,
             boxShadow:'0 1px 4px rgba(0,0,0,0.05), 0 0 0 1px rgba(0,0,0,0.04)',
-            borderLeft: '4px solid ' + borderColor }}>
-
+            borderLeft:'4px solid ' + bc }}>
             <div style={{ display:'flex', gap:10, alignItems:'flex-start', marginBottom:10 }}>
-              <div style={{ width:30, height:30, borderRadius:99,
-                background: borderColor + '18',
+              <div style={{ width:30, height:30, borderRadius:99, background:bc+'18',
                 display:'flex', alignItems:'center', justifyContent:'center',
-                fontSize:16, flexShrink:0 }}>
-                {icons[issue.type] || '❓'}
-              </div>
+                fontSize:16, flexShrink:0 }}>{icons[issue.type] || '❓'}</div>
               <div style={{ flex:1 }}>
-                <p style={{ margin:'0 0 2px', fontSize:10, color:borderColor,
+                <p style={{ margin:'0 0 2px', fontSize:10, color:bc,
                   textTransform:'uppercase', letterSpacing:'0.08em',
                   fontFamily:SANS, fontWeight:700 }}>
                   Check {idx + 1} of {issues.length}
                 </p>
                 <p style={{ margin:0, fontSize:14, color:C.ink,
-                  fontFamily:SANS, lineHeight:1.65 }}>
-                  {issue.question}
-                </p>
+                  fontFamily:SANS, lineHeight:1.65 }}>{issue.question}</p>
               </div>
             </div>
-
-            {/* Transaction preview */}
             <div style={{ background:C.sand, borderRadius:9, padding:'10px 14px',
               marginBottom:12, display:'flex', justifyContent:'space-between',
               alignItems:'center', gap:8 }}>
               <div style={{ minWidth:0 }}>
-                <p style={{ margin:0, fontSize:13, fontWeight:600,
-                  color:C.ink, fontFamily:SANS,
-                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                <p style={{ margin:0, fontSize:13, fontWeight:600, color:C.ink,
+                  fontFamily:SANS, overflow:'hidden',
+                  textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
                   {issue.row.description}
                 </p>
                 <p style={{ margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
-                  {issue.row.date} · {issue.row.source || source}
+                  {issue.row.date} · {instLabel(issue.row.source)}
                 </p>
               </div>
-              <p style={{ margin:0, fontFamily:SERIF, fontSize:18,
-                fontWeight:700, color:C.ink, flexShrink:0 }}>
-                ${issue.row.amount.toFixed(2)}
-              </p>
+              <p style={{ margin:0, fontFamily:SERIF, fontSize:18, fontWeight:700,
+                color:C.ink, flexShrink:0 }}>${issue.row.amount.toFixed(2)}</p>
             </div>
-
-            {/* Option buttons */}
             <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
               {issue.options.map(opt => (
                 <button key={opt}
                   onClick={() => setAnswers(p => ({ ...p, [issue.id]: opt }))}
-                  style={{ border: '1.5px solid ' + (ans===opt ? C.green : C.sandDark),
+                  style={{ border:'1.5px solid ' + (ans===opt ? C.green : C.sandDark),
                     borderRadius:10, padding:'10px 14px', cursor:'pointer',
                     background: ans===opt ? C.greenLight : C.white,
                     display:'flex', alignItems:'center', gap:10, textAlign:'left' }}>
                   <div style={{ width:18, height:18, borderRadius:'50%', flexShrink:0,
-                    border: '2px solid ' + (ans===opt ? C.green : C.sandDark),
+                    border:'2px solid ' + (ans===opt ? C.green : C.sandDark),
                     background: ans===opt ? C.green : 'transparent' }}/>
-                  <span style={{ fontSize:13, fontWeight:ans===opt?600:400,
-                    color:ans===opt?C.green:C.inkMid, fontFamily:SANS }}>
-                    {opt}
-                  </span>
+                  <span style={{ fontSize:13, fontWeight: ans===opt?600:400,
+                    color: ans===opt?C.green:C.inkMid, fontFamily:SANS }}>{opt}</span>
                 </button>
               ))}
             </div>
@@ -1746,16 +1824,16 @@ function UploadTab({showToast, onImported, allCats}) {
       </button>
       <p style={{ textAlign:'center', fontSize:11, color:C.inkSoft,
         fontFamily:SANS, margin:'0 0 16px' }}>
-        Your answers above will exclude {parsed.length - finalRows.length} transactions from import.
+        Your answers exclude {parsed.length - finalRows.length} transactions from import.
       </p>
     </div>
   );
 
-  // ── REVIEW SCREEN ────────────────────────────────────────────────────────────
+  // ── REVIEW ──────────────────────────────────────────────────────────────────
   if (step === 'review') return (
     <div style={{ padding:'16px 16px 0' }}>
-      {ProcessingOverlay}
-      <div style={{ display:'flex', gap:8, marginBottom:12, alignItems:'center' }}>
+      {Overlay}
+      <div style={{ display:'flex', gap:8, marginBottom:10, alignItems:'center' }}>
         <button onClick={() => issues.length > 0 ? setStep('validate') : reset()}
           style={{ border:'1px solid ' + C.sandDark, borderRadius:8, padding:'6px 12px',
             background:C.white, fontSize:13, color:C.ink, cursor:'pointer', fontFamily:SANS }}>
@@ -1766,8 +1844,9 @@ function UploadTab({showToast, onImported, allCats}) {
             {finalRows.length} transactions to import
           </p>
           <p style={{ margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS }}>
-            {fileType==='pdf'?'Parsed from PDF':'Parsed from CSV'}
+            {fileType==='pdf' ? 'Read from PDF' : 'Read from CSV'}
             {Object.keys(byMonth).length > 1 ? ' · ' + Object.keys(byMonth).length + ' months' : ''}
+            {usedSources.length > 1 ? ' · ' + usedSources.length + ' accounts' : ''}
           </p>
         </div>
         <button onClick={confirmImport} disabled={saving || finalRows.length === 0}
@@ -1780,52 +1859,85 @@ function UploadTab({showToast, onImported, allCats}) {
         </button>
       </div>
 
+      {accounts.length > 0 && (
+        <div style={{ display:'flex', gap:7, flexWrap:'wrap', marginBottom:14 }}>
+          {accounts.map((a,i) => (
+            <Chip key={i} id={a.institution}
+              label={a.institutionName || instLabel(a.institution)}
+              sub={a.accountLabel || ''}/>
+          ))}
+        </div>
+      )}
+
       {Object.entries(byMonth).map(([mk, rows]) => (
         <div key={mk}>
           <SL>{mk} — {rows.length} transactions · {fmt(rows.reduce((a,r)=>a+r.amount,0))}</SL>
           <Card style={{ padding:'4px 0', marginBottom:12 }}>
             {rows.map((tx, i) => {
               const ec  = edits[tx.id]?.cat || tx.category;
+              const es  = edits[tx.id]?.src || tx.source;
               const skp = !!edits[tx.id]?.skip;
               const c   = allCats.find(x => x.id === ec) || { icon:'Package', color:C.inkSoft };
-              const lowConf = tx._confidence === 'low';
+              const low = tx._confidence === 'low';
+              const isCredit = tx._type === 'credit';
               return (
                 <div key={tx.id}>
                   {i > 0 && <Divider/>}
-                  <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 14px',
-                    opacity: skp ? 0.4 : 1,
-                    background: skp ? C.sandMid : lowConf ? '#fffbeb' : C.white }}>
-                    <button
-                      onClick={() => setEdits(p=>({...p,[tx.id]:{...p[tx.id],skip:!p[tx.id]?.skip}}))}
-                      style={{ border:'none', background:'none', padding:0, cursor:'pointer', flexShrink:0 }}>
-                      <div style={{ width:20, height:20, borderRadius:5,
-                        border: '1.5px solid ' + (skp ? C.sandDark : C.green),
-                        background: skp ? 'transparent' : C.green,
-                        display:'flex', alignItems:'center', justifyContent:'center' }}>
-                        {!skp && <Check size={12} color="#fff" strokeWidth={3}/>}
+                  <div style={{ padding:'10px 14px', opacity: skp ? 0.4 : 1,
+                    background: skp ? C.sandMid : low ? '#fffbeb' : C.white }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <button
+                        onClick={() => setEdits(p=>({...p,[tx.id]:{...p[tx.id],skip:!p[tx.id]?.skip}}))}
+                        style={{ border:'none', background:'none', padding:0,
+                          cursor:'pointer', flexShrink:0 }}>
+                        <div style={{ width:20, height:20, borderRadius:5,
+                          border:'1.5px solid ' + (skp ? C.sandDark : C.green),
+                          background: skp ? 'transparent' : C.green,
+                          display:'flex', alignItems:'center', justifyContent:'center' }}>
+                          {!skp && <Check size={12} color="#fff" strokeWidth={3}/>}
+                        </div>
+                      </button>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <p style={{ margin:0, fontSize:12, color:C.ink, fontFamily:SANS,
+                          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                          {tx.description}
+                          {low && <span style={{ marginLeft:6, fontSize:10,
+                            color:C.amber, fontWeight:600 }}>low confidence</span>}
+                        </p>
+                        <p style={{ margin:'1px 0 0', fontSize:10,
+                          color:C.inkSoft, fontFamily:SANS }}>{tx.date}</p>
                       </div>
-                    </button>
-                    <div style={{ flex:1, minWidth:0 }}>
-                      <p style={{ margin:0, fontSize:12, color:C.ink, fontFamily:SANS,
-                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                        {tx.description}
-                        {lowConf && <span style={{ marginLeft:6, fontSize:10, color:C.amber, fontWeight:600 }}> low confidence</span>}
-                      </p>
-                      <p style={{ margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS }}>
-                        {tx.date}{tx._type==='credit' ? ' · CREDIT/INCOME' : ''}
-                      </p>
+                      <select value={ec}
+                        onChange={e => setEdits(p=>({...p,[tx.id]:{...p[tx.id],cat:e.target.value}}))}
+                        style={{ border:'1px solid ' + c.color, borderRadius:7,
+                          padding:'3px 6px', fontSize:10, fontWeight:700, color:c.color,
+                          background:'#fff', cursor:'pointer', fontFamily:SANS, maxWidth:96 }}>
+                        {allCats.map(x => (<option key={x.id} value={x.id}>{x.label}</option>))}
+                      </select>
+                      <p style={{ margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600,
+                        color:C.ink, minWidth:58, textAlign:'right' }}>{fmt(tx.amount)}</p>
                     </div>
-                    <select value={ec}
-                      onChange={e => setEdits(p=>({...p,[tx.id]:{...p[tx.id],cat:e.target.value}}))}
-                      style={{ border:'1px solid ' + c.color, borderRadius:7, padding:'3px 6px',
-                        fontSize:10, fontWeight:700, color:c.color, background:'#fff',
-                        cursor:'pointer', fontFamily:SANS, maxWidth:100 }}>
-                      {allCats.map(x => (<option key={x.id} value={x.id}>{x.label}</option>))}
-                    </select>
-                    <p style={{ margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600,
-                      color:C.ink, minWidth:58, textAlign:'right' }}>
-                      {fmt(tx.amount)}
-                    </p>
+
+                    {/* Account + direction, editable per row */}
+                    <div style={{ display:'flex', alignItems:'center', gap:6,
+                      marginTop:6, marginLeft:28 }}>
+                      <span style={{ fontSize:10, fontWeight:700, padding:'2px 7px',
+                        borderRadius:99, fontFamily:SANS,
+                        background: isCredit ? C.greenLight : C.sandMid,
+                        color: isCredit ? C.green : C.inkSoft }}>
+                        {isCredit ? 'INCOME' : 'SPENDING'}
+                      </span>
+                      <select value={es}
+                        onChange={e => setEdits(p=>({...p,[tx.id]:{...p[tx.id],src:e.target.value}}))}
+                        style={{ border:'1px solid ' + instColor(es) + '55', borderRadius:7,
+                          padding:'2px 6px', fontSize:10, fontWeight:600,
+                          color:instColor(es), background:'#fff',
+                          cursor:'pointer', fontFamily:SANS }}>
+                        {INSTITUTIONS.map(x => (
+                          <option key={x.id} value={x.id}>{x.label}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 </div>
               );
@@ -1842,40 +1954,85 @@ function UploadTab({showToast, onImported, allCats}) {
           cursor: finalRows.length>0 ? 'pointer' : 'default',
           display:'flex', alignItems:'center', justifyContent:'center',
           gap:8, marginBottom:16 }}>
-        {saving
-          ? (<><Spinner/><span>Importing…</span></>)
+        {saving ? (<><Spinner/><span>Importing…</span></>)
           : 'Import ' + finalRows.length + ' transaction' + (finalRows.length!==1?'s':'')}
       </button>
     </div>
   );
 
-  // ── DONE ─────────────────────────────────────────────────────────────────────
+  // ── DONE — with spending insight ────────────────────────────────────────────
   return (
     <div style={{ padding:'16px 16px 0' }}>
       <Card style={{ background:C.greenLight, border:'1px solid rgba(26,122,74,0.2)',
-        textAlign:'center', padding:'32px 20px' }}>
-        <Check size={48} color={C.green} style={{ marginBottom:12 }}/>
-        <h2 style={{ fontFamily:SERIF, fontSize:26, fontWeight:600, color:C.green, margin:'0 0 8px' }}>
-          Imported
-        </h2>
+        textAlign:'center', padding:'28px 20px' }}>
+        <Check size={44} color={C.green} style={{ marginBottom:10 }}/>
+        <h2 style={{ fontFamily:SERIF, fontSize:26, fontWeight:600,
+          color:C.green, margin:'0 0 6px' }}>Imported</h2>
         <p style={{ margin:0, fontSize:14, color:C.green+'cc', fontFamily:SANS }}>
-          {finalRows.length} transactions saved. Duplicates and income transactions were filtered out.
+          {finalRows.length} transactions saved.
         </p>
-        <p style={{ margin:'10px 0 0', fontSize:12, color:C.green+'99', fontFamily:SANS, lineHeight:1.6 }}>
-          The more months you upload, the more accurately the app can predict your spending
-          and set smart budget targets. Keep going — past statements are just as valuable.
+        {usedSources.length > 0 && (
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap',
+            justifyContent:'center', marginTop:12 }}>
+            {usedSources.map(id => <Chip key={id} id={id}/>)}
+          </div>
+        )}
+      </Card>
+
+      {/* AI insight */}
+      {insight === 'loading' && (
+        <Card style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <Spinner size={16}/>
+          <p style={{ margin:0, fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
+            Working out what this means for your spending…
+          </p>
+        </Card>
+      )}
+
+      {insight && insight !== 'loading' && (
+        <Card style={{ border:'1px solid #c4b5fd', background:'#faf9ff' }}>
+          <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
+            <Sparkles size={15} color={C.purple}/>
+            <p style={{ margin:0, fontSize:11, fontWeight:700, color:C.purple,
+              textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>
+              What this changes
+            </p>
+          </div>
+          {insight.headline && (
+            <p style={{ margin:'0 0 10px', fontFamily:SERIF, fontSize:18,
+              fontWeight:600, color:C.ink, lineHeight:1.4 }}>
+              {insight.headline}
+            </p>
+          )}
+          {(insight.points || []).map((pt,i) => (
+            <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start',
+              marginBottom:7 }}>
+              <div style={{ width:5, height:5, borderRadius:99, background:C.purple,
+                marginTop:7, flexShrink:0 }}/>
+              <p style={{ margin:0, fontSize:13, color:C.inkMid,
+                fontFamily:SANS, lineHeight:1.6 }}>{pt}</p>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      <Card style={{ background:C.sandMid, border:'none' }}>
+        <p style={{ margin:0, fontSize:12, color:C.inkMid, fontFamily:SANS, lineHeight:1.6 }}>
+          Budget targets have been recalculated. The more months you upload, the more
+          accurately the app can predict your spending — past statements count just as
+          much as recent ones.
         </p>
       </Card>
+
       <button onClick={reset}
         style={{ border:'none', width:'100%', padding:'15px', borderRadius:14,
           fontSize:14, fontWeight:600, background:C.ink, color:'#fff',
-          cursor:'pointer', fontFamily:SANS }}>
+          cursor:'pointer', fontFamily:SANS, marginBottom:16 }}>
         Upload another statement
       </button>
     </div>
   );
 }
-
 
 // ─── Partner activity ─────────────────────────────────────────────────────────
 // Describes a realtime change in plain language, e.g.

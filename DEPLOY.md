@@ -242,3 +242,31 @@ the one v6 migration:
 ```sql
 alter table bank_imports add column if not exists note text default '';
 ```
+
+---
+
+## v8 — automatic bank detection
+
+The upload screen no longer asks which bank a file came from. Detection runs in
+three stages, and the user is only interrupted if all three fail:
+
+1. **Fingerprint** — instant and free. Matches text in the file against known
+   markers ("CIBC", "Canadian Tire", Wealthsimple's `net_cash_amount` column, etc).
+2. **Claude** — if the fingerprint misses, the first 3000 characters are sent to
+   Claude to identify the institution.
+3. **Ask the user** — only when both fail. A one-tap list of accounts appears.
+
+PDFs skip straight to Claude, which reads the letterhead directly and can identify
+**several accounts inside one document** — a chequing statement and a credit card
+statement bundled together are split apart and each transaction is tagged with the
+account it belongs to.
+
+Adding a new institution means adding one entry to `INSTITUTIONS` in
+`src/detect.js` plus a fingerprint. Nothing else needs to change.
+
+### Spending insight
+
+After each import Claude compares what was just added against the monthly averages
+from all previous statements and writes a short summary. This needs
+`VITE_ANTHROPIC_API_KEY`; without it the import still succeeds and the insight
+panel is simply skipped.
