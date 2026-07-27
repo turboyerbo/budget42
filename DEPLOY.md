@@ -1,119 +1,163 @@
-# Deploying Home Budget to Netlify
+# Home Budget — Deploy & Setup Guide
 
-A step-by-step guide — takes about 10 minutes from start to live URL.
+## Overview
+
+This app uses **Supabase** as the database so Jordan and Ness can see each other's
+entries in real time on separate phones — no copy-paste sync needed.
 
 ---
 
-## Option A — Drag & Drop (easiest, no Git needed)
+## Step 1 — Create a free Supabase project
 
-This is the fastest way. You only need a Netlify account (free).
+1. Go to https://supabase.com and sign up (free, no credit card).
+2. Click **New project**.
+   - Name: `home-budget`
+   - Database Password: pick a strong one (save it somewhere safe)
+   - Region: **Canada (Central)** or closest to you
+3. Wait ~2 minutes for the project to be created.
 
-### Step 1 — Install dependencies and build the app
+---
 
-Open Terminal and run:
+## Step 2 — Create the database tables
 
-```bash
-cd household-budget          # go into the project folder
-npm install                  # install packages (one-time, takes ~30 seconds)
-npm run build                # create the production files → creates a "dist" folder
+1. In your Supabase project, click **SQL Editor** in the left sidebar.
+2. Click **New query**, paste the entire SQL block below, and click **Run**.
+
+```sql
+-- Transactions (manual entries from the + Add tab)
+create table if not exists transactions (
+  id text primary key,
+  year int not null,
+  month int not null,
+  cat text not null,
+  amount numeric not null,
+  note text default '',
+  date text not null,
+  who text not null,
+  ts bigint not null,
+  created_at timestamptz default now()
+);
+
+-- Monthly budget settings (income amounts, CC payment target)
+create table if not exists budget_settings (
+  year int not null,
+  month int not null,
+  income jsonb not null default '{"jordan":3984.44,"ness":800,"sunlife":0}',
+  cc_target numeric not null default 500,
+  primary key (year, month)
+);
+
+-- Bank statement imports (from the Upload tab)
+create table if not exists bank_imports (
+  id text primary key,
+  date text not null,
+  description text not null,
+  amount numeric not null,
+  category text default 'other',
+  source text default '',
+  year int not null,
+  month int not null,
+  who text default 'jordan',
+  created_at timestamptz default now()
+);
+
+-- Row Level Security — open policies for a private personal app
+alter table transactions    enable row level security;
+alter table budget_settings enable row level security;
+alter table bank_imports    enable row level security;
+
+create policy "allow all on transactions"
+  on transactions for all using (true) with check (true);
+
+create policy "allow all on budget_settings"
+  on budget_settings for all using (true) with check (true);
+
+create policy "allow all on bank_imports"
+  on bank_imports for all using (true) with check (true);
+
+-- Enable real-time updates
+alter publication supabase_realtime add table transactions;
+alter publication supabase_realtime add table budget_settings;
+alter publication supabase_realtime add table bank_imports;
 ```
 
-You'll now have a `dist/` folder inside `household-budget/`.
+---
 
-### Step 2 — Deploy to Netlify
+## Step 3 — Get your Supabase credentials
 
-1. Go to **https://app.netlify.com** and sign in (or create a free account).
-2. Click **Add new site → Deploy manually**.
-3. Drag the **`dist`** folder (the entire folder, not just its contents) into the upload box.
-4. Netlify assigns a random URL like `https://quirky-lemon-123.netlify.app`.
-5. Click **Site settings → Change site name** to rename it to something like `jordan-ness-budget`.
-
-Your app is live at `https://jordan-ness-budget.netlify.app`.
+1. In Supabase, go to **Project Settings → API**.
+2. Copy two values:
+   - **Project URL** — looks like `https://abcdefgh.supabase.co`
+   - **anon / public key** — a long JWT string starting with `eyJ...`
 
 ---
 
-## Option B — GitHub + Auto-deploy (recommended for updates)
+## Step 4 — Add the credentials to Netlify
 
-This way, every time you push a change to GitHub, Netlify automatically rebuilds and redeploys.
+1. In Netlify, go to your site → **Site settings → Environment variables**.
+2. Add these two variables:
 
-### Step 1 — Create a GitHub repo
+| Variable name            | Value                                 |
+|--------------------------|---------------------------------------|
+| `VITE_SUPABASE_URL`      | `https://your-project.supabase.co`   |
+| `VITE_SUPABASE_ANON_KEY` | `eyJhbG...` (the anon key)           |
 
-1. Go to **https://github.com/new** and create a private repo called `household-budget`.
-2. In Terminal:
-
-```bash
-cd household-budget
-git init
-git add .
-git commit -m "initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/household-budget.git
-git push -u origin main
-```
-
-### Step 2 — Connect to Netlify
-
-1. In Netlify → **Add new site → Import an existing project → GitHub**.
-2. Authorise Netlify and select your `household-budget` repo.
-3. Build settings (Netlify usually auto-detects these):
-   - **Build command:** `npm run build`
-   - **Publish directory:** `dist`
-4. Click **Deploy site**.
-
-Netlify will build and deploy automatically. Any future `git push` redeploys the app.
+3. Click **Save**.
 
 ---
 
-## Step 3 — Add to Home Screen (makes it feel like a native app)
+## Step 5 — Redeploy
 
-**On iPhone:**
-1. Open Safari and go to your Netlify URL.
-2. Tap the Share button → **Add to Home Screen**.
-3. Name it "Home Budget" and tap Add.
+Go to your Netlify site → **Deploys** → **Trigger deploy → Deploy site**.
 
-It'll appear on your home screen like a regular app, full-screen with no browser chrome.
-
-Do this on both Jordan's and Ness's phones.
+The app will rebuild with Supabase connected. Takes about 60 seconds.
 
 ---
 
-## Syncing Between Phones
+## Step 6 — Add to Home Screen on both phones
 
-Because the app uses your phone's local storage (not a cloud database), Jordan and Ness each have their own copy of the data. To keep them in sync:
+Open the live URL in Safari on each phone:
+**Share button → Add to Home Screen → Add**
 
-1. Open the app → tap the **Sync** tab.
-2. On the phone with the latest data, tap **Generate export** → **Copy to clipboard**.
-3. Send that text to the other person via iMessage.
-4. On the other phone, paste it into the **Import** box → tap **Import data**.
-5. Reload the app — both phones now have identical data.
-
-This is a manual process. If you'd like automatic background sync, ask Claude to add Firebase support — it's about 30 minutes of extra work and uses Google's free tier.
+It will appear as a full-screen app. Each person selects who they are on first launch.
+From then on, any expense either of you logs appears on the other's screen within seconds.
 
 ---
 
-## Making Changes to the App
+## Using the Upload tab
 
-If you ever want to update categories, amounts, or add features:
+1. Export a CSV from your bank (BMO: Accounts → Download → CSV)
+2. Open the app → **Upload tab**
+3. Select the account type (BMO, CTFS, WS, PC MC)
+4. Choose whose spending it is (Jordan or Ness)
+5. Pick the CSV file
+6. Review: transactions are auto-categorised. Tap the category pill to change any.
+   Tap ✅ to skip a transaction you don't want to import.
+7. Tap **Import** — done. All transactions appear in History and update the budget bars.
 
-1. Edit the files in `src/App.jsx` or `src/storage.js`.
-2. Run `npm run build` to rebuild.
-3. Either drag the new `dist/` folder to Netlify again (Option A) or `git push` (Option B).
-
-If you're not sure how to make a change, just describe what you want to Claude.
+After importing a few months of statements, the Home tab will show suggested
+budget targets based on your actual average spending. Tap **Apply** to update them.
 
 ---
 
-## Folder Structure
+## Folder structure
 
 ```
 household-budget/
 ├── src/
-│   ├── App.jsx        ← all the UI and logic
-│   ├── storage.js     ← localStorage adapter + export/import
-│   ├── main.jsx       ← React entry point
-│   └── index.css      ← global reset
-├── index.html         ← HTML shell
-├── package.json       ← project dependencies
-├── vite.config.js     ← build config
-├── netlify.toml       ← Netlify build settings
-└── DEPLOY.md          ← this file
+│   ├── App.jsx         ← all UI and logic (1000 lines)
+│   ├── supabase.js     ← database client and helpers
+│   ├── categorize.js   ← rule-based merchant categoriser
+│   ├── main.jsx        ← React entry point
+│   └── index.css       ← global resets
+├── index.html
+├── package.json
+├── vite.config.js
+├── netlify.toml
+└── DEPLOY.md           ← this file
 ```
+
+## Making changes
+
+Edit `src/App.jsx` for UI changes, `src/categorize.js` to add new merchants.
+After editing: `npm run build` → push to GitHub (auto-deploys) or drag `dist/` to Netlify.
