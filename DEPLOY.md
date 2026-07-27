@@ -161,3 +161,37 @@ household-budget/
 
 Edit `src/App.jsx` for UI changes, `src/categorize.js` to add new merchants.
 After editing: `npm run build` → push to GitHub (auto-deploys) or drag `dist/` to Netlify.
+
+---
+
+## v5 — Supabase Auth setup (required for login)
+
+### Step 1 — Disable email confirmation (important)
+
+By default Supabase requires users to confirm their email before logging in.
+For a private household app, turn this off:
+
+1. Supabase → **Authentication → Providers → Email**
+2. Toggle **"Confirm email"** to **OFF**
+3. Save
+
+### Step 2 — Enable Supabase Auth in your app
+
+No extra SQL needed — Supabase Auth is built-in. Your two `.env` variables
+from earlier are all that's required.
+
+### Step 3 — Both partners create accounts
+
+1. Jordan opens the app, clicks **Create account**, fills in name + email + password + goal
+2. After signup, the app shows a link to share with Ness
+3. Ness opens the same URL, clicks **Create account**, creates her own account
+4. Each person signs in from their own device going forward
+
+### Optional — Claude AI categorisation key
+
+Add to Netlify env vars:
+```
+VITE_ANTHROPIC_API_KEY = sk-ant-...
+```
+Get from console.anthropic.com → API Keys. The app works without it but
+unknown merchants will land in "Other" instead of being categorised automatically.
