@@ -273,3 +273,61 @@ export function buildValidationReport(newRows, existingRows, partnerIssues = [])
     all,
   };
 }
+
+// ── Duplicates already sitting in the database ───────────────────────────────
+import { duplicateKey } from './merchant.js';
+
+/**
+ * Scan saved transactions for the same purchase stored more than once.
+ *
+ * Import-time checks only see the batch being imported. These build up
+ * afterwards: a statement uploaded twice, or once under a misdetected bank and
+ * again after the fix, which is why the same row can appear under two different
+ * accounts.
+ *
+ * Returns groups of two or more rows that share a merchant, date and amount,
+ * with a suggestion of which to keep.
+ */
+export function findExistingDuplicates(rows) {
+  const groups = new Map();
+
+  rows.forEach(r => {
+    const key = duplicateKey(r.description || r.note || '');
+    if (!key) return;
+    const id = `${key}|${r.date}|${Number(r.amount).toFixed(2)}`;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(r);
+  });
+
+  const dupes = [];
+  groups.forEach((rows_, id) => {
+    if (rows_.length < 2) return;
+
+    // Keep the oldest row, since later copies are the re-imports. Where a
+    // categorised copy exists, prefer that one so the user's work survives.
+    const sorted = [...rows_].sort((a, b) => {
+      const aCat = a.category && a.category !== 'other' ? 0 : 1;
+      const bCat = b.category && b.category !== 'other' ? 0 : 1;
+      if (aCat !== bCat) return aCat - bCat;
+      return String(a.created_at || a.id).localeCompare(String(b.created_at || b.id));
+    });
+
+    const sources = [...new Set(rows_.map(r => r.source).filter(Boolean))];
+
+    dupes.push({
+      id,
+      keep:   sorted[0],
+      remove: sorted.slice(1),
+      count:  rows_.length,
+      amount: Number(rows_[0].amount),
+      date:   rows_[0].date,
+      label:  rows_[0].description || rows_[0].note || '',
+      // Two different accounts for one purchase is the signature of a
+      // misdetected bank rather than two genuine transactions
+      crossAccount: sources.length > 1,
+      sources,
+    });
+  });
+
+  return dupes.sort((a, b) => b.amount - a.amount);
+}

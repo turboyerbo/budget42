@@ -901,3 +901,131 @@ in a statement.
 Edits are stored per merchant in `bill_rules` and always win over detection, so
 a future import cannot overwrite them. They are shared, so both people see the
 same list.
+
+---
+
+## v25 — duplicate cleanup
+
+No migration needed.
+
+### Where these came from
+
+Before v23, bank detection scanned transaction text, so a BMO statement
+mentioning `CANADIAN TIRE BANK` in an e-transfer was labelled Canadian Tire.
+Anyone who imported before and after that fix now has the same purchase stored
+twice under two different accounts. One purchase cannot be on two accounts, so
+that pairing is a reliable signature and the cleanup screen says so.
+
+### Matching
+
+Import-time checks only see the batch being imported, which is why these
+survived. `findExistingDuplicates()` scans what is already saved.
+
+It uses a looser merchant key than the bill detector: `RABBA 117` and
+`RABBA 117 Q4R` are the same shop, as are `METRO 62` and `METRO 62 TORONTO`.
+Date and amount must match exactly as well, so the looser name is safe.
+
+The copy that is kept is the categorised one where there is a choice, so
+recategorising work is not thrown away.
+
+### Three ways to remove them
+
+- **Banner on Home** when duplicates exist in the current month, opening a
+  review screen that shows which copy is kept and which goes, with a running
+  total of the double-counted spending being removed.
+- **Delete option in the category dropdown**, in both the "Other" review screen
+  and the Home category drill-down: *Delete — this is a duplicate*.
+- Existing per-row delete in History.
+
+---
+
+## v26 — categories from your budget, and imports that do not interrogate you
+
+No migration needed.
+
+### Import no longer asks about every line
+
+It was stopping to ask a hundred questions before showing any data. Now every
+check takes its safe default, the transactions are imported, and the decisions
+are listed afterwards on the done screen:
+
+> **41 left out automatically** — duplicates, transfers between your own
+> accounts, and money coming in. You were not asked because the safe answer was
+> obvious in each case. 3 were closer calls.
+> [ Review 44 decisions ]
+
+Opening that review shows the same screen as before, but retrospectively.
+Changing an answer and pressing **Apply these decisions** works out the
+difference and syncs it: rows that should now be excluded are deleted, rows that
+should now be included are inserted. Nothing is re-imported wholesale.
+
+### Categories now match your budget
+
+The 15 built-in categories are replaced by the 25 from
+`2026_Budget_Complete_7months.xlsx`, listed alphabetically:
+
+Alcohol & cigs · Banking fees & interest · Cell phone · Cleaning services ·
+Clothing · Credit card payment · Electricity · Entertainment · Gifts ·
+Golf & hobbies · Groceries · Income · Legal & professional · Medical & dental ·
+Other / uncategorised · Pharmacy · Rent + home · Rental insurance ·
+Restaurant & takeout · Salon & spa · Subscriptions · Transfers ·
+Transit (Presto) · Travel · Uber & taxis
+
+Existing category ids are preserved, so saved transactions keep their category.
+Credit card payment, Transfers and Income are marked as not-spending.
+
+Every dropdown sorts alphabetically, and a custom category added later lands in
+its correct place rather than at the end.
+
+### Categorisation rules to match
+
+`categorizeBudget()` adds rules for the new buckets: finance charges and plan
+fees to Banking, Freedom Mobile to Cell phone, Metergy to Electricity, STELA to
+Rent, TD Insurance to Rental insurance, and so on. Credits that are not card
+payments or transfers now go to Income rather than Other.
+
+Measured over the 24 real statements: transactions left in "Other" fell from
+45% to 3% of everything carrying a real merchant name. The remaining 30% of rows
+are Wealthsimple monthly exports, which contain no merchant name at all — the
+column simply says `SPEND`, so nothing can classify them honestly.
+
+---
+
+## v27 — bill editing works without the migration
+
+### The error
+
+`Could not find the table 'public.bill_rules' in the schema cache` means the v24
+migration had not been run. Adding a bill failed outright.
+
+Rather than a dead end, bill rules now fall back to this browser's storage when
+the table is missing. Everything works; the only loss is that your partner does
+not see the changes.
+
+The Bills tab says so plainly, shows the SQL to fix it, and **uploads anything
+saved locally the moment the table appears**, so nothing is lost by carrying on
+without it.
+
+The detector matches only the genuine "table does not exist" codes (`42P01`,
+`PGRST205`, and the schema-cache wording). Real errors such as constraint
+violations still surface rather than being swallowed.
+
+To make bill edits shared, run:
+
+```sql
+create table if not exists bill_rules (
+  key text primary key, label text, amount numeric,
+  day int, category text,
+  status text default 'auto',
+  updated_at timestamptz default now()
+);
+alter table bill_rules enable row level security;
+create policy "allow all on bill_rules" on bill_rules
+  for all using (true) with check (true);
+```
+
+### The missing Rent category
+
+The build in the screenshot predates v26, which replaced the old 15 categories
+with the 25 from your budget. Rent + home is there now, along with Electricity,
+Cell phone and Rental insurance, and the bill editor offers all of them.

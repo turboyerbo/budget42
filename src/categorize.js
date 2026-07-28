@@ -160,3 +160,42 @@ export function categorize(description) {
   }
   return 'other';
 }
+
+/**
+ * Rules for the categories taken from the user's own budget. Applied before the
+ * older merchant list, so these win where both match.
+ *
+ * The point is to get transactions into the right bucket at import time rather
+ * than dumping hundreds of rows into "Other" for someone to sort by hand.
+ */
+const BUDGET_RULES = [
+  ['banking',          /finance charge|performance plan|overdraft|o\/d per item|monthly plan fee|interest charge|nsf|service charge|annual fee|foreign (currency )?(conversion|transaction)/i],
+  ['phone',            /freedom mobile|rogers|telus|bell canada|fido|koodo|virgin plus|chatr/i],
+  ['electricity',      /metergy|toronto hydro|hydro one|alectra|enbridge|energy|utilit/i],
+  ['rent',             /\bstela\b|\brent\b|landlord|property manage/i],
+  ['rental_insurance', /td ins|td assur|insurance|assurance|intact|belair|sonnet/i],
+  ['cleaning',         /cleaners|dry clean|laundr|housekeep|corktown cleaners/i],
+  ['subscriptions',    /netflix|spotify|disney|crave|prime video|youtubepremiu|youtube premium|dropbox|icloud|google one|google play|apple\.com\/bill|claude\.ai|anthropic|openai|adobe|microsoft 365|patreon|substack|nytimes|globe and mail|uber ?one|amazon.*prime member|netlify|github|figma/i],
+  ['alcohol',          /lcbo|beer store|wine rack|liquor|brewery|brewing|distiller|cigar|tobacco|vape/i],
+  ['transit',          /presto|ttc|go transit|metrolinx|via rail|transit/i],
+  ['uber',             /uber ?(canada|trip|\*|eats)?|lyft|taxi|beck taxi|co-?op cabs/i],
+  ['pharmacy',         /shoppers drug|pharmaprix|rexall|pharmacy|drug mart|guardian drug/i],
+  ['medical',          /clinic|dental|dentist|physio|chiro|massage|therapy|therapist|mindbody|navigate clinic|toothworks|optometr|medical|hospital|lab ?test/i],
+  ['groceries',        /loblaw|no frills|metro |sobeys|food basics|freshco|farm boy|rabba|marche|marché|fortinos|longo|costco|walmart.*(grocer|superc)|canary market|ponesse|aisle 24|convenience|nofrills|independent/i],
+  ['restaurant',       /restaurant|resto|cafe|caf\u00e9|coffee|espresso|bar\b|pizza|sushi|ramen|burger|kitchen|bistro|tavern|pub\b|grill|bakery|doordash|skip ?the ?dishes|foodora|tim hortons|starbucks|mcdonald|subway|chipotle/i],
+  ['salon',            /salon|spa\b|barber|hair|nails|aesthetic|esthetic/i],
+  ['clothing',         /winners|zara|uniqlo|h&m|gap\b|old navy|lululemon|nordstrom|simons|sport ?chek|foot locker|zeaberg|clothing|apparel/i],
+  ['travel',           /airbnb|agoda|booking\.com|expedia|hotel|air canada|westjet|porter air|flight|vrbo|hostel|resort/i],
+  ['entertainment',    /cineplex|cinema|theatre|theater|concert|ticketmaster|museum|gallery|steam ?games|nintendo|playstation|xbox/i],
+  ['hobbies',          /golf|donalda|club\b|gym|fitness|goodlife|yoga|pilates|sport|hobby|craft/i],
+  ['legal',            /legal|lawyer|solicitor|notary|accountant|oaa\b|licen[cs]e fee|professional fee|affirm canada/i],
+  ['gifts',            /gift|florist|flowers/i],
+];
+
+export function categorizeBudget(description) {
+  const d = String(description || '');
+  for (const [cat, re] of BUDGET_RULES) {
+    if (re.test(d)) return cat;
+  }
+  return null;
+}

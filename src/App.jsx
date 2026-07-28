@@ -6,6 +6,7 @@ import {
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
   Bell, BellRing, Landmark, HelpCircle, Heart, Settings, Download,
+  Smartphone, Zap, Gift, Shield, ArrowLeftRight,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -15,7 +16,8 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          signUp, signIn, signOut, onAuthChange, updateUserMeta,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
-         getBillRules, upsertBillRule, deleteBillRule } from './supabase.js';
+         getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
+         deleteManyRows, getMonthEverything } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
@@ -25,7 +27,7 @@ import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
          applyBillRules } from './recurring.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
-import { buildValidationReport } from './validate.js';
+import { buildValidationReport, findExistingDuplicates } from './validate.js';
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C = {
@@ -43,32 +45,38 @@ const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct
 
 // ─── Categories ───────────────────────────────────────────────────────────────
 const DEFAULT_CATS = [
-  {id:'groceries',    label:'Groceries',      icon:'ShoppingBasket', target:400, color:'#1a7a4a'},
-  {id:'restaurant',   label:'Dining out',     icon:'Utensils',       target:250, color:'#1d4ed8'},
-  {id:'alcohol',      label:'Wine & spirits', icon:'Wine',           target:80,  color:'#7c3aed'},
-  {id:'uber',         label:'Rides',          icon:'Car',            target:80,  color:'#b45309'},
-  {id:'transit',      label:'Transit',        icon:'Train',          target:30,  color:'#0369a1'},
-  {id:'pharmacy',     label:'Pharmacy',       icon:'Pill',           target:100, color:'#be185d'},
-  {id:'medical',      label:'Medical',        icon:'Stethoscope',    target:550, color:'#c0392b'},
-  {id:'entertainment',label:'Entertainment',  icon:'Ticket',         target:50,  color:'#065f46'},
-  {id:'hobbies',      label:'Hobbies & dev',  icon:'Code2',          target:150, color:'#4f46e5'},
-  {id:'subscriptions',label:'Subscriptions',  icon:'CreditCard',     target:155, color:'#0891b2'},
-  {id:'clothing',     label:'Clothing',       icon:'Shirt',          target:100, color:'#b45309'},
-  {id:'travel',       label:'Travel',         icon:'Plane',          target:200, color:'#0e7490'},
-  {id:'salon',        label:'Salon & spa',    icon:'Scissors',       target:100, color:'#9d174d'},
-  {id:'legal',        label:'Legal & fees',   icon:'Scale',          target:100, color:'#57534e'},
-  {id:'other',        label:'Other',          icon:'Package',        target:200, color:'#6b7280'},
-  // Tracked but NOT counted as spending — moving money is not spending it
-  {id:'cc_payment',   label:'Credit card payments', icon:'CreditCard', target:0, color:'#57534e', excluded:true},
-  {id:'transfer',     label:'Transfers',      icon:'Landmark',       target:0,   color:'#78716c', excluded:true},
-  // Money coming IN. Excluded from spending, and what the budget draws on.
-  {id:'income',       label:'Income',         icon:'Leaf',           target:0,   color:'#1a7a4a', excluded:true, isIncome:true},
+  {id:'alcohol',      label:'Alcohol & cigs',        icon:'Wine',           target:175, color:'#7c3aed'},
+  {id:'banking',      label:'Banking fees & interest',icon:'Landmark',      target:400, color:'#57534e'},
+  {id:'phone',        label:'Cell phone',            icon:'Smartphone',     target:45,  color:'#0891b2'},
+  {id:'cleaning',     label:'Cleaning services',     icon:'Brush',          target:25,  color:'#0d9488'},
+  {id:'clothing',     label:'Clothing',              icon:'Shirt',          target:50,  color:'#b45309'},
+  {id:'cc_payment',   label:'Credit card payment',   icon:'CreditCard',     target:0,   color:'#57534e', excluded:true},
+  {id:'electricity',  label:'Electricity',           icon:'Zap',            target:150, color:'#ca8a04'},
+  {id:'entertainment',label:'Entertainment',         icon:'Ticket',         target:100, color:'#065f46'},
+  {id:'gifts',        label:'Gifts',                 icon:'Gift',           target:25,  color:'#db2777'},
+  {id:'hobbies',      label:'Golf & hobbies',        icon:'Dumbbell',       target:130, color:'#4f46e5'},
+  {id:'groceries',    label:'Groceries',             icon:'ShoppingBasket', target:500, color:'#1a7a4a'},
+  {id:'income',       label:'Income',                icon:'Leaf',           target:0,   color:'#1a7a4a', excluded:true, isIncome:true},
+  {id:'legal',        label:'Legal & professional',  icon:'Scale',          target:125, color:'#78716c'},
+  {id:'medical',      label:'Medical & dental',      icon:'Stethoscope',    target:600, color:'#c0392b'},
+  {id:'other',        label:'Other / uncategorised', icon:'Package',        target:200, color:'#6b7280'},
+  {id:'pharmacy',     label:'Pharmacy',              icon:'Pill',           target:200, color:'#be185d'},
+  {id:'rent',         label:'Rent + home',           icon:'Home',           target:1900,color:'#92400e'},
+  {id:'rental_insurance',label:'Rental insurance',   icon:'Shield',         target:67,  color:'#1d4ed8'},
+  {id:'restaurant',   label:'Restaurant & takeout',  icon:'Utensils',       target:500, color:'#1d4ed8'},
+  {id:'salon',        label:'Salon & spa',           icon:'Scissors',       target:50,  color:'#9d174d'},
+  {id:'subscriptions',label:'Subscriptions',         icon:'Music',          target:120, color:'#0369a1'},
+  {id:'transfer',     label:'Transfers',             icon:'ArrowLeftRight', target:0,   color:'#78716c', excluded:true},
+  {id:'transit',      label:'Transit (Presto)',      icon:'Train',          target:50,  color:'#0369a1'},
+  {id:'travel',       label:'Travel',                icon:'Plane',          target:250, color:'#0e7490'},
+  {id:'uber',         label:'Uber & taxis',          icon:'Car',            target:150, color:'#b45309'},
 ];
 const COLOR_SWATCHES = ['#1a7a4a','#1d4ed8','#7c3aed','#b45309','#0369a1',
   '#be185d','#c0392b','#065f46','#4f46e5','#0891b2','#9d174d','#57534e','#6b7280'];
 const ICON_MAP = {
   ShoppingBasket,Utensils,Wine,Car,Train,Pill,Stethoscope,Ticket,Code2,CreditCard,
   Shirt,Plane,Scissors,Scale,Package,Tag,Coffee,Music,BookOpen,Camera,Dumbbell,Leaf,PawPrint,Brush,Baby,
+  Landmark,Smartphone,Zap,Gift,Shield,ArrowLeftRight,Home,
 };
 const PICKABLE_ICONS = Object.keys(ICON_MAP);
 
@@ -469,7 +477,7 @@ export function AddCatModal({onSave,onClose}) {
 // ─── OtherReviewModal ─────────────────────────────────────────────────────────
 // Shows all transactions still in "Other" so the user can re-categorise them.
 // Each row has: description, date, amount, category dropdown, note field, AI button.
-export function OtherReviewModal({ items, allCats, onSave, onClose }) {
+export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow }) {
   // Local edits: { id: { category, note } }
   const [edits,   setEdits]   = useState(() =>
     Object.fromEntries(items.map(t => [t.id, { category: t.category || 'other', note: t.note || '' }]))
@@ -603,7 +611,10 @@ export function OtherReviewModal({ items, allCats, onSave, onClose }) {
                     Category {isOther && <span style={{ color:C.amber }}>— needs review</span>}
                   </label>
                   <select value={catVal}
-                    onChange={e => edit(tx.id, { category: e.target.value })}
+                    onChange={e => {
+                      if (e.target.value === '__delete') { onDeleteRow?.(tx); return; }
+                      edit(tx.id, { category: e.target.value });
+                    }}
                     style={{ width:'100%', border:`1.5px solid ${isOther?C.amber:cat.color}`,
                       borderRadius:9, padding:'8px 10px', fontSize:13, fontWeight:600,
                       color:isOther?C.amber:cat.color, background:C.white,
@@ -611,6 +622,8 @@ export function OtherReviewModal({ items, allCats, onSave, onClose }) {
                     {allCats.map(c => (
                       <option key={c.id} value={c.id}>{c.label}</option>
                     ))}
+                    <option disabled>──────────</option>
+                    <option value="__delete">Delete — this is a duplicate</option>
                   </select>
                 </div>
 
@@ -722,7 +735,8 @@ export function OtherReviewModal({ items, allCats, onSave, onClose }) {
 export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
-                  onChangeCategory,view,setView,history,billRules}) {
+                  onChangeCategory,view,setView,history,billRules,
+                  onDeleteRow,duplicateCount,onReviewDuplicates}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -880,6 +894,27 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             Apply all
           </button>
         </div>
+      )}
+
+      {/* Duplicates found in what is already saved */}
+      {duplicateCount > 0 && (
+        <button onClick={onReviewDuplicates} style={{ width:'100%', border:`1.5px solid ${C.red}`,
+          borderRadius:14, padding:'12px 16px', marginBottom:12, background:C.redLight,
+          cursor:'pointer', textAlign:'left', display:'flex', alignItems:'center', gap:12 }}>
+          <div style={{ width:36, height:36, borderRadius:10, background:C.red+'22',
+            display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+            <Trash2 size={17} color={C.red}/>
+          </div>
+          <div style={{ flex:1 }}>
+            <p style={{ margin:0, fontSize:13, fontWeight:700, color:C.red, fontFamily:SANS }}>
+              {duplicateCount} duplicate{duplicateCount>1?'s':''} in this month
+            </p>
+            <p style={{ margin:'2px 0 0', fontSize:12, color:'#9b2c2c', fontFamily:SANS }}>
+              The same purchase is recorded more than once, so your totals are too high.
+            </p>
+          </div>
+          <ChevronRight size={18} color={C.red}/>
+        </button>
       )}
 
       {/* Other category alert — shown when imported transactions need review */}
@@ -1107,12 +1142,15 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                           <select
                             value={cat.id}
                             onChange={e=>{
+                              if(e.target.value==='__delete'){ onDeleteRow?.(tx); return; }
                               if(e.target.value!==cat.id) reassign(tx,e.target.value);
                             }}
                             style={{border:`1px solid ${C.sandDark}`,borderRadius:7,
                               padding:'3px 5px',fontSize:10,fontWeight:600,color:C.inkMid,
                               background:C.white,cursor:'pointer',fontFamily:SANS,maxWidth:104}}>
                             {allCats.map(x=><option key={x.id} value={x.id}>{x.label}</option>)}
+                            <option disabled>──────────</option>
+                            <option value="__delete">Delete — duplicate</option>
                           </select>
                         )}
                     </div>
@@ -1569,7 +1607,7 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
-                          billRules, onSaveRule, onDeleteRule, showToast}) {
+                          billRules, onSaveRule, onDeleteRule, showToast, billsLocal}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
 
   const detected = detectRecurring(history || []);
@@ -1684,6 +1722,33 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
           ))}
         </div>
       </Card>
+
+      {billsLocal && (
+        <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:14,
+          padding:'12px 16px', marginBottom:12 }}>
+          <p style={{ margin:'0 0 4px', fontSize:13, fontWeight:700,
+            color:C.amber, fontFamily:SANS }}>
+            Bill edits are saved on this device only
+          </p>
+          <p style={{ margin:'0 0 8px', fontSize:12, color:'#92400e',
+            fontFamily:SANS, lineHeight:1.6 }}>
+            Everything here works, but your partner will not see these changes until
+            the table exists. Run this once in Supabase → SQL Editor, then reload —
+            anything you have already saved is uploaded automatically.
+          </p>
+          <pre style={{ margin:0, background:'rgba(0,0,0,0.06)', borderRadius:8,
+            padding:'10px 12px', fontSize:10, lineHeight:1.6, color:'#92400e',
+            overflowX:'auto', fontFamily:'monospace' }}>{`create table if not exists bill_rules (
+  key text primary key, label text, amount numeric,
+  day int, category text,
+  status text default 'auto',
+  updated_at timestamptz default now()
+);
+alter table bill_rules enable row level security;
+create policy "allow all on bill_rules" on bill_rules
+  for all using (true) with check (true);`}</pre>
+        </div>
+      )}
 
       {sched.overdue.length > 0 && (
         <div style={{ background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:14,
@@ -1929,6 +1994,8 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
   const [warnings,  setWarnings] = useState([]);
   const [insight,   setInsight]  = useState(null);
   const [saving,    setSaving]   = useState(false);
+  const [imported,  setImported] = useState([]);   // ids actually saved
+  const [autoStats, setAutoStats]= useState(null); // what was decided for you
 
   const tick = () => new Promise(r => setTimeout(r, 50));
 
@@ -2026,14 +2093,24 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
 
     const report = buildValidationReport(tagged, existing, partnerIssues);
 
-    setModal(null);
+    // Every issue takes its safe default. Nothing is asked up front: being made
+    // to answer a hundred questions before seeing any of your data is not a
+    // review, it is an obstacle. The decisions are all listed afterwards and
+    // any of them can be changed.
+    const defaults = Object.fromEntries(report.all.map(i => [i.id, i.default]));
+
+    setModal({ title: 'Saving ' + tagged.length + ' transactions',
+      sub: 'Categorising and filing them. Nothing needs your attention yet.' });
+    await tick();
+
     setParsed(tagged);
     setEdits({});
     setIssues(report.all);
     setAutoFixed(report.autoFixed);
-    // Every issue starts on its safe default; auto-fixed ones simply aren't asked
-    setAnswers(Object.fromEntries(report.all.map(i => [i.id, i.default])));
-    setStep(report.all.length > 0 ? 'validate' : 'review');
+    setAnswers(defaults);
+
+    await importRows(tagged, report.all, defaults);
+    setModal(null);
   }
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -2118,6 +2195,89 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
       kind:instKind(detected.id), confidence:detected.confidence,
       how:detected.how }]);
     await finishPipeline(rows);
+  }
+
+  /** Which rows survive a given set of answers. */
+  function resolve(rows, issueList, ans) {
+    const answer = i => ans[i.id] ?? i.default;
+    return rows.filter(row => {
+      const pt = issueList.find(i => i.type === 'partner_transfer' && i.row.id === row.id);
+      if (pt && answer(pt).startsWith('Yes')) return false;
+      const tr = issueList.find(i => i.type === 'internal_transfer' && i.pairIds?.includes(row.id));
+      if (tr && answer(tr).startsWith('Yes')) return false;
+      const pay = issueList.find(i => i.type === 'card_payment' && i.row.id === row.id);
+      if (pay && answer(pay).startsWith('Skip')) return false;
+      const de = issueList.find(i => i.type === 'duplicate_existing' && i.row.id === row.id);
+      if (de && answer(de) === 'Skip — already imported') return false;
+      const db = issueList.find(i => i.type === 'duplicate_in_batch' &&
+        (i.secondId === row.id || i.firstId === row.id));
+      if (db) {
+        const a = answer(db);
+        if (a === 'Keep first only'  && db.secondId === row.id) return false;
+        if (a === 'Keep second only' && db.firstId  === row.id) return false;
+      }
+      const lg = issueList.find(i => i.type === 'large_transaction' && i.row.id === row.id);
+      if (lg && answer(lg).startsWith('Looks wrong')) return false;
+      if (edits[row.id]?.skip) return false;
+      return true;
+    }).map(row => {
+      const cr = issueList.find(i => i.type === 'credit_check' && i.row.id === row.id);
+      const asIncome = cr && answer(cr).startsWith('Yes');
+      return {
+        ...row,
+        category: edits[row.id]?.cat || (asIncome ? 'income' : row.category),
+        source:   edits[row.id]?.src || row.source,
+        note:     edits[row.id]?.note || row.note || '',
+        who,
+      };
+    });
+  }
+
+  async function importRows(rows, issueList, ans) {
+    const keep = resolve(rows, issueList, ans);
+    const toSave = keep.map(({ _type, _confidence, _fromPDF, _acctLabel, _internal, ...r }) => ({
+      ...r, direction: _type || 'debit',
+    }));
+    try {
+      await insertBankImports(toSave);
+      setImported(toSave.map(r => r.id));
+      setAutoStats({
+        saved:    toSave.length,
+        skipped:  rows.length - keep.length,
+        decisions: issueList.length,
+      });
+      onImported();
+      setStep('done');
+    } catch (err) {
+      showToast('Import failed — ' + err.message);
+      setStep('review');
+    }
+  }
+
+  /** Re-sync after the user changes one of the automatic decisions. */
+  async function applyDecisionChanges() {
+    setSaving(true);
+    const keep    = resolve(parsed, issues, answers);
+    const keepIds = new Set(keep.map(r => r.id));
+    const remove  = imported.filter(id => !keepIds.has(id));
+    const add     = keep.filter(r => !imported.includes(r.id));
+    try {
+      if (remove.length) await deleteManyRows(remove);
+      if (add.length) {
+        await insertBankImports(add.map(({ _type, _confidence, _fromPDF, _acctLabel, _internal, ...r }) => ({
+          ...r, direction: _type || 'debit',
+        })));
+      }
+      setImported(keep.map(r => r.id));
+      setAutoStats(p => ({ ...p, saved: keep.length, skipped: parsed.length - keep.length }));
+      onImported();
+      showToast(
+        remove.length || add.length
+          ? `Updated — ${add.length} added, ${remove.length} removed`
+          : 'Nothing changed');
+      setStep('done');
+    } catch (e) { showToast('Could not update — ' + e.message); }
+    setSaving(false);
   }
 
   async function handleFile(e) {
@@ -2441,13 +2601,12 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
         {Overlay}
         <div style={{ marginBottom:12 }}>
           <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
-            Checking your data
+            What we decided for you
           </h2>
           <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
             Found {parsed.length} transactions.
-            {questions.length === 0
-              ? ' Everything was resolved automatically.'
-              : ` ${questions.length} need${questions.length===1?'s':''} your call.`}
+            {' '}Everything is already imported. These are the judgement calls made
+            along the way — change any that look wrong.
           </p>
         </div>
 
@@ -2606,11 +2765,18 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
           );
         })}
 
-        <button onClick={() => setStep('review')}
+        <button onClick={applyDecisionChanges} disabled={saving}
           style={{ width:'100%', border:'none', padding:'16px', borderRadius:14,
             background:C.green, color:'#fff', fontSize:15, fontWeight:700,
+            cursor:'pointer', fontFamily:SANS, marginBottom:8,
+            display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
+          {saving ? <><Spinner size={14}/>Updating…</> : 'Apply these decisions'}
+        </button>
+        <button onClick={() => setStep('done')} disabled={saving}
+          style={{ width:'100%', border:`1px solid ${C.sandDark}`, padding:'13px',
+            borderRadius:12, background:C.white, color:C.inkMid, fontSize:14,
             cursor:'pointer', fontFamily:SANS, marginBottom:8 }}>
-          Continue — review {finalRows.length} transactions →
+          Leave them as they are
         </button>
         <p style={{ textAlign:'center', fontSize:11, color:C.inkSoft,
           fontFamily:SANS, margin:'0 0 16px' }}>
@@ -2753,7 +2919,9 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
     </div>
   );
 
-  // ── DONE — with spending insight ────────────────────────────────────────────
+  // ── DONE ────────────────────────────────────────────────────────────────────
+  const questionCount = issues.filter(i => !i.autoFixed).length;
+
   return (
     <div style={{ padding:'16px 16px 0' }}>
       <Card style={{ background:C.greenLight, border:'1px solid rgba(26,122,74,0.2)',
@@ -2762,7 +2930,7 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
         <h2 style={{ fontFamily:SERIF, fontSize:26, fontWeight:600,
           color:C.green, margin:'0 0 6px' }}>Imported</h2>
         <p style={{ margin:0, fontSize:14, color:C.green+'cc', fontFamily:SANS }}>
-          {finalRows.length} transactions saved.
+          {autoStats?.saved ?? 0} transactions saved and categorised.
         </p>
         {usedSources.length > 0 && (
           <div style={{ display:'flex', gap:6, flexWrap:'wrap',
@@ -2771,6 +2939,39 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
           </div>
         )}
       </Card>
+
+      {/* What was decided without asking */}
+      {(autoStats?.skipped > 0 || issues.length > 0) && (
+        <Card>
+          <div style={{ display:'flex', gap:9, alignItems:'flex-start', marginBottom:10 }}>
+            <div style={{ width:28, height:28, borderRadius:99, background:C.blue+'18',
+              display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+              <Sparkles size={14} color={C.blue}/>
+            </div>
+            <div style={{ flex:1 }}>
+              <p style={{ margin:0, fontSize:14, fontWeight:700, color:C.ink, fontFamily:SANS }}>
+                {autoStats?.skipped || 0} left out automatically
+              </p>
+              <p style={{ margin:'3px 0 0', fontSize:12, color:C.inkSoft,
+                fontFamily:SANS, lineHeight:1.6 }}>
+                Duplicates, transfers between your own accounts, and money coming in.
+                You were not asked because the safe answer was obvious in each case.
+                {questionCount > 0 && ` ${questionCount} were closer calls.`}
+              </p>
+            </div>
+          </div>
+          {issues.length > 0 && (
+            <button onClick={() => setStep('validate')}
+              style={{ width:'100%', border:`1px solid ${C.sandDark}`, borderRadius:10,
+                padding:'11px', background:C.white, fontSize:13, fontWeight:600,
+                color:C.ink, cursor:'pointer', fontFamily:SANS,
+                display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
+              Review {issues.length} decision{issues.length===1?'':'s'}
+              <ChevronRight size={14} color={C.inkSoft}/>
+            </button>
+          )}
+        </Card>
+      )}
 
       {/* AI insight */}
       {insight === 'loading' && (
@@ -2781,7 +2982,6 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
           </p>
         </Card>
       )}
-
       {insight && insight !== 'loading' && (
         <Card style={{ border:'1px solid #c4b5fd', background:'#faf9ff' }}>
           <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:8 }}>
@@ -2793,13 +2993,10 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
           </div>
           {insight.headline && (
             <p style={{ margin:'0 0 10px', fontFamily:SERIF, fontSize:18,
-              fontWeight:600, color:C.ink, lineHeight:1.4 }}>
-              {insight.headline}
-            </p>
+              fontWeight:600, color:C.ink, lineHeight:1.4 }}>{insight.headline}</p>
           )}
           {(insight.points || []).map((pt,i) => (
-            <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start',
-              marginBottom:7 }}>
+            <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start', marginBottom:7 }}>
               <div style={{ width:5, height:5, borderRadius:99, background:C.purple,
                 marginTop:7, flexShrink:0 }}/>
               <p style={{ margin:0, fontSize:13, color:C.inkMid,
@@ -2809,14 +3006,12 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
         </Card>
       )}
 
-      <Card style={{ background:C.sandMid, border:'none' }}>
-        <p style={{ margin:0, fontSize:12, color:C.inkMid, fontFamily:SANS, lineHeight:1.6 }}>
-          Budget targets have been recalculated. The more months you upload, the more
-          accurately the app can predict your spending — past statements count just as
-          much as recent ones.
-        </p>
-      </Card>
-
+      <button onClick={() => setStep('review')}
+        style={{ width:'100%', border:`1px solid ${C.sandDark}`, padding:'13px',
+          borderRadius:12, background:C.white, color:C.inkMid, fontSize:13,
+          cursor:'pointer', fontFamily:SANS, marginBottom:8 }}>
+        See every imported transaction
+      </button>
       <button onClick={reset}
         style={{ border:'none', width:'100%', padding:'15px', borderRadius:14,
           fontSize:14, fontWeight:600, background:C.ink, color:'#fff',
@@ -2924,6 +3119,157 @@ export function ActivityPanel({ items, onClose, onClear }) {
   );
 }
 
+
+
+// ─── Duplicate cleanup ────────────────────────────────────────────────────────
+// Import-time checks only see the batch being imported. Duplicates accumulate
+// afterwards — a statement uploaded twice, or once under a misdetected bank and
+// again after the fix. This finds them in what is already saved.
+export function DuplicateModal({ rows, allCats, onDelete, onClose, showToast }) {
+  const groups = findExistingDuplicates(rows || []);
+  const [chosen, setChosen] = useState(() =>
+    Object.fromEntries(groups.map(g => [g.id, true])));
+  const [busy, setBusy] = useState(false);
+
+  const selected  = groups.filter(g => chosen[g.id]);
+  const toRemove  = selected.flatMap(g => g.remove);
+  const reclaimed = selected.reduce((a, g) => a + g.amount * g.remove.length, 0);
+
+  async function run() {
+    setBusy(true);
+    try {
+      await onDelete(toRemove.map(r => r.id));
+      showToast(`Removed ${toRemove.length} duplicate${toRemove.length === 1 ? '' : 's'}`);
+      onClose();
+    } catch (e) { showToast('Could not remove — ' + e.message); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:770,
+      display:'flex', flexDirection:'column', justifyContent:'flex-end' }}>
+      <div onClick={onClose} style={{ position:'absolute', inset:0, background:'rgba(26,26,24,0.6)' }}/>
+      <div style={{ position:'relative', background:C.sand, borderRadius:'20px 20px 0 0',
+        maxHeight:'92dvh', display:'flex', flexDirection:'column', animation:'slideUp 0.25s ease' }}>
+
+        <div style={{ padding:'20px 20px 14px', background:C.white,
+          borderRadius:'20px 20px 0 0', borderBottom:`1px solid ${C.sandMid}`,
+          display:'flex', alignItems:'flex-start', gap:12 }}>
+          <div style={{ flex:1 }}>
+            <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
+              {groups.length ? `${groups.length} duplicate${groups.length===1?'':'s'} found`
+                             : 'No duplicates'}
+            </h2>
+            <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
+              {groups.length
+                ? 'Same merchant, same day, same amount. One copy is kept and the rest removed.'
+                : 'Nothing in this month appears more than once.'}
+            </p>
+          </div>
+          <button onClick={onClose} style={{ border:'none', background:'none', padding:6, cursor:'pointer' }}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1, padding:'12px 16px' }}>
+          {groups.length === 0 && (
+            <Card style={{ textAlign:'center', padding:'32px 20px' }}>
+              <Check size={34} color={C.green} style={{ marginBottom:10 }}/>
+              <p style={{ margin:0, fontSize:14, color:C.inkMid, fontFamily:SANS }}>
+                This month looks clean.
+              </p>
+            </Card>
+          )}
+
+          {groups.map(g => {
+            const on = chosen[g.id];
+            const c  = allCats.find(x => x.id === (g.keep.category || g.keep.cat))
+                    || { icon:'Package', color:C.inkSoft };
+            return (
+              <Card key={g.id} style={{ padding:'12px 14px',
+                border:`1px solid ${on ? C.red + '55' : C.sandDark}` }}>
+                <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+                  <button onClick={() => setChosen(p => ({ ...p, [g.id]: !p[g.id] }))}
+                    style={{ border:'none', background:'none', padding:0, cursor:'pointer', flexShrink:0 }}>
+                    <div style={{ width:20, height:20, borderRadius:5,
+                      border:`1.5px solid ${on ? C.red : C.sandDark}`,
+                      background: on ? C.red : 'transparent',
+                      display:'flex', alignItems:'center', justifyContent:'center' }}>
+                      {on && <Check size={12} color="#fff" strokeWidth={3}/>}
+                    </div>
+                  </button>
+                  <div style={{ width:30, height:30, borderRadius:9, background:c.color+'18',
+                    display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+                    <CatIcon name={c.icon} size={15} color={c.color}/>
+                  </div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <p style={{ margin:0, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS,
+                      overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                      {g.label}
+                    </p>
+                    <p style={{ margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
+                      {g.date} · appears {g.count} times
+                    </p>
+                  </div>
+                  <span style={{ fontFamily:SERIF, fontSize:16, fontWeight:700, color:C.ink }}>
+                    {fmt(g.amount)}
+                  </span>
+                </div>
+
+                {g.crossAccount && (
+                  <p style={{ margin:'0 0 8px', fontSize:11, color:C.amber,
+                    fontFamily:SANS, lineHeight:1.5, paddingLeft:30 }}>
+                    Recorded under {g.sources.map(instLabel).join(' and ')}. One purchase
+                    cannot be on two accounts, so this is the same statement imported twice.
+                  </p>
+                )}
+
+                <div style={{ paddingLeft:30 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom:3 }}>
+                    <Check size={11} color={C.green} strokeWidth={3}/>
+                    <span style={{ fontSize:11, color:C.green, fontFamily:SANS }}>
+                      keeping the {instLabel(g.keep.source)} copy
+                    </span>
+                  </div>
+                  {g.remove.map(r => (
+                    <div key={r.id} style={{ display:'flex', alignItems:'center', gap:7 }}>
+                      <Trash2 size={11} color={on ? C.red : C.sandDark}/>
+                      <span style={{ fontSize:11, fontFamily:SANS,
+                        color: on ? C.red : C.inkSoft,
+                        textDecoration: on ? 'line-through' : 'none' }}>
+                        removing the {instLabel(r.source)} copy
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+
+        {groups.length > 0 && (
+          <div style={{ padding:'12px 16px 24px', background:C.white,
+            borderTop:`1px solid ${C.sandMid}` }}>
+            <button onClick={run} disabled={busy || toRemove.length === 0}
+              style={{ width:'100%', border:'none', padding:'15px', borderRadius:12,
+                background: toRemove.length ? C.red : C.sandDark,
+                color: toRemove.length ? '#fff' : C.inkSoft,
+                fontSize:15, fontWeight:700, fontFamily:SANS,
+                cursor: toRemove.length ? 'pointer' : 'default',
+                display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
+              {busy ? <><Spinner size={14}/>Removing…</>
+                    : `Remove ${toRemove.length} duplicate${toRemove.length===1?'':'s'}`}
+            </button>
+            <p style={{ margin:'8px 0 0', fontSize:11, color:C.inkSoft,
+              textAlign:'center', fontFamily:SANS }}>
+              {fmt(reclaimed)} of double-counted spending comes off your totals.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ─── Reset / danger zone ──────────────────────────────────────────────────────
 // Deleting shared data is not reversible and affects both people, so this
@@ -3213,8 +3559,13 @@ export default function App() {
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
   const [billRules,  setBillRules ]=useState([]);
+  const [showDupes,  setShowDupes ]=useState(false);
+  const [billsLocal, setBillsLocal]=useState(false);
 
-  const allCats=[...DEFAULT_CATS,...customCats];
+  // Alphabetical everywhere, so a category is always where you expect it —
+  // including custom ones added later.
+  const allCats=[...DEFAULT_CATS,...customCats]
+    .sort((a,b)=>a.label.localeCompare(b.label,'en',{sensitivity:'base'}));
 
   // ── Auth init ────────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -3261,7 +3612,13 @@ export default function App() {
       const [t,b,s,ai,hist]=await Promise.all([getTxns(year,month),getBankImports(year,month),
         getSettings(year,month),getAllBankImports(),getAllBankImportsRaw()]);
       setHistory(hist);
-      try { setBillRules(await getBillRules()); } catch {}
+      try {
+        // If the bill_rules table exists but local edits are waiting, push them up
+        try { await syncLocalBillRules(); } catch {}
+        setBillRules(await getBillRules());
+        const mod = await import('./supabase.js');
+        setBillsLocal(!!mod.billRulesLocalOnly);
+      } catch {}
       setTxns(t);setImports(b);
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
       if(ai.length>20){const nt=computeTargets(ai);if(Object.keys(nt).length>0)setSuggested(nt);}
@@ -3296,10 +3653,34 @@ export default function App() {
     }
   }
 
+  // One row deleted from wherever it lives
+  async function deleteRow(tx) {
+    const isImport = tx._table === 'bank_imports' || tx.description !== undefined;
+    try {
+      if (isImport) {
+        await deleteBankImport(tx.id);
+        setImports(prev => prev.filter(t => t.id !== tx.id));
+      } else {
+        await deleteTxn(tx.id);
+        setTxns(prev => prev.filter(t => t.id !== tx.id));
+      }
+      showToast('Deleted');
+    } catch (e) { showToast('Could not delete — ' + e.message); }
+  }
+
+  async function deleteRows(ids) {
+    await deleteManyRows(ids);
+    setImports(prev => prev.filter(t => !ids.includes(t.id)));
+    setTxns(prev => prev.filter(t => !ids.includes(t.id)));
+    await loadAll();
+  }
+
   async function saveBillRule(rule) {
     try {
       await upsertBillRule(rule);
       setBillRules(await getBillRules());
+      const mod = await import('./supabase.js');
+      setBillsLocal(!!mod.billRulesLocalOnly);
       showToast(rule.status === 'hidden' ? 'Hidden from bills' : 'Bill saved');
     } catch (e) { showToast('Could not save — ' + e.message); }
   }
@@ -3481,13 +3862,16 @@ export default function App() {
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
           onReviewOther={openReview}
           otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}
-          onChangeCategory={handleChangeCategory}/>}
+          onChangeCategory={handleChangeCategory}
+          onDeleteRow={deleteRow}
+          duplicateCount={findExistingDuplicates([...txns,...imports]).length}
+          onReviewDuplicates={()=>setShowDupes(true)}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
           bankImports={imports} allCats={allCats} year={year} month={month}
-          billRules={billRules} showToast={showToast}
+          billRules={billRules} showToast={showToast} billsLocal={billsLocal}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
@@ -3507,6 +3891,16 @@ export default function App() {
         />
       )}
 
+      {showDupes && (
+        <DuplicateModal
+          rows={[...txns, ...imports]}
+          allCats={allCats}
+          showToast={showToast}
+          onDelete={deleteRows}
+          onClose={()=>setShowDupes(false)}
+        />
+      )}
+
       {/* Partner activity panel */}
       {showActivity && (
         <ActivityPanel
@@ -3521,6 +3915,7 @@ export default function App() {
         <OtherReviewModal
           items={otherItems}
           allCats={allCats}
+          onDeleteRow={async tx => { await deleteRow(tx); setOtherItems(p=>p.filter(t=>t.id!==tx.id)); }}
           onSave={async () => {
             setShowReview(false);
             await loadAll();

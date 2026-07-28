@@ -246,22 +246,103 @@ export async function deleteAllData() {
 // ── Bill rules ────────────────────────────────────────────────────────────────
 /**
  * User edits layered over detection: renames, corrected amounts and days,
- * dismissals, confirmations, and bills added by hand. Shared, so both people
- * see the same list.
+ * dismissals, confirmations, and bills added by hand.
+ *
+ * These live in Supabase so both people see the same list. If the table has not
+ * been created yet the feature still works, backed by this browser only, and the
+ * app says so rather than failing with a Postgres error.
  */
+const BILLS_LOCAL_KEY = 'b42_bill_rules';
+
+/** Postgres and PostgREST codes for "that table does not exist". */
+const isMissingTable = err =>
+  err?.code === '42P01' || err?.code === 'PGRST205' ||
+  /schema cache|does not exist|not find the table/i.test(err?.message || '');
+
+export let billRulesLocalOnly = false;
+
+function readLocalRules() {
+  try { return JSON.parse(localStorage.getItem(BILLS_LOCAL_KEY) || '[]'); }
+  catch { return []; }
+}
+function writeLocalRules(rules) {
+  try { localStorage.setItem(BILLS_LOCAL_KEY, JSON.stringify(rules)); } catch {}
+}
+
 export async function getBillRules() {
-  const { data, error } = await supabase.from('bill_rules').select('*');
-  if (error) throw error;
-  return data || [];
+  try {
+    const { data, error } = await supabase.from('bill_rules').select('*');
+    if (error) throw error;
+    billRulesLocalOnly = false;
+    return data || [];
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billRulesLocalOnly = true;
+    return readLocalRules();
+  }
 }
 
 export async function upsertBillRule(rule) {
-  const { error } = await supabase.from('bill_rules')
-    .upsert({ ...rule, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-  if (error) throw error;
+  const row = { ...rule, updated_at: new Date().toISOString() };
+  try {
+    const { error } = await supabase.from('bill_rules')
+      .upsert(row, { onConflict: 'key' });
+    if (error) throw error;
+    billRulesLocalOnly = false;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billRulesLocalOnly = true;
+    const rules = readLocalRules().filter(r => r.key !== rule.key);
+    writeLocalRules([...rules, row]);
+  }
 }
 
 export async function deleteBillRule(key) {
-  const { error } = await supabase.from('bill_rules').delete().eq('key', key);
+  try {
+    const { error } = await supabase.from('bill_rules').delete().eq('key', key);
+    if (error) throw error;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billRulesLocalOnly = true;
+    writeLocalRules(readLocalRules().filter(r => r.key !== key));
+  }
+}
+
+/** Push anything saved locally up once the table exists. */
+export async function syncLocalBillRules() {
+  const local = readLocalRules();
+  if (!local.length) return 0;
+  const { error } = await supabase.from('bill_rules')
+    .upsert(local, { onConflict: 'key' });
   if (error) throw error;
+  writeLocalRules([]);
+  billRulesLocalOnly = false;
+  return local.length;
+}
+
+/** Remove many rows at once, across both tables. */
+export async function deleteManyRows(ids) {
+  if (!ids?.length) return;
+  const CHUNK = 100;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const batch = ids.slice(i, i + CHUNK);
+    const a = await supabase.from('bank_imports').delete().in('id', batch);
+    if (a.error) throw a.error;
+    const b = await supabase.from('transactions').delete().in('id', batch);
+    if (b.error) throw b.error;
+  }
+}
+
+/** Everything saved for one month, both manual and imported. */
+export async function getMonthEverything(year, month) {
+  const [t, b] = await Promise.all([
+    supabase.from('transactions').select('*').eq('year', year).eq('month', month),
+    supabase.from('bank_imports').select('*').eq('year', year).eq('month', month),
+  ]);
+  if (t.error) throw t.error;
+  if (b.error) throw b.error;
+  return [
+    ...(t.data || []).map(r => ({ ...r, description: r.note || '', _table: 'transactions' })),
+    ...(b.data || []).map(r => ({ ...r, _table: 'bank_imports' })),
+  ];
 }

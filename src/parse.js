@@ -14,7 +14,7 @@
  *            income. Where a statement has an explicit type column, that is
  *            trusted ahead of the sign.
  */
-import { categorize } from './categorize.js';
+import { categorize, categorizeBudget } from './categorize.js';
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -277,7 +277,8 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
       if (WS_ACCOUNTS[acct]) rowSource = WS_ACCOUNTS[acct];
     }
 
-    const cat = categorize(desc);
+    // Budget rules first, then the older merchant list
+    const cat = categorizeBudget(desc) || categorize(desc);
 
     // Paying your own credit card from chequing shows up as an ordinary debit,
     // so the credit-only rule missed it and counted it as spending. Naming the
@@ -292,7 +293,12 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
     const TRANSFER_CODE = /^(e_trf(in|out)|transfer_tf|aft_(in|out)|eft|withdrawal|deposit|buy|sell)$/i;
     const isTransfer =
       TRANSFER_CODE.test(desc.trim()) ||
-      /money transfer (in|out)|interac e-?transfer.*(in|out)$/i.test(desc);
+      /money transfer (in|out)|interac e-?transfer.*(in|out)$/i.test(desc) ||
+      /^\[cw\]\s*tf\b|^\[ck\]no\.|returned item/i.test(desc);
+
+    // Money arriving is income unless it is a card payment or an internal
+    // move. Without this, every paycheque and refund sat in "Other".
+    const isIncome = direction === 'credit' && !isCardPayment && !isTransfer;
 
     rows.push({
       id:          uid(),
@@ -301,6 +307,7 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
       amount,
       category:    isCardPayment ? 'cc_payment'
                  : isTransfer    ? 'transfer'
+                 : isIncome      ? 'income'
                  : (cat === '_skip' ? 'other' : cat),
       source:      rowSource,
       month:       dateObj.getMonth(),

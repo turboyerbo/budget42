@@ -13,7 +13,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, BillsTab, HistoryTab, ChartsTab, UploadTab,
   AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal } from '../src/App.jsx';
+  ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -73,6 +73,7 @@ const noop = () => {};
     onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
     profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
     view: v, setView: noop, history, billRules: [],
+    onDeleteRow: noop, duplicateCount: 2, onReviewDuplicates: noop,
   })));
 });
 
@@ -84,10 +85,15 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
   view: 'combined', setView: noop, history: [], billRules: [],
 })));
 
-const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop, showToast: noop };
+const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
+  showToast: noop, billsLocal: false };
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6, ...billProps })));
+
+check('render BillsTab (local-only mode)', () => renderToString(React.createElement(BillsTab, {
+  history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+  ...billProps, billsLocal: true })));
 
 check('render BillsTab (with user rules)', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6,
@@ -147,6 +153,26 @@ check('render ActivityPanel', () => renderToString(React.createElement(ActivityP
 
 check('render ActivityPanel (empty)', () => renderToString(React.createElement(ActivityPanel, {
   items: [], onClose: noop, onClear: noop })));
+
+const dupeRows = [
+  { id:'d1', date:'2026-04-25', description:'MARCHE LEOS MARKET', amount:18.44,
+    source:'CTFS', category:'groceries', year:2026, month:3 },
+  { id:'d2', date:'2026-04-25', description:'MARCHE LEOS MARKET', amount:18.44,
+    source:'BMO',  category:'groceries', year:2026, month:3 },
+  { id:'d3', date:'2026-04-21', description:'RABBA 117',     amount:4.17,
+    source:'BMO',  category:'groceries', year:2026, month:3 },
+  { id:'d4', date:'2026-04-21', description:'RABBA 117 Q4R', amount:4.17,
+    source:'CTFS', category:'other',     year:2026, month:3 },
+];
+
+check('render DuplicateModal (with duplicates)', () => renderToString(React.createElement(DuplicateModal, {
+  rows: dupeRows, allCats, onDelete: noop, onClose: noop, showToast: noop })));
+
+check('render DuplicateModal (clean)', () => renderToString(React.createElement(DuplicateModal, {
+  rows: [dupeRows[0]], allCats, onDelete: noop, onClose: noop, showToast: noop })));
+
+check('render OtherReviewModal with delete', () => renderToString(React.createElement(OtherReviewModal, {
+  items: imports, allCats, onSave: noop, onClose: noop, onDeleteRow: noop })));
 
 check('render ResetModal', () => renderToString(React.createElement(ResetModal, {
   year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop })));

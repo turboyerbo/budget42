@@ -38,7 +38,7 @@ const COUNTRY_TAIL = /\s+(can|usa|us)\s*$/i;
 
 /** A token like CG9F5CS6N7G1 or 20260051757M8FCYA — a reference, not a name. */
 const isReference = t =>
-  t.length >= 5 && /\d/.test(t) && /[a-z]/i.test(t) && !/^\d+(st|nd|rd|th)$/i.test(t);
+  t.length >= 3 && /\d/.test(t) && /[a-z]/i.test(t) && !/^\d+(st|nd|rd|th)$/i.test(t);
 
 export function merchantKey(description) {
   let s = String(description || '');
@@ -92,4 +92,16 @@ export function bestLabel(descriptions) {
   if (!cleaned.length) return descriptions[0] || '';
   // Shortest is usually the least cluttered
   return cleaned.sort((a, b) => a.length - b.length)[0];
+}
+
+/**
+ * A deliberately looser key, for spotting the same purchase imported twice.
+ *
+ * Bills need a precise key so two different subscriptions from one company stay
+ * apart. Duplicate hunting is the opposite problem: "METRO 62" and
+ * "METRO 62 TORONTO" are the same shop, and the date and amount have to match
+ * as well before anything is called a duplicate, so a loose name is safe here.
+ */
+export function duplicateKey(description) {
+  return merchantKey(description).split(' ').slice(0, 2).join(' ');
 }
