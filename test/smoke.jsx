@@ -13,7 +13,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, BillsTab, HistoryTab, ChartsTab, UploadTab,
   AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
-  ResetModal } from '../src/App.jsx';
+  ResetModal, BillEditModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -72,7 +72,7 @@ const noop = () => {};
     allCats, onSaveSettings: noop, catTargets: {}, suggested: {},
     onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
     profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
-    view: v, setView: noop, history,
+    view: v, setView: noop, history, billRules: [],
   })));
 });
 
@@ -81,20 +81,37 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
   allCats, onSaveSettings: noop, catTargets: {}, suggested: {},
   onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
   profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
-  view: 'combined', setView: noop, history: [],
+  view: 'combined', setView: noop, history: [], billRules: [],
 })));
 
+const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop, showToast: noop };
+
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
-  history, txns, bankImports: imports, allCats, year: 2026, month: 6 })));
+  history, txns, bankImports: imports, allCats, year: 2026, month: 6, ...billProps })));
+
+check('render BillsTab (with user rules)', () => renderToString(React.createElement(BillsTab, {
+  history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+  ...billProps, billRules: [
+    { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
+    { key:'netflix',    status:'hidden' },
+    { key:'manual:gym', label:'Gym', amount:59.99, day:5, status:'manual', category:'other' },
+  ] })));
+
+check('render BillEditModal (existing)', () => renderToString(React.createElement(BillEditModal, {
+  bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
+  allCats, onSave: noop, onDelete: noop, onClose: noop })));
+
+check('render BillEditModal (new)', () => renderToString(React.createElement(BillEditModal, {
+  bill: null, allCats, onSave: noop, onDelete: noop, onClose: noop })));
 
 check('render BillsTab (no history)', () => renderToString(React.createElement(BillsTab, {
-  history: [], txns: [], bankImports: [], allCats, year: 2026, month: 6 })));
+  history: [], txns: [], bankImports: [], allCats, year: 2026, month: 6, ...billProps })));
 
 check('render BillsTab (nothing charged yet)', () => renderToString(React.createElement(BillsTab, {
-  history, txns: [], bankImports: [], allCats, year: 2026, month: 6 })));
+  history, txns: [], bankImports: [], allCats, year: 2026, month: 6, ...billProps })));
 
 check('render BillsTab (future month)', () => renderToString(React.createElement(BillsTab, {
-  history, txns, bankImports: imports, allCats, year: 2027, month: 0 })));
+  history, txns, bankImports: imports, allCats, year: 2027, month: 0, ...billProps })));
 
 check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, {
   txns, bankImports: imports, allCats,

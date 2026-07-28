@@ -10,7 +10,7 @@
  * come this month". A bill already paid is spending. A bill not yet charged is
  * a commitment. Only the second belongs in the committed figure.
  */
-import { normalizeDesc } from './validate.js';
+import { merchantKey, bestLabel } from './merchant.js';
 
 const monthKey = t => `${t.year}-${t.month}`;
 const dayOf    = d => parseInt(String(d).slice(8, 10), 10) || 1;
@@ -25,15 +25,15 @@ const median   = ns => {
  *
  * Returns [{ key, label, amount, category, day, monthsSeen, varies }]
  */
-export function detectRecurring(imports, { minMonths = 2, tolerance = 0.25 } = {}) {
+export function detectRecurring(imports, { minMonths = 2, tolerance = 0.3 } = {}) {
   const groups = new Map();
 
   imports.forEach(t => {
-    // Money in and money moved are not bills
-    if (t.direction === 'credit') return;
+    // Money in and money moved between accounts are not bills
+    if (t.direction === 'credit' || t._type === 'credit') return;
     if (['income', 'cc_payment', 'transfer'].includes(t.category)) return;
 
-    const key = normalizeDesc(t.description || '');
+    const key = merchantKey(t.description || '');
     if (!key || key.length < 3) return;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(t);
@@ -45,35 +45,61 @@ export function detectRecurring(imports, { minMonths = 2, tolerance = 0.25 } = {
     const months = new Set(rows.map(monthKey));
     if (months.size < minMonths) return;
 
+    // One charge per month is the shape of a bill. Several charges a month at
+    // the same shop is a habit, so require roughly one per month.
+    if (rows.length > months.size * 2.5) return;
+
     const amounts = rows.map(r => r.amount);
     const typical = median(amounts);
-    if (!typical) return;
+    if (!typical || typical < 0.5) return;
 
-    // Two tests, both aimed at telling a bill apart from a habit.
-    //
-    // 1. Spread, not distance from the median. Comparing each amount to the
-    //    median individually is too forgiving: 130 / 160 / 190 all sit within
-    //    25% of 160, yet that is obviously variable shopping, not a bill.
+    // Thresholds chosen by looking at real statements. Bills sit at low spread
+    // and roughly one charge a month; transfers between accounts run five to
+    // twelve a month with spreads of 300% or more.
     const spread = (Math.max(...amounts) - Math.min(...amounts)) / typical;
-    if (spread > tolerance) return;
 
-    const days = rows.map(r => dayOf(r.date)).sort((a, b) => a - b);
+    const days  = rows.map(r => dayOf(r.date)).sort((a, b) => a - b);
+    const drift = days[days.length - 1] - days[0];
+    const wrapsMonthEnd = days[0] <= 3 && days[days.length - 1] >= 27;
 
-    // 2. Bills land on roughly the same day each month. Groceries do not.
-    //    Allow a week of drift for weekends and processing delays.
-    const dayDrift = days[days.length - 1] - days[0];
-    const wrapsMonthEnd = days[0] <= 3 && days[days.length - 1] >= 27;  // e.g. 30th/1st
-    if (dayDrift > 8 && !wrapsMonthEnd) return;
+    // An amount that barely moves is strong evidence on its own. Rent paid by
+    // e-transfer lands anywhere from the 5th to the 31st but is always the same
+    // figure, and that is unmistakably a bill.
+    const steadyAmount = spread <= 0.15;
+
+    const amountOk = spread <= 1.0;
+    const dateOk   = drift <= 20 || wrapsMonthEnd;
+
+    if (!steadyAmount && !(amountOk && dateOk)) return;
+
+    // Confidence, rather than a hard yes/no. A shop visited about once a month
+    // looks a lot like a subscription on paper; the difference is that a bill
+    // charges nearly the same amount on nearly the same day. Anything less
+    // certain is offered to the user as a suggestion instead of being counted.
+    const tightDate   = drift <= 12 || wrapsMonthEnd;
+    const tightAmount = spread <= 0.3;
+    // An identical figure three months running is a bill even if the date
+    // wanders — rent paid by e-transfer lands whenever it lands.
+    const identical = spread <= 0.02 && months.size >= 3;
+    const confidence  =
+      identical                                          ? 'high'
+      : (steadyAmount && rows.length <= months.size * 1.5) ? 'high'
+      : (tightAmount && tightDate)                        ? 'high'
+      : 'low';
 
     out.push({
       key,
-      label:      rows[rows.length - 1].description,
+      label:      bestLabel(rows.map(r => r.description)),
       amount:     Math.round(typical * 100) / 100,
       category:   rows[rows.length - 1].category || 'other',
       source:     rows[rows.length - 1].source,
       day:        days[Math.floor(days.length / 2)],
       monthsSeen: months.size,
       varies:     Math.max(...amounts) - Math.min(...amounts) > typical * 0.1,
+      lastSeen:   rows.map(r => r.date).sort().at(-1),
+      confidence,
+      spread:     Math.round(spread * 100) / 100,
+      drift,
     });
   });
 
@@ -88,7 +114,7 @@ export function splitRecurring(recurring, thisMonthTx) {
   const seenKeys = new Set(
     thisMonthTx
       .filter(t => (t.direction ?? t._type ?? 'debit') !== 'credit')
-      .map(t => normalizeDesc(t.description || t.note || ''))
+      .map(t => merchantKey(t.description || t.note || ''))
   );
 
   const paid = [], due = [];
@@ -170,4 +196,52 @@ export function relativeDay(daysAway) {
   if (daysAway === -1) return 'yesterday';
   if (daysAway  <  0)  return `${Math.abs(daysAway)} days ago`;
   return `in ${daysAway} days`;
+}
+
+// ── User overrides ────────────────────────────────────────────────────────────
+/**
+ * Merge detected charges with the user's own edits.
+ *
+ * Detection is a starting point, not the last word. A rule can rename a bill,
+ * correct its amount or day, confirm a suggestion, hide something that is not a
+ * bill, or add one that never appears in a statement at all.
+ */
+export function applyBillRules(detected, rules = []) {
+  const byKey = new Map(rules.map(r => [r.key, r]));
+  const out = [];
+
+  detected.forEach(bill => {
+    const rule = byKey.get(bill.key);
+    if (rule?.status === 'hidden') return;
+
+    out.push({
+      ...bill,
+      label:      rule?.label  ?? bill.label,
+      amount:     rule?.amount != null ? Number(rule.amount) : bill.amount,
+      day:        rule?.day    != null ? Number(rule.day)    : bill.day,
+      category:   rule?.category ?? bill.category,
+      confidence: rule?.status === 'confirmed' ? 'high' : bill.confidence,
+      edited:     !!rule && rule.status !== 'auto',
+      detected:   true,
+    });
+  });
+
+  // Bills the user added by hand
+  rules.filter(r => r.status === 'manual').forEach(r => {
+    out.push({
+      key:        r.key,
+      label:      r.label || 'Untitled bill',
+      amount:     Number(r.amount) || 0,
+      day:        Number(r.day) || 1,
+      category:   r.category || 'other',
+      monthsSeen: 0,
+      confidence: 'high',
+      varies:     false,
+      edited:     true,
+      detected:   false,
+      manual:     true,
+    });
+  });
+
+  return out.sort((a, b) => b.amount - a.amount);
 }

@@ -830,3 +830,74 @@ split by `account_id` into joint and personal rather than all landing on one.
 separator-less dates, inverted signs, missing columns, bank names inside
 transaction text. `test/parsers.mjs` runs 36 assertions over them and is part of
 `npm run build`.
+
+---
+
+## v24 — bills are detected properly, and editable
+
+### REQUIRED migration
+
+```sql
+create table if not exists bill_rules (
+  key        text primary key,
+  label      text,
+  amount     numeric,
+  day        int,
+  category   text,
+  status     text default 'auto',   -- auto | confirmed | hidden | manual
+  updated_at timestamptz default now()
+);
+alter table bill_rules enable row level security;
+create policy "allow all on bill_rules" on bill_rules for all using (true) with check (true);
+alter publication supabase_realtime add table bill_rules;
+```
+
+### Why nothing was being detected
+
+Statements bury the merchant in noise that changes every month, so one payee
+looked like several:
+
+```
+[OP]RECURRING PYMNT 19JAN2026FREEDOM MOBILE ON
+[OP]RECURRING PYMNT 19APR2026FREEDOM MOBILE ON
+DROPBOX*CG9F5CS6N7G1
+Dropbox RL41LSWNT7HJ
+[CW]INTERAC ETRNSFR SENT STELA 20260051757M8FCYA
+```
+
+Four Dropbox charges were four unrelated one-offs, so nothing ever reached the
+two-month threshold. `src/merchant.js` strips BMO's bracket codes, dates glued
+into the description, payment-processor references, and city and province tails.
+All five lines above now reduce to one merchant each.
+
+Tested against 24 real statements: 11 bills detected before, 35 after, including
+rent, Freedom Mobile, Affirm, Dropbox, YouTube and the electricity bill.
+
+### Transfers were counted as spending
+
+Paying your own credit card from chequing arrives as an ordinary debit, so the
+credit-only rule missed it. Wealthsimple writes movements between accounts as
+bare codes like `E_TRFOUT` and `TRANSFER_TF`, which were also being spent.
+Naming the card issuers and those codes moves them out of spending.
+
+Across the real files this drops the spending total from $119,202 to $74,455.
+The difference was money moving between the user's own accounts.
+
+### Confidence, rather than a guess
+
+A shop visited monthly looks like a subscription on paper. Bills charge nearly
+the same amount on nearly the same day, so:
+
+- **high** — counted as a bill (identical amount three months running also
+  qualifies, which is how rent paid by e-transfer on wandering dates is caught)
+- **low** — offered under "Might be bills" with *It's a bill* and *Hide* buttons
+
+### Editing
+
+Tap any bill to rename it, correct the amount or day, change its category, or
+remove it. There is also **Add a bill manually** for anything that never appears
+in a statement.
+
+Edits are stored per merchant in `bill_rules` and always win over detection, so
+a future import cannot overwrite them. They are shared, so both people see the
+same list.

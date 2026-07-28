@@ -242,3 +242,26 @@ export async function deleteAllData() {
   const r3 = await supabase.from('budget_settings').delete().neq('year', -1);
   if (r3.error) throw r3.error;
 }
+
+// ── Bill rules ────────────────────────────────────────────────────────────────
+/**
+ * User edits layered over detection: renames, corrected amounts and days,
+ * dismissals, confirmations, and bills added by hand. Shared, so both people
+ * see the same list.
+ */
+export async function getBillRules() {
+  const { data, error } = await supabase.from('bill_rules').select('*');
+  if (error) throw error;
+  return data || [];
+}
+
+export async function upsertBillRule(rule) {
+  const { error } = await supabase.from('bill_rules')
+    .upsert({ ...rule, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  if (error) throw error;
+}
+
+export async function deleteBillRule(key) {
+  const { error } = await supabase.from('bill_rules').delete().eq('key', key);
+  if (error) throw error;
+}

@@ -14,13 +14,15 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          subscribeToMonth, subscribeToPartnerActivity,
          signUp, signIn, signOut, onAuthChange, updateUserMeta,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
-         deleteMonthData, deleteAllData } from './supabase.js';
+         deleteMonthData, deleteAllData,
+         getBillRules, upsertBillRule, deleteBillRule } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
-import { detectRecurring, splitRecurring, buildSchedule, relativeDay } from './recurring.js';
+import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
+         applyBillRules } from './recurring.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
@@ -720,7 +722,7 @@ export function OtherReviewModal({ items, allCats, onSave, onClose }) {
 export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
-                  onChangeCategory,view,setView,history}) {
+                  onChangeCategory,view,setView,history,billRules}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -730,7 +732,8 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
   // Recurring charges are worked out from your own history rather than kept in
   // a hardcoded list. Only what has NOT yet been charged counts as committed —
   // anything already charged is sitting in `spent`, and adding both double counts.
-  const recurring   = detectRecurring(history || []);
+  const recurring   = applyBillRules(detectRecurring(history || []), billRules || [])
+    .filter(b => b.confidence === 'high');
   const { paid:paidBills, due:dueBills, dueTotal } = splitRecurring(recurring, everythingThisMonth);
 
   // Same logic for the card payment: only pledge it if it hasn't gone out yet
@@ -1449,27 +1452,155 @@ export function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,
   );
 }
 
-// ─── BILLS TAB ────────────────────────────────────────────────────────────────
-// What is coming, when, and how much. Everything here is worked out from your
-// own statements rather than typed in, so it stays right as your bills change.
-export function BillsTab({history, txns, bankImports, allCats, year, month}) {
-  const recurring = detectRecurring(history || []);
-  const sched     = buildSchedule(recurring, [...txns, ...bankImports], year, month);
+// ─── Bill editor ──────────────────────────────────────────────────────────────
+export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
+  const [label,  setLabel]  = useState(bill?.label || '');
+  const [amount, setAmount] = useState(bill?.amount ?? '');
+  const [day,    setDay]    = useState(bill?.day ?? 1);
+  const [cat,    setCat]    = useState(bill?.category || 'other');
+  const [busy,   setBusy]   = useState(false);
 
-  const weekTotal = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
+  const isNew = !bill;
+  const valid = label.trim() && Number(amount) > 0 && day >= 1 && day <= 31;
+
+  async function save() {
+    if (!valid) return;
+    setBusy(true);
+    await onSave({
+      key:      bill?.key || 'manual:' + uid(),
+      label:    label.trim(),
+      amount:   Number(amount),
+      day:      Number(day),
+      category: cat,
+      status:   bill?.detected ? 'confirmed' : 'manual',
+    });
+    setBusy(false);
+  }
+
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:760,
+      display:'flex', flexDirection:'column', justifyContent:'flex-end' }}>
+      <div onClick={onClose} style={{ position:'absolute', inset:0, background:'rgba(26,26,24,0.6)' }}/>
+      <div style={{ position:'relative', background:C.white, borderRadius:'20px 20px 0 0',
+        padding:'22px 20px 34px', animation:'slideUp 0.25s ease', maxHeight:'88dvh', overflowY:'auto' }}>
+
+        <div style={{ display:'flex', alignItems:'center', marginBottom:16 }}>
+          <h2 style={{ flex:1, margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
+            {isNew ? 'Add a bill' : 'Edit bill'}
+          </h2>
+          <button onClick={onClose} style={{ border:'none', background:'none', padding:6, cursor:'pointer' }}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        {bill?.detected && (
+          <p style={{ margin:'0 0 14px', fontSize:12, color:C.inkSoft,
+            fontFamily:SANS, lineHeight:1.6 }}>
+            Found in {bill.monthsSeen} months of statements. Anything you change here
+            sticks, and future imports will not overwrite it.
+          </p>
+        )}
+
+        <SL>Name</SL>
+        <input value={label} onChange={e => setLabel(e.target.value)}
+          placeholder="e.g. Rent"
+          style={{ width:'100%', border:`1px solid ${C.sandDark}`, borderRadius:10,
+            padding:'12px 14px', fontSize:16, color:C.ink, background:C.sand,
+            marginBottom:14, outline:'none', fontFamily:SANS, boxSizing:'border-box' }}/>
+
+        <SL>Amount</SL>
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
+          <span style={{ fontSize:18, color:C.inkSoft, fontFamily:SERIF }}>$</span>
+          <input type="number" inputMode="decimal" value={amount}
+            onChange={e => setAmount(e.target.value)}
+            style={{ flex:1, border:`1px solid ${C.sandDark}`, borderRadius:10,
+              padding:'12px 14px', fontSize:16, color:C.ink, background:C.sand,
+              outline:'none', fontFamily:SERIF, boxSizing:'border-box' }}/>
+        </div>
+
+        <SL>Usually charged on the</SL>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+          <input type="number" min="1" max="31" value={day}
+            onChange={e => setDay(e.target.value)}
+            style={{ width:80, border:`1px solid ${C.sandDark}`, borderRadius:10,
+              padding:'12px 14px', fontSize:16, color:C.ink, background:C.sand,
+              outline:'none', fontFamily:SERIF, boxSizing:'border-box' }}/>
+          <span style={{ fontSize:13, color:C.inkSoft, fontFamily:SANS }}>
+            of the month · the 31st falls back to the last day in shorter months
+          </span>
+        </div>
+
+        <SL>Category</SL>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:7, marginBottom:20 }}>
+          {allCats.filter(c => !c.isIncome).map(c => (
+            <button key={c.id} onClick={() => setCat(c.id)}
+              style={{ border:`1.5px solid ${cat===c.id ? c.color : C.sandDark}`,
+                borderRadius:10, padding:'9px 6px', cursor:'pointer',
+                background: cat===c.id ? c.color+'15' : C.white,
+                display:'flex', flexDirection:'column', alignItems:'center', gap:5 }}>
+              <CatIcon name={c.icon} size={16} color={cat===c.id ? c.color : C.inkSoft}/>
+              <span style={{ fontSize:10, color:cat===c.id ? c.color : C.inkMid,
+                fontFamily:SANS, textAlign:'center', lineHeight:1.2 }}>{c.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <button onClick={save} disabled={!valid || busy}
+          style={{ width:'100%', border:'none', padding:'15px', borderRadius:12,
+            background: valid ? C.green : C.sandDark, color: valid ? '#fff' : C.inkSoft,
+            fontSize:15, fontWeight:600, cursor: valid ? 'pointer' : 'default',
+            fontFamily:SANS, marginBottom:8,
+            display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
+          {busy ? <><Spinner size={14}/>Saving…</> : isNew ? 'Add bill' : 'Save changes'}
+        </button>
+
+        {bill && (
+          <button onClick={() => onDelete(bill)}
+            style={{ width:'100%', border:`1px solid ${C.red}44`, padding:'13px',
+              borderRadius:12, background:C.white, color:C.red, fontSize:14,
+              fontWeight:600, cursor:'pointer', fontFamily:SANS }}>
+            {bill.manual ? 'Delete this bill' : 'Not a bill — hide it'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── BILLS TAB ────────────────────────────────────────────────────────────────
+export function BillsTab({history, txns, bankImports, allCats, year, month,
+                          billRules, onSaveRule, onDeleteRule, showToast}) {
+  const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
+
+  const detected = detectRecurring(history || []);
+  const bills    = applyBillRules(detected, billRules || []);
+
+  const confirmed  = bills.filter(b => b.confidence === 'high');
+  const suggested  = bills.filter(b => b.confidence !== 'high');
+  const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month);
+  const weekTotal  = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
+
+  async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
+  async function removeRule(bill) {
+    await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
+    setEditing(undefined);
+    showToast(bill.manual ? 'Bill deleted' : 'Hidden from bills');
+  }
 
   const STATUS = {
-    overdue: { label:'Overdue',  color:C.red,     bg:C.redLight },
-    due:     { label:'Upcoming', color:C.blue,    bg:'#eff6ff'  },
-    paid:    { label:'Charged',  color:C.green,   bg:C.greenLight },
+    overdue: { label:'OVERDUE',  color:C.red   },
+    due:     { label:'UPCOMING', color:C.blue  },
+    paid:    { label:'CHARGED',  color:C.green },
   };
 
-  const Row = ({ e }) => {
-    const c  = allCats.find(x => x.id === e.category) || { icon:'Package', color:C.inkSoft };
-    const st = STATUS[e.status];
+  const Row = ({ e, onTap }) => {
+    const c    = allCats.find(x => x.id === e.category) || { icon:'Package', color:C.inkSoft };
+    const st   = STATUS[e.status] || STATUS.due;
     const done = e.status === 'paid';
     return (
-      <div style={{ display:'flex', alignItems:'center', gap:11, padding:'12px 18px' }}>
+      <button onClick={onTap} style={{ display:'flex', alignItems:'center', gap:11,
+        padding:'12px 18px', width:'100%', border:'none', background:'none',
+        cursor:'pointer', textAlign:'left' }}>
         <div style={{ width:34, height:34, borderRadius:10, background:c.color+'18',
           display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
           opacity: done ? 0.5 : 1 }}>
@@ -1481,23 +1612,26 @@ export function BillsTab({history, txns, bankImports, allCats, year, month}) {
             textDecoration: done ? 'line-through' : 'none',
             overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
             {e.label}
+            {e.edited && <span style={{ marginLeft:6, fontSize:9, fontWeight:700,
+              color:C.inkSoft, letterSpacing:'0.04em' }}>EDITED</span>}
           </p>
           <p style={{ margin:'2px 0 0', fontSize:11, fontFamily:SANS,
             color: e.status === 'overdue' ? C.red : C.inkSoft }}>
-            {e.date.toLocaleDateString('en-CA', { weekday:'short', month:'short', day:'numeric' })}
-            {e.viewingCurrentMonth ? ' · ' + relativeDay(e.daysAway) : ''}
-            {e.varies ? ' · amount varies' : ''}
+            {e.date
+              ? e.date.toLocaleDateString('en-CA', { weekday:'short', month:'short', day:'numeric' })
+              : `around the ${e.day}${e.day===1?'st':e.day===2?'nd':e.day===3?'rd':'th'}`}
+            {e.viewingCurrentMonth && e.daysAway != null ? ' · ' + relativeDay(e.daysAway) : ''}
+            {e.varies ? ' · varies' : ''}
           </p>
         </div>
         <div style={{ textAlign:'right', flexShrink:0 }}>
           <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
             color: done ? C.inkSoft : C.ink }}>{fmt(e.amount)}</p>
           <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.06em',
-            color:st.color, fontFamily:SANS }}>
-            {st.label.toUpperCase()}
-          </span>
+            color:st.color, fontFamily:SANS }}>{st.label}</span>
         </div>
-      </div>
+        <ChevronRight size={14} color={C.sandDark} style={{ flexShrink:0 }}/>
+      </button>
     );
   };
 
@@ -1508,31 +1642,26 @@ export function BillsTab({history, txns, bankImports, allCats, year, month}) {
         fontFamily:SANS, lineHeight:1.6 }}>{note}</p>}
       <Card style={{ padding:'4px 0' }}>
         {items.map((e, i) => (
-          <div key={e.key}>{i > 0 && <Divider/>}<Row e={e}/></div>
+          <div key={e.key}>{i > 0 && <Divider/>}
+            <Row e={e} onTap={() => setEditing(e)}/>
+          </div>
         ))}
       </Card>
     </>
   );
 
-  if (recurring.length === 0) return (
-    <div style={{ padding:'16px 16px 0' }}>
-      <Card style={{ textAlign:'center', padding:'40px 24px' }}>
-        <CalendarDays size={40} color={C.sandDark} style={{ marginBottom:12 }}/>
-        <p style={{ fontFamily:SERIF, fontSize:20, color:C.inkMid, margin:'0 0 6px' }}>
-          No recurring bills spotted yet
-        </p>
-        <p style={{ fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6, margin:0 }}>
-          Bills are found in your statements rather than entered by hand. Upload two
-          or more months and anything charged regularly for a steady amount will show
-          up here on its own, with the date it is expected.
-        </p>
-      </Card>
-    </div>
+  const AddButton = () => (
+    <button onClick={() => setEditing(null)}
+      style={{ width:'100%', border:`1.5px dashed ${C.sandDark}`, borderRadius:12,
+        padding:'13px', background:'none', cursor:'pointer', fontFamily:SANS,
+        fontSize:14, fontWeight:600, color:C.inkSoft, marginBottom:16,
+        display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
+      <Plus size={15} color={C.inkSoft}/> Add a bill manually
+    </button>
   );
 
   return (
     <div style={{ padding:'16px 16px 0' }}>
-      {/* Headline: what is still to come */}
       <Card style={{ background:C.green, padding:'20px 20px' }}>
         <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
           letterSpacing:'0.1em', margin:'0 0 4px', fontFamily:SANS }}>
@@ -1556,43 +1685,99 @@ export function BillsTab({history, txns, bankImports, allCats, year, month}) {
         </div>
       </Card>
 
-      {/* Anything whose usual day has passed with no charge */}
       {sched.overdue.length > 0 && (
         <div style={{ background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:14,
           padding:'12px 16px', marginBottom:12, display:'flex', gap:10, alignItems:'flex-start' }}>
           <AlertCircle size={17} color={C.red} style={{ flexShrink:0, marginTop:1 }}/>
-          <div>
-            <p style={{ margin:'0 0 2px', fontSize:13, fontWeight:700, color:C.red, fontFamily:SANS }}>
-              {sched.overdue.length} bill{sched.overdue.length === 1 ? '' : 's'} past
-              the usual date
-            </p>
-            <p style={{ margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.6 }}>
-              These normally land by now but have not appeared in a statement.
-              Either the charge is late, or the statement covering it has not been
-              uploaded yet.
-            </p>
-          </div>
+          <p style={{ margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.6 }}>
+            <b style={{ color:C.red }}>
+              {sched.overdue.length} bill{sched.overdue.length === 1 ? '' : 's'} past the usual date.
+            </b>{' '}
+            Either the charge is late, or the statement covering it has not been uploaded yet.
+          </p>
         </div>
       )}
 
       <Section title="Past the usual date"
         items={sched.entries.filter(e => e.status === 'overdue')}/>
-
       <Section title="Coming up"
         items={sched.entries.filter(e => e.status === 'due')}
-        note={weekTotal > 0
-          ? `${fmt(weekTotal)} of this lands within the next seven days.`
-          : null}/>
-
+        note={weekTotal > 0 ? `${fmt(weekTotal)} of this lands within seven days.` : null}/>
       <Section title="Already charged this month"
         items={sched.entries.filter(e => e.status === 'paid')}/>
 
+      {confirmed.length === 0 && (
+        <Card style={{ textAlign:'center', padding:'32px 24px' }}>
+          <CalendarDays size={36} color={C.sandDark} style={{ marginBottom:10 }}/>
+          <p style={{ fontFamily:SERIF, fontSize:19, color:C.inkMid, margin:'0 0 6px' }}>
+            No bills yet
+          </p>
+          <p style={{ fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6, margin:0 }}>
+            Upload two or more months and anything charged regularly appears here on
+            its own. You can also add a bill by hand.
+          </p>
+        </Card>
+      )}
+
+      <AddButton/>
+
+      {suggested.length > 0 && (
+        <>
+          <SL>Might be bills</SL>
+          <p style={{ margin:'-4px 2px 8px', fontSize:11, color:C.inkSoft,
+            fontFamily:SANS, lineHeight:1.6 }}>
+            These repeat month to month but the amount or date moves around, so they
+            could equally be a shop you visit often. Tap to confirm one as a bill, or
+            hide it.
+          </p>
+          <Card style={{ padding:'4px 0' }}>
+            {suggested.map((b, i) => (
+              <div key={b.key}>{i > 0 && <Divider/>}
+                <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 18px' }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <p style={{ margin:0, fontSize:13, color:C.ink, fontFamily:SANS,
+                      overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                      {b.label}
+                    </p>
+                    <p style={{ margin:'1px 0 0', fontSize:10, color:C.inkSoft, fontFamily:SANS }}>
+                      seen in {b.monthsSeen} months · around the {b.day}
+                      {b.varies ? ' · amount varies' : ''}
+                    </p>
+                  </div>
+                  <span style={{ fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.inkMid }}>
+                    {fmt(b.amount)}
+                  </span>
+                  <button onClick={() => saveRule({ key:b.key, label:b.label, amount:b.amount,
+                      day:b.day, category:b.category, status:'confirmed' })}
+                    style={{ border:'none', borderRadius:8, padding:'6px 11px',
+                      background:C.green, color:'#fff', fontSize:11, fontWeight:700,
+                      cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
+                    It's a bill
+                  </button>
+                  <button onClick={() => removeRule(b)}
+                    style={{ border:`1px solid ${C.sandDark}`, borderRadius:8,
+                      padding:'6px 9px', background:C.white, fontSize:11,
+                      color:C.inkSoft, cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
+                    Hide
+                  </button>
+                </div>
+              </div>
+            ))}
+          </Card>
+        </>
+      )}
+
       <p style={{ fontSize:11, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6,
         padding:'0 4px', marginBottom:20 }}>
-        Dates are the day each bill usually lands, taken from your own history.
-        A bill counts as charged once a matching transaction appears in an
-        uploaded statement.
+        Bills are found in your statements, then whatever you change here wins.
+        Tap any bill to rename it, correct the amount or date, or remove it.
       </p>
+
+      {editing !== undefined && (
+        <BillEditModal bill={editing} allCats={allCats}
+          onSave={saveRule} onDelete={removeRule}
+          onClose={() => setEditing(undefined)}/>
+      )}
     </div>
   );
 }
@@ -3027,6 +3212,7 @@ export default function App() {
   const [aiDiag,     setAiDiag    ]=useState(null);
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
+  const [billRules,  setBillRules ]=useState([]);
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -3075,6 +3261,7 @@ export default function App() {
       const [t,b,s,ai,hist]=await Promise.all([getTxns(year,month),getBankImports(year,month),
         getSettings(year,month),getAllBankImports(),getAllBankImportsRaw()]);
       setHistory(hist);
+      try { setBillRules(await getBillRules()); } catch {}
       setTxns(t);setImports(b);
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
       if(ai.length>20){const nt=computeTargets(ai);if(Object.keys(nt).length>0)setSuggested(nt);}
@@ -3107,6 +3294,21 @@ export default function App() {
     } catch (e) {
       showToast('Could not move that transaction');
     }
+  }
+
+  async function saveBillRule(rule) {
+    try {
+      await upsertBillRule(rule);
+      setBillRules(await getBillRules());
+      showToast(rule.status === 'hidden' ? 'Hidden from bills' : 'Bill saved');
+    } catch (e) { showToast('Could not save — ' + e.message); }
+  }
+
+  async function removeBillRule(key) {
+    try {
+      await deleteBillRule(key);
+      setBillRules(await getBillRules());
+    } catch (e) { showToast('Could not remove — ' + e.message); }
   }
 
   async function handleSaveNote(id, type, note) {
@@ -3274,7 +3476,7 @@ export default function App() {
       {/* Content */}
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
           setCcTarget={setCcTarget} allCats={allCats} catTargets={catTargets}
-          view={view} setView={setView} history={history}
+          view={view} setView={setView} history={history} billRules={billRules}
           onSaveSettings={saveSettings} suggested={suggested} onAcceptSuggested={acceptSuggested}
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
           onReviewOther={openReview}
@@ -3284,7 +3486,9 @@ export default function App() {
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
-          bankImports={imports} allCats={allCats} year={year} month={month}/>}
+          bankImports={imports} allCats={allCats} year={year} month={month}
+          billRules={billRules} showToast={showToast}
+          onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}

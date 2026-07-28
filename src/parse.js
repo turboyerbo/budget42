@@ -278,15 +278,30 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
     }
 
     const cat = categorize(desc);
-    const isCardPayment = direction === 'credit' &&
-      /payment|pmt|paiement|thank you|autopay|pre.?auth/i.test(desc);
+
+    // Paying your own credit card from chequing shows up as an ordinary debit,
+    // so the credit-only rule missed it and counted it as spending. Naming the
+    // card issuers catches it from either side.
+    const CARD_PAYEE = /canadian tire bank|\bctfs\b|pc mc\b|pc mastercard|president'?s choice|capital one|amex|american express|mbna|rogers bank|neo financial|home trust/i;
+    const isCardPayment =
+      (direction === 'credit' && /payment|pmt|paiement|thank you|autopay|pre.?auth/i.test(desc)) ||
+      CARD_PAYEE.test(desc);
+
+    // Wealthsimple writes movements between your own accounts as bare codes.
+    // These are not spending and must not be mistaken for bills.
+    const TRANSFER_CODE = /^(e_trf(in|out)|transfer_tf|aft_(in|out)|eft|withdrawal|deposit|buy|sell)$/i;
+    const isTransfer =
+      TRANSFER_CODE.test(desc.trim()) ||
+      /money transfer (in|out)|interac e-?transfer.*(in|out)$/i.test(desc);
 
     rows.push({
       id:          uid(),
       date:        dateObj.toISOString().slice(0, 10),
       description: desc,
       amount,
-      category:    isCardPayment ? 'cc_payment' : (cat === '_skip' ? 'other' : cat),
+      category:    isCardPayment ? 'cc_payment'
+                 : isTransfer    ? 'transfer'
+                 : (cat === '_skip' ? 'other' : cat),
       source:      rowSource,
       month:       dateObj.getMonth(),
       year:        dateObj.getFullYear(),
