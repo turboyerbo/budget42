@@ -771,3 +771,62 @@ budget.
 
 The screen says plainly that both people share this data, so a reset removes it
 for your partner too. Worth knowing before tapping.
+
+---
+
+## v23 — BMO CSVs, and three other parser bugs found with real files
+
+Tested against 24 actual exports. Previously 7 of 24 produced nothing at all
+and 6 more errored. All 24 now parse: 1,945 transactions.
+
+### 1. BMO dates were unreadable
+
+BMO writes dates as `20260102` with no separators. `new Date('20260102')`
+returns Invalid Date in JavaScript, so every BMO row failed its date check and
+was skipped. The file parsed "successfully" with zero rows, which is why the
+error message was unhelpful.
+
+`parseDate` now splits the compact form by hand.
+
+BMO also has **two** different export layouts, and the app only understood one:
+
+- `First Bank Card,Transaction Type,Date Posted,Transaction Amount,Description`
+- `#,Item,Date,Description,Source,Amount,Category,In / Out`
+
+Both are supported now.
+
+### 2. Canadian Tire signs were inverted
+
+On the CTFS statement a **purchase is positive** and a **payment is negative**,
+the opposite of a chequing account. The parser applied chequing rules, so every
+Canadian Tire purchase was being filed as income and every payment as spending.
+
+Where a statement has an explicit type column (`PURCHASE`/`PAYMENT`, or
+`DEBIT`/`CREDIT`), that is now trusted ahead of the sign. PC Mastercard uses the
+opposite convention to CTFS again, and is handled separately.
+
+### 3. Bank detection read transaction text
+
+Detection scanned the whole file for a bank name. A BMO statement containing
+`INTERAC ETRNSFR ... CANADIAN TIRE BANK` was identified as a Canadian Tire
+statement; a PC Mastercard file with a `Payment BMO` line was read as BMO. Six
+of 24 files were misidentified.
+
+Detection now reads the column headings, which do not lie in that way. All 24
+files identify correctly.
+
+### 4. Wealthsimple monthly exports have no description column
+
+The six-month export includes `description`; the monthly ones do not. The parser
+required it and failed with "Could not map columns". It now falls back to
+`activity_sub_type` (SPEND, E_TRFOUT, Interest).
+
+Wealthsimple files can also contain several accounts at once, so rows are now
+split by `account_id` into joint and personal rather than all landing on one.
+
+### Regression tests
+
+`test/fixtures/` holds anonymised files reproducing each layout exactly:
+separator-less dates, inverted signs, missing columns, bank names inside
+transaction text. `test/parsers.mjs` runs 36 assertions over them and is part of
+`npm run build`.

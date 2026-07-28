@@ -1,0 +1,5 @@
+transaction_date,settlement_date,account_id,account_type,activity_type,activity_sub_type,direction,symbol,name,currency,quantity,unit_price,commission,net_cash_amount
+2026-07-01,,WK63L5732CAD,Chequing,MoneyMovement,SPEND,,,,CAD,-22.81,,,-22.81
+2026-07-01,,WK63L5732CAD,Chequing,MoneyMovement,E_TRFOUT,,,,CAD,-30,,,-30
+2026-07-01,,WK63L5732CAD,Chequing,Interest,-,,,,CAD,0.02,,,0.02
+2026-07-02,,WK5YMCW31CAD,Chequing,MoneyMovement,SPEND,,,,CAD,-61.78,,,-61.78

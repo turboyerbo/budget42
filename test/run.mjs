@@ -6,3 +6,6 @@ const DEF = "--define:import.meta.env.VITE_SUPABASE_URL='\"https://x.supabase.co
 execSync(`npx esbuild test/smoke.jsx --bundle --platform=node --format=cjs --jsx=automatic --outfile=node_modules/.smoke.cjs ${DEF}`,
   { stdio: 'inherit' });
 execSync('node node_modules/.smoke.cjs', { stdio: 'inherit' });
+
+// Parser regression tests, run against fixtures taken from real bank exports
+execSync('node test/parsers.mjs', { stdio: 'inherit' });

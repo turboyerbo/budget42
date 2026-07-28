@@ -1,0 +1,4 @@
+transaction_date,settlement_date,account_id,account_type,activity_type,activity_sub_type,description,direction,symbol,name,currency,quantity,unit_price,commission,net_cash_amount
+2026-02-01,,WK63L5732CAD,Chequing,Interest,-,Interest received (executed at 2026-02-01),,,,CAD,0.97,,,0.97
+2026-02-01,,WK63L5732CAD,Chequing,MoneyMovement,TRANSFER_TF,Money transfer out of the account,,,,CAD,-500,,,-500
+2026-02-03,,WK5YMCW31CAD,Chequing,MoneyMovement,EFT,Deposit,,,,CAD,1000,,,1000

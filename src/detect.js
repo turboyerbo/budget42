@@ -27,30 +27,68 @@ export const instKind = id =>
   (INSTITUTIONS.find(i => i.id === id) || INSTITUTIONS.at(-1)).kind;
 
 // ── Fingerprints ──────────────────────────────────────────────────────────────
-// Ordered most-specific first. Each is a set of markers; all `all` must appear.
-const FINGERPRINTS = [
-  { id:'CIBC',     all:[/cibc/i] },
-  { id:'CIBC',     all:[/description 1/i, /description 2/i] },
-  { id:'CTFS',     all:[/canadian tire|triangle|ctfs/i] },
-  { id:'PC_MC',    all:[/pc financial|president'?s choice|pc mastercard|pcf/i] },
-  { id:'WS_JOINT', all:[/wealthsimple/i, /joint/i] },
-  { id:'WS_PERS',  all:[/wealthsimple/i] },
-  { id:'WS_PERS',  all:[/net_cash_amount|transaction_date/i] },
-  { id:'BMO',      all:[/bank of montreal|bmo/i] },
-  { id:'BMO',      all:[/first bank card/i] },
+/**
+ * Detection reads the STRUCTURE of the file, not its contents.
+ *
+ * Scanning the whole text for a bank name is unreliable in the obvious way: a
+ * BMO statement containing "INTERAC ETRNSFR ... CANADIAN TIRE BANK" was being
+ * identified as a Canadian Tire statement, and a PC Mastercard file with a
+ * "Payment BMO" line was read as BMO. Column headings do not lie in that way.
+ */
+const HEADER_SIGNATURES = [
+  { id:'BMO',      test: h => h.includes('first bank card') },
+  { id:'BMO',      test: h => h.includes('in / out') && h.includes('item') },
+  { id:'PC_MC',    test: h => h.includes('card holder name') },
+  { id:'CTFS',     test: h => h.includes('ref') && h.includes('posted date') },
+  { id:'WS_PERS',  test: h => h.includes('net_cash_amount') },
+  { id:'CIBC',     test: h => h.includes('description 1') },
+  { id:'CIBC',     test: h => h.includes('activity type') },
 ];
 
+// Only the preamble is safe to read for a bank name — transaction rows mention
+// other institutions constantly.
+const PREAMBLE_MARKERS = [
+  { id:'CIBC',     re:/cibc/i },
+  { id:'CTFS',     re:/canadian tire|triangle|ctfs/i },
+  { id:'PC_MC',    re:/pc financial|president'?s choice|pc mastercard/i },
+  { id:'WS_PERS',  re:/wealthsimple/i },
+  { id:'BMO',      re:/bank of montreal|\bbmo\b/i },
+];
+
+const normHeader = s => String(s || '')
+  .replace(/^\uFEFF/, '').replace(/['"]/g, '').toLowerCase()
+  .replace(/[^a-z0-9_ /]/g, '').trim();
+
 /**
- * Fast, offline detection from raw file text (CSV text, or text pulled
- * from a PDF). Returns { id, confidence } — confidence 'high' | 'none'.
+ * Instant, offline detection. Returns { id, confidence, how }.
  */
 export function fingerprintBank(text) {
-  const sample = (text || '').slice(0, 4000);
-  for (const fp of FINGERPRINTS) {
-    if (fp.all.every(re => re.test(sample))) {
-      return { id: fp.id, confidence: 'high', how: 'Recognised from the statement text' };
+  const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  // Find the heading row, then match on its column names
+  for (let i = 0; i < Math.min(25, lines.length); i++) {
+    const cells = lines[i].split(',').map(normHeader);
+    const hasDate = cells.some(c => c.includes('date'));
+    const hasAmt  = cells.some(c => c.includes('amount') || c.includes('cash'));
+    if (!hasDate || !hasAmt) continue;
+
+    for (const sig of HEADER_SIGNATURES) {
+      if (sig.test(cells)) {
+        return { id: sig.id, confidence:'high',
+                 how: 'Matched the column layout of a ' + sig.id + ' export' };
+      }
+    }
+    break;   // heading row found but unrecognised — stop looking
+  }
+
+  // Fall back to the preamble above the heading row only
+  const preamble = lines.slice(0, 4).join(' ');
+  for (const m of PREAMBLE_MARKERS) {
+    if (m.re.test(preamble)) {
+      return { id: m.id, confidence:'medium', how:'Named in the statement header' };
     }
   }
+
   return { id: 'UNKNOWN', confidence: 'none', how: null };
 }
 
