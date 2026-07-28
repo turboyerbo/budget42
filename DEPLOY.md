@@ -701,3 +701,73 @@ Every renderable component is now in the smoke test, including screens only
 reachable through interaction: AuthScreen, AddTab, AddCatModal,
 OtherReviewModal, ActivityPanel, and UploadTab in its key-rejected state. All
 pass, so there is no second temporal dead zone hiding in an unrendered branch.
+
+---
+
+## v21 — Bills tab shows a dated schedule
+
+The tab existed from v18 but only grouped charges into "paid" and "still to
+come". It did not say *when*, which is the part that matters for knowing whether
+a given week is tight.
+
+`buildSchedule()` in `recurring.js` now gives every recurring charge a real
+calendar date, how many days away it is, and a status:
+
+- **overdue** — its usual day has passed with no matching transaction
+- **due** — still expected
+- **paid** — a matching transaction has appeared
+
+The screen leads with what is still to be paid this month, then next-7-days,
+already-paid and whole-month figures. Overdue items float to the top with an
+explanation, since the usual cause is not a missed payment but a statement that
+has not been uploaded yet.
+
+Each row shows the weekday and date, a plain-language "in 3 days" or "7 days
+ago", the amount, and a status tag.
+
+Day-of-month is clamped to real dates, so a bill on the 31st shows as the 28th
+in February and the 30th in April rather than silently rolling into the next
+month. Verified.
+
+The tab needs at least two months of history, since that is what makes a charge
+recognisable as recurring.
+
+---
+
+## v22 — reset a month, or start over
+
+A gear icon in the header opens a reset screen with three things on it.
+
+### Backup first
+
+A **Download backup** button writes a JSON file containing every transaction and
+setting. It sits at the top of the screen because nothing below it can be
+undone, and this is the only way back.
+
+### Reset one month
+
+Clears the month you are currently viewing. Other months are untouched. Three
+scopes:
+
+- everything in this month
+- imported transactions only, keeping anything typed in by hand
+- manual entries only, keeping imported statements
+
+The button states the real count, e.g. "Delete 41 transactions", and disables
+itself when there is nothing to delete. The middle option is the useful one
+after a bad import: it removes the statement rows without losing hand-entered
+cash spending.
+
+### Reset everything
+
+Every transaction in every month for both people, plus category targets and
+custom categories. Requires typing `DELETE EVERYTHING` exactly; case and spacing
+must match, verified against near-miss inputs.
+
+Accounts and sign-in are not touched. Both of you can still log in to an empty
+budget.
+
+### A note on shared data
+
+The screen says plainly that both people share this data, so a reset removes it
+for your partner too. Worth knowing before tapping.

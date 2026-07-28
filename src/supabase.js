@@ -167,3 +167,78 @@ export async function getMonthImportsFull(year, month) {
   if (error) throw error;
   return data || [];
 }
+
+// ── Export ────────────────────────────────────────────────────────────────────
+/** Everything, for a backup file. Taken before any destructive action. */
+export async function exportAllData() {
+  const [txns, imports, settings] = await Promise.all([
+    supabase.from('transactions').select('*'),
+    supabase.from('bank_imports').select('*'),
+    supabase.from('budget_settings').select('*'),
+  ]);
+  if (txns.error)     throw txns.error;
+  if (imports.error)  throw imports.error;
+  if (settings.error) throw settings.error;
+  return {
+    exportedAt:   new Date().toISOString(),
+    transactions: txns.data || [],
+    bankImports:  imports.data || [],
+    settings:     settings.data || [],
+  };
+}
+
+/** Row counts, so a confirmation screen can say exactly what will go. */
+export async function countMonthData(year, month) {
+  const [t, b] = await Promise.all([
+    supabase.from('transactions').select('id,amount', { count:'exact' })
+      .eq('year', year).eq('month', month),
+    supabase.from('bank_imports').select('id,amount', { count:'exact' })
+      .eq('year', year).eq('month', month),
+  ]);
+  const sum = rows => (rows || []).reduce((a, r) => a + Number(r.amount || 0), 0);
+  return {
+    manual:      t.count || 0,
+    imported:    b.count || 0,
+    manualTotal: sum(t.data),
+    importTotal: sum(b.data),
+  };
+}
+
+export async function countAllData() {
+  const [t, b] = await Promise.all([
+    supabase.from('transactions').select('id', { count:'exact', head:true }),
+    supabase.from('bank_imports').select('id', { count:'exact', head:true }),
+  ]);
+  return { manual: t.count || 0, imported: b.count || 0 };
+}
+
+// ── Deletion ──────────────────────────────────────────────────────────────────
+/**
+ * Clear one month. `scope` picks what goes:
+ *   'all'      both manual entries and imported transactions
+ *   'imported' imported only, keeping anything typed in by hand
+ *   'manual'   manual only
+ */
+export async function deleteMonthData(year, month, scope = 'all') {
+  if (scope === 'all' || scope === 'imported') {
+    const { error } = await supabase.from('bank_imports').delete()
+      .eq('year', year).eq('month', month);
+    if (error) throw error;
+  }
+  if (scope === 'all' || scope === 'manual') {
+    const { error } = await supabase.from('transactions').delete()
+      .eq('year', year).eq('month', month);
+    if (error) throw error;
+  }
+}
+
+/** Every row in every table. There is no undo. */
+export async function deleteAllData() {
+  // .neq on the primary key matches every row; Supabase requires a filter
+  const r1 = await supabase.from('bank_imports').delete().neq('id', '__never__');
+  if (r1.error) throw r1.error;
+  const r2 = await supabase.from('transactions').delete().neq('id', '__never__');
+  if (r2.error) throw r2.error;
+  const r3 = await supabase.from('budget_settings').delete().neq('year', -1);
+  if (r3.error) throw r3.error;
+}

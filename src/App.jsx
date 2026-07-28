@@ -5,7 +5,7 @@ import {
   Home, Plus, History, CalendarDays, Upload, PieChart,
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
-  Bell, BellRing, Landmark, HelpCircle, Heart,
+  Bell, BellRing, Landmark, HelpCircle, Heart, Settings, Download,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -13,13 +13,14 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          updateBankImport, updateTransaction, getOtherImports,
          subscribeToMonth, subscribeToPartnerActivity,
          signUp, signIn, signOut, onAuthChange, updateUserMeta,
-         getAllBankImportsRaw } from './supabase.js';
+         getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
+         deleteMonthData, deleteAllData } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
-import { detectRecurring, splitRecurring } from './recurring.js';
+import { detectRecurring, splitRecurring, buildSchedule, relativeDay } from './recurring.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport } from './validate.js';
@@ -1449,54 +1450,81 @@ export function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,
 }
 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
-export function BillsTab({history,txns,bankImports,allCats}) {
+// What is coming, when, and how much. Everything here is worked out from your
+// own statements rather than typed in, so it stays right as your bills change.
+export function BillsTab({history, txns, bankImports, allCats, year, month}) {
   const recurring = detectRecurring(history || []);
-  const { paid, due, dueTotal, paidTotal } =
-    splitRecurring(recurring, [...txns, ...bankImports]);
+  const sched     = buildSchedule(recurring, [...txns, ...bankImports], year, month);
 
-  const monthlyTotal = recurring.reduce((a, r) => a + r.amount, 0);
+  const weekTotal = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
 
-  const Row = ({ b, done }) => {
-    const c = allCats.find(x => x.id === b.category) || { icon:'Package', color:C.inkSoft };
+  const STATUS = {
+    overdue: { label:'Overdue',  color:C.red,     bg:C.redLight },
+    due:     { label:'Upcoming', color:C.blue,    bg:'#eff6ff'  },
+    paid:    { label:'Charged',  color:C.green,   bg:C.greenLight },
+  };
+
+  const Row = ({ e }) => {
+    const c  = allCats.find(x => x.id === e.category) || { icon:'Package', color:C.inkSoft };
+    const st = STATUS[e.status];
+    const done = e.status === 'paid';
     return (
-      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 18px',
-        opacity: done ? 0.55 : 1 }}>
-        <div style={{ width:30, height:30, borderRadius:9, background:c.color+'18',
-          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
-          <CatIcon name={c.icon} size={15} color={c.color}/>
+      <div style={{ display:'flex', alignItems:'center', gap:11, padding:'12px 18px' }}>
+        <div style={{ width:34, height:34, borderRadius:10, background:c.color+'18',
+          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+          opacity: done ? 0.5 : 1 }}>
+          <CatIcon name={c.icon} size={16} color={c.color}/>
         </div>
         <div style={{ flex:1, minWidth:0 }}>
-          <p style={{ margin:0, fontSize:14, color:C.ink, fontFamily:SANS,
+          <p style={{ margin:0, fontSize:14, fontFamily:SANS,
+            color: done ? C.inkSoft : C.ink,
             textDecoration: done ? 'line-through' : 'none',
             overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-            {b.label}
+            {e.label}
           </p>
-          <p style={{ margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>
-            around the {b.day}{b.day===1?'st':b.day===2?'nd':b.day===3?'rd':'th'}
-            {' · seen in '}{b.monthsSeen} months
-            {b.varies ? ' · amount varies' : ''}
+          <p style={{ margin:'2px 0 0', fontSize:11, fontFamily:SANS,
+            color: e.status === 'overdue' ? C.red : C.inkSoft }}>
+            {e.date.toLocaleDateString('en-CA', { weekday:'short', month:'short', day:'numeric' })}
+            {e.viewingCurrentMonth ? ' · ' + relativeDay(e.daysAway) : ''}
+            {e.varies ? ' · amount varies' : ''}
           </p>
         </div>
-        {done && <span style={{ fontSize:10, fontWeight:700, color:C.green,
-          fontFamily:SANS }}>CHARGED</span>}
-        <span style={{ fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.ink }}>
-          {fmt(b.amount)}
-        </span>
+        <div style={{ textAlign:'right', flexShrink:0 }}>
+          <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
+            color: done ? C.inkSoft : C.ink }}>{fmt(e.amount)}</p>
+          <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.06em',
+            color:st.color, fontFamily:SANS }}>
+            {st.label.toUpperCase()}
+          </span>
+        </div>
       </div>
     );
   };
+
+  const Section = ({ title, items, note }) => items.length === 0 ? null : (
+    <>
+      <SL>{title}</SL>
+      {note && <p style={{ margin:'-4px 2px 8px', fontSize:11, color:C.inkSoft,
+        fontFamily:SANS, lineHeight:1.6 }}>{note}</p>}
+      <Card style={{ padding:'4px 0' }}>
+        {items.map((e, i) => (
+          <div key={e.key}>{i > 0 && <Divider/>}<Row e={e}/></div>
+        ))}
+      </Card>
+    </>
+  );
 
   if (recurring.length === 0) return (
     <div style={{ padding:'16px 16px 0' }}>
       <Card style={{ textAlign:'center', padding:'40px 24px' }}>
         <CalendarDays size={40} color={C.sandDark} style={{ marginBottom:12 }}/>
         <p style={{ fontFamily:SERIF, fontSize:20, color:C.inkMid, margin:'0 0 6px' }}>
-          No recurring charges spotted yet
+          No recurring bills spotted yet
         </p>
         <p style={{ fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6, margin:0 }}>
-          Bills are worked out from your statements rather than typed in. Upload two
-          or more months and anything charged regularly for a steady amount will
-          appear here on its own.
+          Bills are found in your statements rather than entered by hand. Upload two
+          or more months and anything charged regularly for a steady amount will show
+          up here on its own, with the date it is expected.
         </p>
       </Card>
     </div>
@@ -1504,58 +1532,66 @@ export function BillsTab({history,txns,bankImports,allCats}) {
 
   return (
     <div style={{ padding:'16px 16px 0' }}>
-      <Card style={{ background:C.green, padding:'18px 20px' }}>
+      {/* Headline: what is still to come */}
+      <Card style={{ background:C.green, padding:'20px 20px' }}>
         <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
           letterSpacing:'0.1em', margin:'0 0 4px', fontFamily:SANS }}>
-          Still to come this month
+          Still to be paid in {MONTHS[month]}
         </p>
-        <p style={{ fontFamily:SERIF, fontSize:38, fontWeight:600, color:'#fff',
-          margin:'0 0 12px', letterSpacing:'-0.02em', lineHeight:1 }}>
-          {fmt(dueTotal)}
+        <p style={{ fontFamily:SERIF, fontSize:40, fontWeight:600, color:'#fff',
+          margin:'0 0 14px', letterSpacing:'-0.02em', lineHeight:1 }}>
+          {fmt(sched.outstandingTotal)}
         </p>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
-          <div>
-            <p style={{ margin:0, fontSize:11, color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>
-              Already charged
-            </p>
-            <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
-              color:'rgba(255,255,255,0.95)' }}>{fmt(paidTotal)}</p>
-          </div>
-          <div>
-            <p style={{ margin:0, fontSize:11, color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>
-              Full month
-            </p>
-            <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
-              color:'rgba(255,255,255,0.95)' }}>{fmt(monthlyTotal)}</p>
-          </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
+          {[['Next 7 days', fmt(weekTotal)],
+            ['Already paid', fmt(sched.paidTotal)],
+            ['Whole month', fmt(sched.monthTotal)]].map(([l, v]) => (
+            <div key={l}>
+              <p style={{ margin:0, fontSize:10, color:'rgba(255,255,255,0.65)',
+                textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>{l}</p>
+              <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
+                color:'rgba(255,255,255,0.95)' }}>{v}</p>
+            </div>
+          ))}
         </div>
       </Card>
 
-      {due.length > 0 && <>
-        <SL>Not yet charged</SL>
-        <Card style={{ padding:'4px 0' }}>
-          {due.map((b,i) => (
-            <div key={b.key}>{i>0&&<Divider/>}<Row b={b}/></div>
-          ))}
-        </Card>
-      </>}
+      {/* Anything whose usual day has passed with no charge */}
+      {sched.overdue.length > 0 && (
+        <div style={{ background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:14,
+          padding:'12px 16px', marginBottom:12, display:'flex', gap:10, alignItems:'flex-start' }}>
+          <AlertCircle size={17} color={C.red} style={{ flexShrink:0, marginTop:1 }}/>
+          <div>
+            <p style={{ margin:'0 0 2px', fontSize:13, fontWeight:700, color:C.red, fontFamily:SANS }}>
+              {sched.overdue.length} bill{sched.overdue.length === 1 ? '' : 's'} past
+              the usual date
+            </p>
+            <p style={{ margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.6 }}>
+              These normally land by now but have not appeared in a statement.
+              Either the charge is late, or the statement covering it has not been
+              uploaded yet.
+            </p>
+          </div>
+        </div>
+      )}
 
-      {paid.length > 0 && <>
-        <SL>Already charged this month</SL>
-        <Card style={{ padding:'4px 0' }}>
-          {paid.map((b,i) => (
-            <div key={b.key}>{i>0&&<Divider/>}<Row b={b} done/></div>
-          ))}
-        </Card>
-      </>}
+      <Section title="Past the usual date"
+        items={sched.entries.filter(e => e.status === 'overdue')}/>
+
+      <Section title="Coming up"
+        items={sched.entries.filter(e => e.status === 'due')}
+        note={weekTotal > 0
+          ? `${fmt(weekTotal)} of this lands within the next seven days.`
+          : null}/>
+
+      <Section title="Already charged this month"
+        items={sched.entries.filter(e => e.status === 'paid')}/>
 
       <p style={{ fontSize:11, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6,
         padding:'0 4px', marginBottom:20 }}>
-        These are detected from your own statements: anything charged in at least two
-        different months, on a similar day, for a similar amount. Nothing here is typed
-        in, so it stays accurate as your bills change.
+        Dates are the day each bill usually lands, taken from your own history.
+        A bill counts as charged once a matching transaction appears in an
+        uploaded statement.
       </p>
     </div>
   );
@@ -2703,6 +2739,261 @@ export function ActivityPanel({ items, onClose, onClear }) {
   );
 }
 
+
+// ─── Reset / danger zone ──────────────────────────────────────────────────────
+// Deleting shared data is not reversible and affects both people, so this
+// screen states plainly what will go, offers a backup first, and requires the
+// full reset to be typed out rather than tapped.
+export function ResetModal({ year, month, onClose, onDone, showToast }) {
+  const [mode,    setMode]    = useState(null);    // null | 'month' | 'all'
+  const [scope,   setScope]   = useState('all');   // for month mode
+  const [counts,  setCounts]  = useState(null);
+  const [typed,   setTyped]   = useState('');
+  const [busy,    setBusy]    = useState(false);
+  const [backedUp,setBackedUp]= useState(false);
+
+  const CONFIRM = 'DELETE EVERYTHING';
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const [m, a] = await Promise.all([countMonthData(year, month), countAllData()]);
+        if (live) setCounts({ month: m, all: a });
+      } catch { if (live) setCounts({ month:null, all:null }); }
+    })();
+    return () => { live = false; };
+  }, [year, month]);
+
+  async function downloadBackup() {
+    try {
+      const data = await exportAllData();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = `budget-for-two-backup-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setBackedUp(true);
+      showToast('Backup downloaded');
+    } catch (e) {
+      showToast('Backup failed — ' + e.message);
+    }
+  }
+
+  async function runMonthReset() {
+    setBusy(true);
+    try {
+      await deleteMonthData(year, month, scope);
+      showToast(`${MONTHS[month]} ${year} cleared`);
+      onDone();
+    } catch (e) { showToast('Could not clear — ' + e.message); }
+    setBusy(false);
+  }
+
+  async function runFullReset() {
+    setBusy(true);
+    try {
+      await deleteAllData();
+      try {
+        localStorage.removeItem('b42_custom_cats');
+        localStorage.removeItem('b42_cat_targets');
+        localStorage.removeItem('b42_notifs');
+      } catch {}
+      showToast('Everything cleared');
+      onDone();
+    } catch (e) { showToast('Could not clear — ' + e.message); }
+    setBusy(false);
+  }
+
+  const m = counts?.month;
+  const a = counts?.all;
+  const monthCount = scope === 'all' ? (m ? m.manual + m.imported : 0)
+                   : scope === 'imported' ? (m?.imported || 0)
+                   : (m?.manual || 0);
+
+  const Opt = ({ id, label, sub }) => (
+    <button onClick={() => setScope(id)}
+      style={{ border:`1.5px solid ${scope===id ? C.green : C.sandDark}`, borderRadius:10,
+        padding:'10px 14px', cursor:'pointer', width:'100%', textAlign:'left',
+        background: scope===id ? C.greenLight : C.white,
+        display:'flex', alignItems:'flex-start', gap:10, marginBottom:6 }}>
+      <div style={{ width:16, height:16, borderRadius:'50%', flexShrink:0, marginTop:2,
+        border:`2px solid ${scope===id ? C.green : C.sandDark}`,
+        background: scope===id ? C.green : 'transparent' }}/>
+      <div>
+        <p style={{ margin:0, fontSize:13, fontWeight:scope===id?600:400,
+          color:scope===id?C.green:C.ink, fontFamily:SANS }}>{label}</p>
+        <p style={{ margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS }}>{sub}</p>
+      </div>
+    </button>
+  );
+
+  return (
+    <div style={{ position:'fixed', inset:0, zIndex:750,
+      display:'flex', flexDirection:'column', justifyContent:'flex-end' }}>
+      <div onClick={onClose} style={{ position:'absolute', inset:0, background:'rgba(26,26,24,0.6)' }}/>
+      <div style={{ position:'relative', background:C.sand, borderRadius:'20px 20px 0 0',
+        maxHeight:'92dvh', display:'flex', flexDirection:'column', animation:'slideUp 0.25s ease' }}>
+
+        <div style={{ padding:'20px 20px 14px', background:C.white,
+          borderRadius:'20px 20px 0 0', borderBottom:`1px solid ${C.sandMid}`,
+          display:'flex', alignItems:'flex-start', gap:12 }}>
+          <div style={{ flex:1 }}>
+            <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
+              Reset data
+            </h2>
+            <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
+              Start a month over, or wipe the budget and begin again. Both of you share
+              this data, so anything removed here disappears for your partner too.
+            </p>
+          </div>
+          <button onClick={onClose} style={{ border:'none', background:'none', padding:6, cursor:'pointer' }}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1, padding:'14px 16px' }}>
+
+          {/* Backup first */}
+          <Card style={{ border:`1px solid ${C.green}44`, background:C.greenLight }}>
+            <div style={{ display:'flex', gap:10, alignItems:'flex-start' }}>
+              <Download size={17} color={C.green} style={{ flexShrink:0, marginTop:2 }}/>
+              <div style={{ flex:1 }}>
+                <p style={{ margin:'0 0 3px', fontSize:13, fontWeight:700, color:C.green, fontFamily:SANS }}>
+                  Download a backup first
+                </p>
+                <p style={{ margin:'0 0 10px', fontSize:12, color:C.green+'cc',
+                  fontFamily:SANS, lineHeight:1.6 }}>
+                  A JSON file with every transaction and setting. Nothing here can be
+                  undone, so this is your only way back.
+                </p>
+                <button onClick={downloadBackup}
+                  style={{ border:'none', borderRadius:9, padding:'8px 16px',
+                    background:C.green, color:'#fff', fontSize:13, fontWeight:600,
+                    cursor:'pointer', fontFamily:SANS, display:'flex', alignItems:'center', gap:6 }}>
+                  {backedUp ? <><Check size={13}/> Downloaded — get another</> : 'Download backup'}
+                </button>
+              </div>
+            </div>
+          </Card>
+
+          {/* Reset one month */}
+          <Card>
+            <p style={{ margin:'0 0 3px', fontSize:14, fontWeight:700, color:C.ink, fontFamily:SANS }}>
+              Reset {MONTHS[month]} {year}
+            </p>
+            <p style={{ margin:'0 0 10px', fontSize:12, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
+              {m
+                ? `${m.imported} imported and ${m.manual} manual ${m.manual===1?'entry':'entries'} in this month.`
+                : 'Counting…'}
+              {' '}Other months are untouched.
+            </p>
+
+            {mode === 'month' ? (
+              <>
+                <Opt id="all"      label="Everything in this month"
+                     sub={m ? `${m.imported + m.manual} transactions` : ''}/>
+                <Opt id="imported" label="Imported transactions only"
+                     sub={m ? `${m.imported} rows · keeps anything you typed in` : ''}/>
+                <Opt id="manual"   label="Manual entries only"
+                     sub={m ? `${m.manual} rows · keeps imported statements` : ''}/>
+
+                <div style={{ display:'flex', gap:8, marginTop:12 }}>
+                  <button onClick={() => setMode(null)} disabled={busy}
+                    style={{ flex:1, border:`1px solid ${C.sandDark}`, borderRadius:10,
+                      padding:'12px', background:C.white, fontSize:13, color:C.inkMid,
+                      cursor:'pointer', fontFamily:SANS }}>
+                    Cancel
+                  </button>
+                  <button onClick={runMonthReset} disabled={busy || monthCount === 0}
+                    style={{ flex:2, border:'none', borderRadius:10, padding:'12px',
+                      background: monthCount ? C.red : C.sandDark,
+                      color: monthCount ? '#fff' : C.inkSoft,
+                      fontSize:13, fontWeight:700,
+                      cursor: monthCount ? 'pointer' : 'default', fontFamily:SANS,
+                      display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
+                    {busy ? <><Spinner size={13}/>Clearing…</>
+                          : monthCount ? `Delete ${monthCount} transaction${monthCount===1?'':'s'}`
+                          : 'Nothing to delete'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button onClick={() => { setMode('month'); setScope('all'); }}
+                style={{ border:`1px solid ${C.red}55`, borderRadius:10, padding:'11px 16px',
+                  background:C.white, fontSize:13, fontWeight:600, color:C.red,
+                  cursor:'pointer', fontFamily:SANS, width:'100%' }}>
+                Reset this month…
+              </button>
+            )}
+          </Card>
+
+          {/* Full wipe */}
+          <Card style={{ border:`1px solid ${C.red}44` }}>
+            <p style={{ margin:'0 0 3px', fontSize:14, fontWeight:700, color:C.red, fontFamily:SANS }}>
+              Reset everything
+            </p>
+            <p style={{ margin:'0 0 10px', fontSize:12, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
+              Deletes every transaction from every month, both people, plus your
+              category targets and custom categories.
+              {a ? ` That is ${a.imported + a.manual} transactions in total.` : ''}
+              {' '}Your accounts and sign-in stay as they are.
+            </p>
+
+            {mode === 'all' ? (
+              <>
+                <p style={{ margin:'0 0 6px', fontSize:12, color:C.ink, fontFamily:SANS }}>
+                  Type <b style={{ fontFamily:'monospace' }}>{CONFIRM}</b> to confirm:
+                </p>
+                <input value={typed} onChange={e => setTyped(e.target.value)}
+                  placeholder={CONFIRM} autoComplete="off"
+                  style={{ width:'100%', border:`1.5px solid ${typed===CONFIRM?C.red:C.sandDark}`,
+                    borderRadius:9, padding:'11px 13px', fontSize:14, color:C.ink,
+                    background:C.white, fontFamily:'monospace', outline:'none',
+                    boxSizing:'border-box', marginBottom:10 }}/>
+                <div style={{ display:'flex', gap:8 }}>
+                  <button onClick={() => { setMode(null); setTyped(''); }} disabled={busy}
+                    style={{ flex:1, border:`1px solid ${C.sandDark}`, borderRadius:10,
+                      padding:'12px', background:C.white, fontSize:13, color:C.inkMid,
+                      cursor:'pointer', fontFamily:SANS }}>
+                    Cancel
+                  </button>
+                  <button onClick={runFullReset} disabled={busy || typed !== CONFIRM}
+                    style={{ flex:2, border:'none', borderRadius:10, padding:'12px',
+                      background: typed===CONFIRM ? C.red : C.sandDark,
+                      color: typed===CONFIRM ? '#fff' : C.inkSoft,
+                      fontSize:13, fontWeight:700,
+                      cursor: typed===CONFIRM ? 'pointer' : 'default', fontFamily:SANS,
+                      display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}>
+                    {busy ? <><Spinner size={13}/>Deleting…</> : 'Delete everything'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button onClick={() => setMode('all')}
+                style={{ border:'none', borderRadius:10, padding:'11px 16px',
+                  background:C.red, fontSize:13, fontWeight:700, color:'#fff',
+                  cursor:'pointer', fontFamily:SANS, width:'100%' }}>
+                Reset everything…
+              </button>
+            )}
+          </Card>
+
+          <p style={{ fontSize:11, color:C.inkSoft, fontFamily:SANS,
+            lineHeight:1.6, padding:'0 4px 20px' }}>
+            Deleting removes the data, not the account. You can both still sign in, and
+            uploading a statement again rebuilds the month from scratch.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 const SUPABASE_READY=!!(import.meta.env.VITE_SUPABASE_URL&&import.meta.env.VITE_SUPABASE_ANON_KEY);
 const CUSTOM_CATS_KEY='b42_custom_cats';
@@ -2735,6 +3026,7 @@ export default function App() {
   const [aiOn,       setAiOn      ]=useState(null); // null = still checking
   const [aiDiag,     setAiDiag    ]=useState(null);
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
+  const [showReset,  setShowReset ]=useState(false);
 
   const allCats=[...DEFAULT_CATS,...customCats];
 
@@ -2946,6 +3238,12 @@ export default function App() {
           color:C.ink,textAlign:'center',letterSpacing:'-0.01em'}}>{MONTHS[month]} {year}</p>
         <button onClick={()=>changeMonth(1)} style={{border:`1px solid ${C.sandDark}`,borderRadius:8,
           padding:'5px 10px',background:C.white,fontSize:16,color:C.inkMid,lineHeight:1,cursor:'pointer'}}>›</button>
+        <button onClick={()=>setShowReset(true)}
+          title="Reset data"
+          style={{border:'none',background:'none',padding:'5px 4px',cursor:'pointer',
+            display:'flex',alignItems:'center'}}>
+          <Settings size={18} color={C.sandDark} strokeWidth={1.6}/>
+        </button>
         <button onClick={()=>setShowActivity(true)}
           title="Partner activity"
           style={{border:'none',background:'none',padding:'5px 4px',
@@ -2986,11 +3284,24 @@ export default function App() {
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
-          bankImports={imports} allCats={allCats}/>}
+          bankImports={imports} allCats={allCats} year={year} month={month}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
           allCats={allCats} aiOn={aiOn} aiDiag={aiDiag}/>}
+
+      {showReset && (
+        <ResetModal
+          year={year} month={month}
+          showToast={showToast}
+          onClose={()=>setShowReset(false)}
+          onDone={async ()=>{
+            setShowReset(false);
+            setCustomCats([]); setCatTargets({}); setSuggested({}); setNotifs([]);
+            await loadAll();
+          }}
+        />
+      )}
 
       {/* Partner activity panel */}
       {showActivity && (

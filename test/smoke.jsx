@@ -12,7 +12,8 @@ import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, BillsTab, HistoryTab, ChartsTab, UploadTab,
-  AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel } from '../src/App.jsx';
+  AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
+  ResetModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -84,10 +85,16 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
 })));
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
-  history, txns, bankImports: imports, allCats })));
+  history, txns, bankImports: imports, allCats, year: 2026, month: 6 })));
 
 check('render BillsTab (no history)', () => renderToString(React.createElement(BillsTab, {
-  history: [], txns: [], bankImports: [], allCats })));
+  history: [], txns: [], bankImports: [], allCats, year: 2026, month: 6 })));
+
+check('render BillsTab (nothing charged yet)', () => renderToString(React.createElement(BillsTab, {
+  history, txns: [], bankImports: [], allCats, year: 2026, month: 6 })));
+
+check('render BillsTab (future month)', () => renderToString(React.createElement(BillsTab, {
+  history, txns, bankImports: imports, allCats, year: 2027, month: 0 })));
 
 check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, {
   txns, bankImports: imports, allCats,
@@ -123,6 +130,9 @@ check('render ActivityPanel', () => renderToString(React.createElement(ActivityP
 
 check('render ActivityPanel (empty)', () => renderToString(React.createElement(ActivityPanel, {
   items: [], onClose: noop, onClear: noop })));
+
+check('render ResetModal', () => renderToString(React.createElement(ResetModal, {
+  year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop })));
 
 results.forEach(([s, n]) => console.log(s + '  ' + n));
 const failed = results.filter(r => r[0] === 'FAIL').length;
