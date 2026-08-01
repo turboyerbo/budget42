@@ -18,7 +18,8 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
          getBillPayments, setBillPaid, syncLocalBillPayments,
-         deleteManyRows, getMonthEverything } from './supabase.js';
+         deleteManyRows, getMonthEverything,
+         getCategoryTargets, upsertCategoryTargets } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
@@ -1067,41 +1068,54 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
               {i>0&&<Divider/>}
 
               {/* Tap the row to see what makes up the total */}
-              <button
-                onClick={()=>setOpenCat(isOpen?null:cat.id)}
-                style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px',
-                  width:'100%',border:'none',background:isOpen?C.sand:'transparent',
-                  cursor:'pointer',textAlign:'left'}}>
-                <div style={{width:32,height:32,borderRadius:9,background:cat.color+'18',
-                  display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-                  <CatIcon name={cat.icon} size={16} color={cat.color}/>
-                </div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
-                    <span style={{fontSize:14,color:C.ink,fontFamily:SANS,
-                      fontWeight:spent>0?500:400,display:'flex',alignItems:'center',gap:6}}>
-                      {cat.label}
-                      {cat.excluded&&(
-                        <span style={{fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:99,
-                          background:C.sandMid,color:C.inkSoft,letterSpacing:'0.04em'}}>
-                          NOT SPENDING
-                        </span>
-                      )}
-                    </span>
-                    <div style={{display:'flex',alignItems:'baseline',gap:4}}>
-                      <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
-                        color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
-                      {target>0&&<span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>}
-                      <ChevronRight size={14} color={C.sandDark}
-                        style={{transform:isOpen?'rotate(90deg)':'none',
-                          transition:'transform 0.15s',marginLeft:2}}/>
-                    </div>
+              <div style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px',
+                background:isOpen?C.sand:'transparent'}}>
+                <button
+                  onClick={()=>setOpenCat(isOpen?null:cat.id)}
+                  style={{display:'flex',alignItems:'center',gap:12,flex:1,minWidth:0,
+                    border:'none',background:'transparent',cursor:'pointer',textAlign:'left'}}>
+                  <div style={{width:32,height:32,borderRadius:9,background:cat.color+'18',
+                    display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                    <CatIcon name={cat.icon} size={16} color={cat.color}/>
                   </div>
-                  {target>0&&<Bar spent={spent} target={target} color={cat.color}/>}
-                  {over&&<p style={{margin:'3px 0 0',fontSize:10,color:C.red,fontFamily:SANS}}>
-                    {fmt(spent-target)} over</p>}
-                </div>
-              </button>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+                      <span style={{fontSize:14,color:C.ink,fontFamily:SANS,
+                        fontWeight:spent>0?500:400,display:'flex',alignItems:'center',gap:6}}>
+                        {cat.label}
+                        {cat.excluded&&(
+                          <span style={{fontSize:9,fontWeight:700,padding:'1px 6px',borderRadius:99,
+                            background:C.sandMid,color:C.inkSoft,letterSpacing:'0.04em'}}>
+                            NOT SPENDING
+                          </span>
+                        )}
+                      </span>
+                      <div style={{display:'flex',alignItems:'baseline',gap:4}}>
+                        <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
+                          color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
+                        {target>0&&<span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>}
+                        <ChevronRight size={14} color={C.sandDark}
+                          style={{transform:isOpen?'rotate(90deg)':'none',
+                            transition:'transform 0.15s',marginLeft:2}}/>
+                      </div>
+                    </div>
+                    {target>0&&<Bar spent={spent} target={target} color={cat.color}/>}
+                    {over&&<p style={{margin:'3px 0 0',fontSize:10,color:C.red,fontFamily:SANS}}>
+                      {fmt(spent-target)} over</p>}
+                  </div>
+                </button>
+                <button
+                  onClick={e=>{e.stopPropagation();setQuickAddCat(cat.id);setTab('add');}}
+                  onMouseEnter={e=>e.target.style.transform='scale(1.08)'}
+                  onMouseLeave={e=>e.target.style.transform='scale(1)'}
+                  style={{width:32,height:32,borderRadius:8,border:'none',
+                    background:cat.color,color:'#fff',cursor:'pointer',
+                    display:'flex',alignItems:'center',justifyContent:'center',
+                    flexShrink:0,fontSize:18,fontWeight:300,transition:'all 0.12s'}}
+                  title={`Quick add to ${cat.label}`}>
+                  +
+                </button>
+              </div>
 
               {/* Drill-down: every transaction in this category */}
               {isOpen&&(
@@ -1281,14 +1295,15 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
 }
 
 // ─── ADD TAB ──────────────────────────────────────────────────────────────────
-export function AddTab({profile,allCats,onAdd}) {
-  const [cat,   setCat]   = useState(null);
+export function AddTab({profile,allCats,onAdd,quickCat}) {
+  const [cat,   setCat]   = useState(quickCat || null);
   const [amount,setAmount]= useState('');
   const [note,  setNote]  = useState('');
   const [date,  setDate]  = useState(today());
   const [saving,setSaving]= useState(false);
   const ref=useRef(null);
   useEffect(()=>{ref.current?.focus();},[]);
+  useEffect(()=>{if(quickCat) setCat(quickCat);},[quickCat]);
   const can=cat&&parseFloat(amount)>0;
   const selCat=allCats.find(c=>c.id===cat);
   async function submit() {
@@ -3072,7 +3087,7 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
 function describeChange(payload, allCats) {
   const row  = payload.new || payload.old || {};
   const evt  = payload.eventType || payload.type;
-  const who  = (row.who || 'Your partner');
+  const who  = (row.who || row.updated_by || 'Your partner');
   const name = who.charAt(0).toUpperCase() + who.slice(1).split(' ')[0];
 
   if (payload.table === 'bill_payments') {
@@ -3082,6 +3097,23 @@ function describeChange(payload, allCats) {
     return payload.eventType === 'DELETE'
       ? { who: cap, text: `${cap} marked ${label} as not paid` }
       : { who: cap, text: `${cap} paid ${label}` };
+  }
+
+  if (payload.table === 'bill_rules') {
+    const label = row.label || 'a bill';
+    if (evt === 'DELETE') {
+      return { who: name, text: `${name} removed the ${label} bill rule` };
+    }
+    if (evt === 'INSERT') {
+      return { who: name, text: `${name} added a new bill: ${label}` };
+    }
+    if (evt === 'UPDATE') {
+      return { who: name, text: `${name} updated the ${label} bill rule` };
+    }
+  }
+
+  if (payload.table === 'category_targets') {
+    return { who: name, text: `${name} updated budget targets for categories` };
   }
 
   if (payload.table === 'budget_settings') {
@@ -3592,6 +3624,7 @@ export default function App() {
   const [profile,  setProfile  ]=useState(null);      // user_metadata
   // App state
   const [tab,        setTab       ]=useState('home');
+  const [quickAddCat,setQuickAddCat]=useState(null); // pre-selected category for quick add
   const [month,      setMonth     ]=useState(now.getMonth());
   const [year,       setYear      ]=useState(now.getFullYear());
   const [txns,       setTxns      ]=useState([]);
@@ -3678,6 +3711,12 @@ export default function App() {
         setBillRules(await getBillRules());
         try { await syncLocalBillPayments(); } catch {}
         setBillPayments(await getBillPayments(year, month));
+        // Load category targets from Supabase (shared with partner)
+        const remoteTargets = await getCategoryTargets();
+        if(Object.keys(remoteTargets).length > 0) {
+          setCatTargets(remoteTargets);
+          localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(remoteTargets));
+        }
         const mod = await import('./supabase.js');
         setBillsLocal(!!mod.billRulesLocalOnly || !!mod.billPaidLocalOnly);
       } catch {}
@@ -3800,14 +3839,25 @@ export default function App() {
 
     const unsub=subscribeToPartnerActivity(payload=>{
       const row=payload.new||payload.old||{};
-      const actor=(row.who||row.paid_by||'').toLowerCase();
+      const actor=(row.who||row.paid_by||row.updated_by||'').toLowerCase();
       // Ignore our own writes — only surface the partner's changes
       if(actor && me && (actor.includes(me)||me.includes(actor)))return;
-      // budget_settings rows carry no 'who'; skip rather than misattribute
-      if(!actor && payload.table==='budget_settings')return;
+      // budget_settings and category_targets rows carry no 'who'; skip rather than misattribute
+      if(!actor && (payload.table==='budget_settings'||payload.table==='category_targets'))return;
 
       if(payload.table==='bill_payments'){
         getBillPayments(year,month).then(setBillPayments).catch(()=>{});
+      }
+      if(payload.table==='bill_rules'){
+        getBillRules().then(setBillRules).catch(()=>{});
+      }
+      if(payload.table==='category_targets'){
+        getCategoryTargets().then(targets=>{
+          if(Object.keys(targets).length > 0) {
+            setCatTargets(targets);
+            localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(targets));
+          }
+        }).catch(()=>{});
       }
 
       const {who,text}=describeChange(payload,allCats);
@@ -3851,7 +3901,14 @@ export default function App() {
   async function removeImport(id){await deleteBankImport(id);setImports(p=>p.filter(t=>t.id!==id));}
   function addCustomCat(cat){const u=[...customCats,cat];setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));showToast(`"${cat.label}" added`);}
   function deleteCustomCat(id){const u=customCats.filter(c=>c.id!==id);setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));}
-  function acceptSuggested(){const m={...catTargets,...suggested};setCatTargets(m);localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(m));setSuggested({});showToast('Budget targets updated');}
+  function acceptSuggested(){
+    const m={...catTargets,...suggested};
+    setCatTargets(m);
+    localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(m));
+    if(profile?.name) upsertCategoryTargets(m,profile.name).catch(()=>{});
+    setSuggested({});
+    showToast('Budget targets updated');
+  }
   async function handleSignOut(){await signOut();setProfile(null);setAuthState('auth');}
 
   // ── Render states ────────────────────────────────────────────────────────────
@@ -3949,7 +4006,7 @@ export default function App() {
           onDeleteRow={deleteRow}
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}/>}
-      {tab==='add'     && <AddTab profile={profile} allCats={allCats} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setTab('home');}}/>}
+      {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
@@ -4014,7 +4071,7 @@ export default function App() {
         borderTop:`1px solid ${C.sandMid}`,paddingBottom:'env(safe-area-inset-bottom, 0px)',zIndex:50}}>
         <div style={{maxWidth:560,margin:'0 auto',display:'flex'}}>
           {NAV.map(({id,label,Icon,accent})=>(
-            <button key={id} onClick={()=>setTab(id)} style={{flex:1,border:'none',background:'none',
+            <button key={id} onClick={()=>{if(tab==='add'&&id!=='add')setQuickAddCat(null);setTab(id);}} style={{flex:1,border:'none',background:'none',
               padding:'10px 0 12px',display:'flex',flexDirection:'column',alignItems:'center',gap:3,cursor:'pointer'}}>
               {accent
                 ?<div style={{width:44,height:44,borderRadius:'50%',

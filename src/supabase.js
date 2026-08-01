@@ -124,6 +124,10 @@ export function subscribeToPartnerActivity(onChange) {
       p => onChange({ ...p, table:'bank_imports' }))
     .on('postgres_changes',{event:'*',schema:'public',table:'budget_settings'},
       p => onChange({ ...p, table:'budget_settings' }))
+    .on('postgres_changes',{event:'*',schema:'public',table:'bill_rules'},
+      p => onChange({ ...p, table:'bill_rules' }))
+    .on('postgres_changes',{event:'*',schema:'public',table:'category_targets'},
+      p => onChange({ ...p, table:'category_targets' }))
     .subscribe();
   return () => supabase.removeChannel(ch);
 }
@@ -426,4 +430,34 @@ export async function syncLocalBillPayments() {
   writeLocalPaid([]);
   billPaidLocalOnly = false;
   return local.length;
+}
+
+// ── Category targets (shared across partners) ──────────────────────────────
+export async function getCategoryTargets() {
+  try {
+    const { data, error } = await supabase.from('category_targets')
+      .select('*').maybeSingle();
+    if (error) throw error;
+    return data?.targets || {};
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    return {};
+  }
+}
+
+export async function upsertCategoryTargets(targets, who) {
+  try {
+    const { error } = await supabase.from('category_targets')
+      .upsert(
+        { id: 'shared', targets, updated_by: who, updated_at: new Date().toISOString() },
+        { onConflict: 'id' }
+      );
+    if (error) throw error;
+  } catch (err) {
+    if (isMissingTable(err)) {
+      // Table doesn't exist yet, silently fail — user can still use app locally
+      return;
+    }
+    throw err;
+  }
 }
