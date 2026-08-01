@@ -132,7 +132,7 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, o
       
       const link = document.createElement('a');
       link.href = content;
-      link.download = `budget-${type}-${year}${type==='monthly'?'-'+(month+1):'}.html`;
+      link.download = `budget-${type}-${year}${type==='monthly'?'-'+(month+1):''}.html`;
       link.click();
       
       showToast(`${type === 'monthly' ? 'Monthly' : 'Yearly'} summary downloaded!`);
