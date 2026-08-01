@@ -3897,10 +3897,9 @@ export default function App() {
       } else {
         showToast(`${bill.label} marked unpaid`);
       }
-    } catch(e) { showToast('Could not update bill status'); }
-    } catch (e) {
+    } catch(e) { 
+      showToast('Could not update bill status'); 
       setBillPayments(await getBillPayments(year, month));   // put it back
-      showToast('Could not save — ' + e.message);
     }
   }
 
