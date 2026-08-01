@@ -611,9 +611,14 @@ export function AuthScreen({onAuth}) {
   const [loading,  setLoading] = useState(false);
   const [error,    setError]   = useState(null);
   const [done,     setDone]    = useState(false); // after signup: show "invite partner" screen
-  const [disclaimerAcknowledged, setDisclaimerAcknowledged] = useState(
-    !!localStorage.getItem('budget_disclaimer_v1')
-  );
+  const [disclaimerAcknowledged, setDisclaimerAcknowledged] = useState(false);
+
+  // Check localStorage after mount (browser-only)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      setDisclaimerAcknowledged(!!localStorage.getItem('budget_disclaimer_v1'));
+    }
+  }, []);
 
   async function handleSignUp(e) {
     e.preventDefault();
