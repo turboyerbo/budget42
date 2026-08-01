@@ -874,27 +874,14 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
         </div>
       </div>
 
-      {/* Suggested targets */}
+      {/* Suggested targets - show inline with categories instead of big block */}
       {Object.keys(suggested||{}).length>0&&(
-        <div style={{background:C.greenLight,border:`1px solid ${C.green}33`,borderRadius:14,
-          padding:'12px 16px',marginBottom:12}}>
-          <p style={{margin:'0 0 6px',fontSize:13,fontWeight:600,color:C.green,fontFamily:SANS}}>
-            <Sparkles size={14} style={{marginRight:6,verticalAlign:'middle'}}/>
-            Budget targets updated from your statements
+        <div style={{padding:'0 0 6px 0',marginBottom:8}}>
+          <p style={{margin:'0 0 4px',fontSize:11,color:C.inkSoft,fontFamily:SANS,textTransform:'uppercase',
+            letterSpacing:'0.08em'}}>💡 Suggested updates available • 
+            <button onClick={onAcceptSuggested} style={{border:'none',background:'none',color:C.green,
+              cursor:'pointer',fontWeight:600,fontSize:11,marginLeft:4}}>Apply all</button>
           </p>
-          <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10}}>
-            {Object.entries(suggested).map(([catId,val])=>{
-              const c=allCats.find(x=>x.id===catId);if(!c)return null;
-              const old=catTargets[catId]||c.target;
-              return <span key={catId} style={{background:C.white,borderRadius:7,padding:'3px 10px',
-                fontSize:12,fontWeight:500,color:C.green,border:`1px solid ${C.green}44`}}>
-                {c.label}: ${old}→<b>${val}</b></span>;
-            })}
-          </div>
-          <button onClick={onAcceptSuggested} style={{border:'none',borderRadius:8,padding:'7px 14px',
-            background:C.green,color:'#fff',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:SANS}}>
-            Apply all
-          </button>
         </div>
       )}
 
@@ -1093,7 +1080,12 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                       <div style={{display:'flex',alignItems:'baseline',gap:4}}>
                         <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
                           color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
-                        {target>0&&<span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>}
+                        {target>0&&<div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:0}}>
+                          <span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>
+                          {suggested[cat.id]&&<span style={{fontSize:9,color:C.sandDark,fontFamily:SANS,opacity:0.6}}>
+                            suggested ${suggested[cat.id]}
+                          </span>}
+                        </div>}
                         <ChevronRight size={14} color={C.sandDark}
                           style={{transform:isOpen?'rotate(90deg)':'none',
                             transition:'transform 0.15s',marginLeft:2}}/>
