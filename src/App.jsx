@@ -30,6 +30,283 @@ import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport, findExistingDuplicates } from './validate.js';
+import React from 'react';
+
+// ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
+function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
+  return (
+    <div style={{
+      position:'sticky', top:50, zIndex:40,
+      background:C.white, borderBottom:`1px solid ${C.sandMid}`,
+      display:'flex', overflowX:'auto', padding:'0 8px',
+      gap:4
+    }}>
+      {tabs.map(({id, label, Icon}) => (
+        <button key={id} onClick={() => onTabChange(id)} style={{
+          padding:'10px 14px', border:'none', background:'transparent',
+          cursor:'pointer', color: activeTab===id ? C.green : C.inkSoft,
+          fontWeight: activeTab===id ? 600 : 400, fontSize:13,
+          fontFamily:SANS, whiteSpace:'nowrap',
+          borderBottom: activeTab===id ? `2px solid ${C.green}` : '2px solid transparent',
+          transition:'all 0.2s', display:'flex', alignItems:'center', gap:6
+        }}>
+          <Icon size={16} />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── BOTTOM BAR ───────────────────────────────────────────────────────────────
+function BottomBar({profile, onSettings, onViewChange, view, onExport, C, SANS, nameColor, nameInitials}) {
+  const color = nameColor(profile?.name);
+  return (
+    <div style={{
+      position:'fixed', bottom:0, left:0, right:0, zIndex:50,
+      background:C.white, borderTop:`1px solid ${C.sandMid}`,
+      padding:'8px 16px', paddingBottom:`max(8px, env(safe-area-inset-bottom, 0px))`,
+      display:'flex', alignItems:'center', justifyContent:'space-between',
+      gap:12, height:60
+    }}>
+      <div style={{display:'flex', gap:8, alignItems:'center'}}>
+        <button onClick={onSettings} style={{
+          padding:'6px 12px', border:`1px solid ${C.sandDark}`,
+          background:C.white, borderRadius:8, cursor:'pointer',
+          fontSize:12, fontFamily:SANS, display:'flex', gap:4, alignItems:'center'
+        }}>
+          <Settings size={14} />
+          Settings
+        </button>
+        <button onClick={onViewChange} style={{
+          padding:'6px 12px', border:`1px solid ${C.sandDark}`,
+          background: view==='combined' ? color+'20' : C.white,
+          borderRadius:8, cursor:'pointer', fontSize:12, fontFamily:SANS,
+          color: view==='combined' ? color : C.inkMid
+        }}>
+          {view==='combined' ? '👥 Combined' : '👤 Just me'}
+        </button>
+      </div>
+      
+      <div style={{display:'flex', gap:8, alignItems:'center'}}>
+        <button onClick={onExport} style={{
+          padding:'6px 12px', border:`1px solid ${C.green}`,
+          background:C.green+'20', borderRadius:8, cursor:'pointer',
+          fontSize:12, fontFamily:SANS, fontWeight:600, color:C.green,
+          display:'flex', gap:4, alignItems:'center'
+        }}>
+          <Download size={14} />
+          Export
+        </button>
+        <div style={{
+          padding:'4px 8px', borderRadius:99, background:color+'15',
+          display:'flex', alignItems:'center', gap:6
+        }}>
+          <div style={{
+            width:24, height:24, borderRadius:'50%', background:color,
+            color:'#fff', display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:11, fontWeight:700, fontFamily:SANS
+          }}>
+            {nameInitials(profile?.name)}
+          </div>
+          <span style={{fontSize:12, fontWeight:600, color, fontFamily:SANS}}>
+            {profile?.name?.split(' ')[0] || 'User'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── EXPORT MODAL ─────────────────────────────────────────────────────────────
+function ExportModal({year, month, txns, bankImports, billPayments, billRules, onClose, showToast, C, SERIF, SANS, MONTHS}) {
+  const [exporting, setExporting] = React.useState(false);
+  const allTx = [...txns, ...(bankImports||[])];
+  
+  async function generateAndDownloadPDF(type) {
+    setExporting(true);
+    try {
+      const content = type === 'monthly' 
+        ? generateMonthlyPDF(year, month, allTx, billPayments, billRules)
+        : generateYearlyPDF(year, allTx, billPayments, billRules);
+      
+      const link = document.createElement('a');
+      link.href = content;
+      link.download = `budget-${type}-${year}${type==='monthly'?'-'+(month+1):'}.html`;
+      link.click();
+      
+      showToast(`${type === 'monthly' ? 'Monthly' : 'Yearly'} summary downloaded!`);
+      onClose();
+    } catch(e) {
+      showToast('Could not generate export');
+    }
+    setExporting(false);
+  }
+  
+  function generateMonthlyPDF(year, month, txns, bills, rules) {
+    const spent = txns.reduce((a,t) => a + Math.abs(t.amount||0), 0);
+    const billsPaid = bills?.length || 0;
+    const totalBills = rules?.length || 0;
+    
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Budget For Two — ${MONTHS[month]} ${year}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 40px; color: #1a1a18; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .date { color: #888; font-size: 14px; margin-bottom: 30px; }
+    .summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 40px; }
+    .card { border: 1px solid #ddd; padding: 16px; border-radius: 10px; }
+    .card-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+    .card-value { font-size: 24px; font-weight: 600; color: #1a7a4a; }
+    .section { margin-bottom: 40px; }
+    .section h2 { font-size: 16px; margin: 0 0 12px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 8px; font-size: 12px; color: #888; border-bottom: 1px solid #ddd; font-weight: 600; }
+    td { padding: 8px; border-bottom: 1px solid #eee; }
+    tr:last-child td { border-bottom: none; }
+    .amount { text-align: right; font-family: 'Courier New', monospace; }
+  </style>
+</head>
+<body>
+  <h1>Budget For Two</h1>
+  <p class="date">${MONTHS[month]} ${year}</p>
+  
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">Bills Paid</div>
+      <div class="card-value">${billsPaid}/${totalBills}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Spent</div>
+      <div class="card-value">$${spent.toLocaleString('en-CA', {maximumFractionDigits: 0})}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Transactions</div>
+      <div class="card-value">${txns.length}</div>
+    </div>
+  </div>
+  
+  <div class="section">
+    <h2>Recent Transactions</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Description</th>
+          <th class="amount">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${txns.slice(0, 20).map(t => \`
+          <tr>
+            <td>\${t.date}</td>
+            <td>\${t.description || t.note || 'Transaction'}</td>
+            <td class="amount">$\${Math.abs(t.amount).toFixed(2)}</td>
+          </tr>
+        \`).join('')}
+      </tbody>
+    </table>
+  </div>
+  
+  <p style="font-size: 12px; color: #888; margin-top: 40px; text-align: center;">
+    Generated on ${new Date().toLocaleDateString()} • Budget For Two
+  </p>
+</body>
+</html>
+    `;
+    return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+  }
+  
+  function generateYearlyPDF(year, txns, bills, rules) {
+    const spent = txns.reduce((a,t) => a + Math.abs(t.amount||0), 0);
+    const billsPaid = bills?.length || 0;
+    const totalBills = rules?.length || 0;
+    const avgMonthly = (spent / 12).toFixed(2);
+    
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Budget For Two — Year ${year}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 40px; color: #1a1a18; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .date { color: #888; font-size: 14px; margin-bottom: 30px; }
+    .summary { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 20px; margin-bottom: 40px; }
+    .card { border: 1px solid #ddd; padding: 16px; border-radius: 10px; }
+    .card-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+    .card-value { font-size: 24px; font-weight: 600; color: #1a7a4a; }
+  </style>
+</head>
+<body>
+  <h1>Budget For Two — Year ${year}</h1>
+  <p class="date">Annual Summary</p>
+  
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">Total Spent</div>
+      <div class="card-value">$${spent.toLocaleString('en-CA', {maximumFractionDigits: 0})}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Monthly Avg</div>
+      <div class="card-value">$${avgMonthly}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Bills Tracked</div>
+      <div class="card-value">${totalBills}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Transactions</div>
+      <div class="card-value">${txns.length}</div>
+    </div>
+  </div>
+  
+  <p style="font-size: 12px; color: #888; margin-top: 40px; text-align: center;">
+    Generated on ${new Date().toLocaleDateString()} • Budget For Two
+  </p>
+</body>
+</html>
+    `;
+    return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+  }
+  
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', flexDirection:'column', justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:'20px 20px 0 0', padding:'22px 20px', animation:'slideUp 0.25s ease'}}>
+        <h2 style={{margin:'0 0 16px', fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink}}>
+          Export Budget Summary
+        </h2>
+        
+        <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:16}}>
+          <button onClick={() => generateAndDownloadPDF('monthly')} disabled={exporting} style={{
+            padding:'16px', borderRadius:12, border:'none', background:C.green, color:'#fff',
+            fontWeight:600, cursor:exporting?'default':'pointer', opacity:exporting?0.6:1,
+            fontFamily:SANS, fontSize:14
+          }}>
+            {exporting ? 'Generating...' : `📥 ${MONTHS[month]} ${year}`}
+          </button>
+          <button onClick={() => generateAndDownloadPDF('yearly')} disabled={exporting} style={{
+            padding:'16px', borderRadius:12, border:'none', background:C.blue, color:'#fff',
+            fontWeight:600, cursor:exporting?'default':'pointer', opacity:exporting?0.6:1,
+            fontFamily:SANS, fontSize:14
+          }}>
+            {exporting ? 'Generating...' : `📥 Year ${year}`}
+          </button>
+        </div>
+        
+        <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
+          Download as HTML file. Open in any browser and print/save as PDF.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C = {
@@ -3740,6 +4017,7 @@ export default function App() {
   const [aiDiag,     setAiDiag    ]=useState(null);
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
+  const [showExport, setShowExport]=useState(false);
   const [billRules,  setBillRules ]=useState([]);
   const [showDupes,  setShowDupes ]=useState(false);
   const [billsLocal, setBillsLocal]=useState(false);
@@ -4058,26 +4336,22 @@ export default function App() {
 
   return (
     <div style={{maxWidth:560,margin:'0 auto',minHeight:'100dvh',background:C.sand,
-      paddingBottom:'calc(72px + env(safe-area-inset-bottom, 0px))'}}>
+      paddingBottom:'calc(60px + env(safe-area-inset-bottom, 0px))'}}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
 
-      {/* Header */}
+      {/* Header — Month Navigation + Notifications Only */}
       <div style={{background:C.white,borderBottom:`1px solid ${C.sandMid}`,
         padding:'10px 16px',position:'sticky',top:0,zIndex:50,
-        display:'flex',alignItems:'center',gap:10}}>
-        <B42Badge/>
-        <button onClick={()=>changeMonth(-1)} style={{border:`1px solid ${C.sandDark}`,borderRadius:8,
-          padding:'5px 10px',background:C.white,fontSize:16,color:C.inkMid,lineHeight:1,cursor:'pointer'}}>‹</button>
-        <p style={{flex:1,margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,
-          color:C.ink,textAlign:'center',letterSpacing:'-0.01em'}}>{MONTHS[month]} {year}</p>
-        <button onClick={()=>changeMonth(1)} style={{border:`1px solid ${C.sandDark}`,borderRadius:8,
-          padding:'5px 10px',background:C.white,fontSize:16,color:C.inkMid,lineHeight:1,cursor:'pointer'}}>›</button>
-        <button onClick={()=>setShowReset(true)}
-          title="Reset data"
-          style={{border:'none',background:'none',padding:'5px 4px',cursor:'pointer',
-            display:'flex',alignItems:'center'}}>
-          <Settings size={18} color={C.sandDark} strokeWidth={1.6}/>
-        </button>
+        display:'flex',alignItems:'center',gap:10,justifyContent:'space-between'}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <B42Badge/>
+          <button onClick={()=>changeMonth(-1)} style={{border:`1px solid ${C.sandDark}`,borderRadius:8,
+            padding:'5px 10px',background:C.white,fontSize:16,color:C.inkMid,lineHeight:1,cursor:'pointer'}}>‹</button>
+          <p style={{flex:1,margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,minWidth:140,
+            color:C.ink,textAlign:'center',letterSpacing:'-0.01em'}}>{MONTHS[month]} {year}</p>
+          <button onClick={()=>changeMonth(1)} style={{border:`1px solid ${C.sandDark}`,borderRadius:8,
+            padding:'5px 10px',background:C.white,fontSize:16,color:C.inkMid,lineHeight:1,cursor:'pointer'}}>›</button>
+        </div>
         <button onClick={()=>setShowActivity(true)}
           title="Partner activity"
           style={{border:'none',background:'none',padding:'5px 4px',
@@ -4094,16 +4368,10 @@ export default function App() {
             </span>
           )}
         </button>
-        <button onClick={handleSignOut}
-          title="Sign out"
-          style={{border:'none',borderRadius:99,padding:'5px 10px 5px 7px',
-            background:color+'15',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
-          <UserAvatar name={profile.name} size={20}/>
-          <span style={{fontSize:11,fontWeight:700,color,fontFamily:SANS}}>
-            {profile.name.split(' ')[0]}
-          </span>
-        </button>
       </div>
+
+      {/* Top Navigation — Main Features */}
+      <TopNav tabs={NAV} activeTab={tab} onTabChange={setTab} C={C} SANS={SANS} />
 
       {/* Content */}
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
@@ -4179,28 +4447,37 @@ export default function App() {
           onClose={() => setShowReview(false)}
         />
       )}
+      {/* Bottom bar with settings and export */}
+      <BottomBar 
+        profile={profile} 
+        onSettings={() => setShowReset(true)}
+        onViewChange={() => setView(view === 'combined' ? 'solo' : 'combined')}
+        view={view}
+        onExport={() => setShowExport(true)}
+        C={C}
+        SANS={SANS}
+        nameColor={nameColor}
+        nameInitials={nameInitials}
+      />
 
-      {/* Bottom nav */}
-      <div style={{position:'fixed',bottom:0,left:0,right:0,background:C.white,
-        borderTop:`1px solid ${C.sandMid}`,paddingBottom:'env(safe-area-inset-bottom, 0px)',zIndex:50}}>
-        <div style={{maxWidth:560,margin:'0 auto',display:'flex'}}>
-          {NAV.map(({id,label,Icon,accent})=>(
-            <button key={id} onClick={()=>{if(tab==='add'&&id!=='add')setQuickAddCat(null);setTab(id);}} style={{flex:1,border:'none',background:'none',
-              padding:'10px 0 12px',display:'flex',flexDirection:'column',alignItems:'center',gap:3,cursor:'pointer'}}>
-              {accent
-                ?<div style={{width:44,height:44,borderRadius:'50%',
-                    background:tab==='add'?C.green:C.inkSoft,
-                    display:'flex',alignItems:'center',justifyContent:'center',marginTop:-8,
-                    boxShadow:tab==='add'?`0 4px 16px ${C.green}55`:'none',transition:'all 0.2s'}}>
-                    <Icon size={20} color="#fff"/>
-                  </div>
-                :<Icon size={20} color={tab===id?C.green:C.sandDark} strokeWidth={tab===id?2:1.5}/>}
-              {!accent&&<span style={{fontSize:10,fontFamily:SANS,fontWeight:tab===id?600:400,
-                color:tab===id?C.green:C.inkSoft,letterSpacing:'0'}}>{label}</span>}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Export modal */}
+      {showExport && (
+        <ExportModal 
+          year={year} 
+          month={month} 
+          txns={txns} 
+          bankImports={imports}
+          billPayments={billPayments}
+          billRules={billRules}
+          onClose={() => setShowExport(false)}
+          showToast={showToast}
+          C={C}
+          SERIF={SERIF}
+          SANS={SANS}
+          MONTHS={MONTHS}
+        />
+      )}
+
       {toast&&<Toast msg={toast}/>}
     </div>
   );
