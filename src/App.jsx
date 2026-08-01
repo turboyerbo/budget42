@@ -1504,6 +1504,8 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
   const [amount, setAmount] = useState(bill?.amount ?? '');
   const [day,    setDay]    = useState(bill?.day ?? 1);
   const [cat,    setCat]    = useState(bill?.category || 'other');
+  const [recurring, setRecurring] = useState(bill?.recurring ?? true);
+  const [paymentType, setPaymentType] = useState(bill?.payment_type || 'service');
   const [busy,   setBusy]   = useState(false);
 
   const isNew = !bill;
@@ -1513,15 +1515,25 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
     if (!valid) return;
     setBusy(true);
     await onSave({
-      key:      bill?.key || 'manual:' + uid(),
-      label:    label.trim(),
-      amount:   Number(amount),
-      day:      Number(day),
-      category: cat,
-      status:   bill?.detected ? 'confirmed' : 'manual',
+      key:           bill?.key || 'manual:' + uid(),
+      label:         label.trim(),
+      amount:        Number(amount),
+      day:           Number(day),
+      category:      cat,
+      status:        bill?.detected ? 'confirmed' : 'manual',
+      recurring:     recurring,
+      payment_type:  paymentType,
+      frequency:     recurring ? 'monthly' : 'one-time',
     });
     setBusy(false);
   }
+
+  const paymentTypes = [
+    {id:'service', label:'Service/Subscription', color:'#0369a1'},
+    {id:'credit_card', label:'Credit Card Payment', color:'#c0392b'},
+    {id:'utility', label:'Utility/Essential', color:'#1a7a4a'},
+    {id:'other', label:'Other', color:'#6b7280'},
+  ];
 
   return (
     <div style={{ position:'fixed', inset:0, zIndex:760,
@@ -1562,6 +1574,33 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
             style={{ flex:1, border:`1px solid ${C.sandDark}`, borderRadius:10,
               padding:'12px 14px', fontSize:16, color:C.ink, background:C.sand,
               outline:'none', fontFamily:SERIF, boxSizing:'border-box' }}/>
+        </div>
+
+        <SL>Is this recurring?</SL>
+        <div style={{ display:'flex', gap:10, marginBottom:14 }}>
+          <button onClick={() => setRecurring(true)} style={{
+            flex:1, padding:'10px 14px', border:`1.5px solid ${recurring ? '#1a7a4a' : C.sandDark}`,
+            background: recurring ? '#1a7a4a' : 'white', color: recurring ? 'white' : C.ink,
+            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:14, fontFamily:SANS, transition:'all 0.12s'
+          }}>Yes, every month</button>
+          <button onClick={() => setRecurring(false)} style={{
+            flex:1, padding:'10px 14px', border:`1.5px solid ${!recurring ? '#c0392b' : C.sandDark}`,
+            background: !recurring ? '#c0392b' : 'white', color: !recurring ? 'white' : C.ink,
+            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:14, fontFamily:SANS, transition:'all 0.12s'
+          }}>No, one-time</button>
+        </div>
+
+        <SL>Type of payment</SL>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
+          {paymentTypes.map(pt => (
+            <button key={pt.id} onClick={() => setPaymentType(pt.id)} style={{
+              padding:'10px 12px', border:`1.5px solid ${paymentType === pt.id ? pt.color : C.sandDark}`,
+              background: paymentType === pt.id ? pt.color + '15' : 'white',
+              color: paymentType === pt.id ? pt.color : C.inkSoft,
+              borderRadius:10, cursor:'pointer', fontWeight: paymentType === pt.id ? 600 : 400,
+              fontSize:12, fontFamily:SANS, transition:'all 0.12s'
+            }}>{pt.label}</button>
+          ))}
         </div>
 
         <SL>Usually charged on the</SL>
@@ -1899,6 +1938,71 @@ create policy "allow all on bill_payments" on bill_payments
 }
 
 // ─── CHARTS TAB ───────────────────────────────────────────────────────────────
+// ─── GOALS TAB ────────────────────────────────────────────────────────────
+export function GoalsTab({txns, bankImports, billPayments, billRules, profile}) {
+  const allTx = [...txns, ...bankImports];
+  const spent = allTx.reduce((a, t) => a + Math.abs(t.amount || 0), 0);
+  const paidBillsThisMonth = billPayments?.length || 0;
+  const totalBills = billRules?.length || 0;
+  
+  const messages = [
+    paidBillsThisMonth > 0 && `Great job! You've paid ${paidBillsThisMonth} bill${paidBillsThisMonth > 1 ? 's' : ''} this month.`,
+    paidBillsThisMonth === totalBills && totalBills > 0 && `🎉 All bills are paid! You're crushing it!`,
+    spent < 500 && `💰 You've been mindful with spending. Keep it up!`,
+    spent > 2000 && `📊 High spending month — good time to review where the money went.`,
+    profile && `Keep going, ${profile.name.split(' ')[0]}! Every dollar saved adds up.`,
+  ].filter(Boolean);
+  
+  const message = messages[0] || `You're doing great! Keep tracking your finances.`;
+  
+  return (
+    <div style={{padding:'16px'}}>
+      <Card style={{textAlign:'center',padding:'24px 16px',marginBottom:16}}>
+        <h2 style={{margin:'0 0 8px',fontFamily:SERIF,fontSize:26,fontWeight:600,color:C.ink}}>
+          💚 {message.split('!')[0]}!
+        </h2>
+        <p style={{margin:'8px 0 0',fontSize:14,color:C.inkMid,fontFamily:SANS}}>
+          {paidBillsThisMonth === totalBills && totalBills > 0 
+            ? 'All bills handled. Now focus on smart spending.' 
+            : 'Keep building better habits.'}
+        </p>
+      </Card>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
+        <Card style={{textAlign:'center',padding:'16px'}}>
+          <p style={{margin:0,fontSize:11,color:C.inkSoft,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.08em'}}>
+            Bills Paid
+          </p>
+          <p style={{margin:'6px 0 0',fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.green}}>
+            {paidBillsThisMonth}/{totalBills}
+          </p>
+        </Card>
+        <Card style={{textAlign:'center',padding:'16px'}}>
+          <p style={{margin:0,fontSize:11,color:C.inkSoft,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.08em'}}>
+            Total Spent
+          </p>
+          <p style={{margin:'6px 0 0',fontFamily:SERIF,fontSize:28,fontWeight:600,color:spent > 2000 ? C.amber : C.green}}>
+            ${spent.toLocaleString('en-CA',{maximumFractionDigits:0})}
+          </p>
+        </Card>
+      </div>
+
+      <Card style={{padding:'16px'}}>
+        <p style={{margin:'0 0 12px',fontSize:13,fontWeight:600,color:C.ink,fontFamily:SANS}}>
+          💡 Tips for Success
+        </p>
+        <ul style={{margin:0,paddingLeft:20,fontSize:13,color:C.inkMid,fontFamily:SANS,lineHeight:1.8}}>
+          <li>Review your bills monthly and mark them as paid</li>
+          <li>Watch for unusual spending patterns</li>
+          <li>Celebrate small wins — every bill paid is progress</li>
+          <li>Use quick-add to log expenses immediately</li>
+          <li>Share goals with your partner for accountability</li>
+        </ul>
+      </Card>
+    </div>
+  );
+}
+
 export function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
   const me=firstName(profile?.name);
   const [view,setView]=useState('month'); // 'month' | 'year'
@@ -3778,7 +3882,22 @@ export default function App() {
       : prev.filter(p => p.key !== bill.key));
     try {
       await setBillPaid(bill.key, year, month, paid, me, bill.label);
-      showToast(paid ? `${bill.label} marked paid` : `${bill.label} marked unpaid`);
+      
+      if(paid) {
+        // Encouragement message when bill is paid
+        const messages = [
+          `✨ Nice! You just paid ${bill.label}!`,
+          `💪 ${bill.label} is handled!`,
+          `🎯 Another bill knocked out!`,
+          `💚 ${bill.label} ✓`,
+          `⚡ One less thing to worry about!`,
+        ];
+        const msg = messages[Math.floor(Math.random() * messages.length)];
+        showToast(msg);
+      } else {
+        showToast(`${bill.label} marked unpaid`);
+      }
+    } catch(e) { showToast('Could not update bill status'); }
     } catch (e) {
       setBillPayments(await getBillPayments(year, month));   // put it back
       showToast('Could not save — ' + e.message);
@@ -3933,6 +4052,7 @@ export default function App() {
     {id:'add',    label:'Add',    Icon:Plus,    accent:true},
     {id:'history',label:'History',Icon:History},
     {id:'bills',  label:'Bills',  Icon:CalendarDays},
+    {id:'goals',  label:'Goals',  Icon:Heart},
     {id:'charts', label:'Charts', Icon:PieChart},
     {id:'upload', label:'Upload', Icon:Upload},
   ];
@@ -4007,6 +4127,8 @@ export default function App() {
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
           billPayments={billPayments} onTogglePaid={toggleBillPaid} profile={profile}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
+      {tab==='goals'   && <GoalsTab txns={txns} bankImports={imports}
+          billPayments={billPayments} billRules={billRules} profile={profile}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}
       {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
