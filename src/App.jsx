@@ -738,7 +738,7 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history,billRules,
-                  onDeleteRow,duplicateCount,onReviewDuplicates}) {
+                  onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -4005,7 +4005,8 @@ export default function App() {
           onChangeCategory={handleChangeCategory}
           onDeleteRow={deleteRow}
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
-          onReviewDuplicates={()=>setShowDupes(true)}/>}
+          onReviewDuplicates={()=>setShowDupes(true)}
+          setQuickAddCat={setQuickAddCat} setTab={setTab}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
