@@ -4,6 +4,12 @@ const URL = import.meta.env.VITE_SUPABASE_URL;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export const supabase = createClient(URL, KEY);
 
+/** Postgres and PostgREST codes for "that table does not exist". */
+const isMissingTable = err =>
+  err?.code === '42P01' || err?.code === 'PGRST205' ||
+  /schema cache|does not exist|not find the table/i.test(err?.message || '');
+
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
 export async function signUp(email, password, meta) {
   const { data, error } = await supabase.auth.signUp({
@@ -110,6 +116,8 @@ export function subscribeToMonth(year, month, onTxn, onSettings, onImport) {
 // Used to notify the other partner that an update was made.
 export function subscribeToPartnerActivity(onChange) {
   const ch = supabase.channel('partner-activity')
+    .on('postgres_changes',{event:'*',schema:'public',table:'bill_payments'},
+      p => onChange({ ...p, table:'bill_payments' }))
     .on('postgres_changes',{event:'*',schema:'public',table:'transactions'},
       p => onChange({ ...p, table:'transactions' }))
     .on('postgres_changes',{event:'*',schema:'public',table:'bank_imports'},
@@ -254,11 +262,6 @@ export async function deleteAllData() {
  */
 const BILLS_LOCAL_KEY = 'b42_bill_rules';
 
-/** Postgres and PostgREST codes for "that table does not exist". */
-const isMissingTable = err =>
-  err?.code === '42P01' || err?.code === 'PGRST205' ||
-  /schema cache|does not exist|not find the table/i.test(err?.message || '');
-
 export let billRulesLocalOnly = false;
 
 function readLocalRules() {
@@ -345,4 +348,82 @@ export async function getMonthEverything(year, month) {
     ...(t.data || []).map(r => ({ ...r, description: r.note || '', _table: 'transactions' })),
     ...(b.data || []).map(r => ({ ...r, _table: 'bank_imports' })),
   ];
+}
+
+// ── Manual bill payments ──────────────────────────────────────────────────────
+/**
+ * A bill ticked off by hand for one month.
+ *
+ * Detection already marks a bill paid when a matching transaction shows up, but
+ * that only works once the statement has been uploaded. Ticking is for the gap
+ * in between: you paid the rent today, the statement arrives in three weeks.
+ *
+ * Keyed by bill + year + month so it never leaks into the following month.
+ * Falls back to this browser if the table has not been created, same as
+ * bill_rules.
+ */
+const PAID_LOCAL_KEY = 'b42_bill_paid';
+
+export let billPaidLocalOnly = false;
+
+const readLocalPaid  = () => {
+  try { return JSON.parse(localStorage.getItem(PAID_LOCAL_KEY) || '[]'); }
+  catch { return []; }
+};
+const writeLocalPaid = rows => {
+  try { localStorage.setItem(PAID_LOCAL_KEY, JSON.stringify(rows)); } catch {}
+};
+
+const paidId = (key, year, month) => `${key}|${year}-${month}`;
+
+export async function getBillPayments(year, month) {
+  try {
+    const { data, error } = await supabase.from('bill_payments')
+      .select('*').eq('year', year).eq('month', month);
+    if (error) throw error;
+    billPaidLocalOnly = false;
+    return data || [];
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billPaidLocalOnly = true;
+    return readLocalPaid().filter(r => r.year === year && r.month === month);
+  }
+}
+
+export async function setBillPaid(key, year, month, paid, who, label) {
+  const row = {
+    id: paidId(key, year, month),
+    key, year, month, label,
+    paid_by: who,
+    paid_at: new Date().toISOString(),
+  };
+  try {
+    if (paid) {
+      const { error } = await supabase.from('bill_payments')
+        .upsert(row, { onConflict: 'id' });
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from('bill_payments')
+        .delete().eq('id', row.id);
+      if (error) throw error;
+    }
+    billPaidLocalOnly = false;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billPaidLocalOnly = true;
+    const rows = readLocalPaid().filter(r => r.id !== row.id);
+    writeLocalPaid(paid ? [...rows, row] : rows);
+  }
+  return row;
+}
+
+export async function syncLocalBillPayments() {
+  const local = readLocalPaid();
+  if (!local.length) return 0;
+  const { error } = await supabase.from('bill_payments')
+    .upsert(local, { onConflict: 'id' });
+  if (error) throw error;
+  writeLocalPaid([]);
+  billPaidLocalOnly = false;
+  return local.length;
 }

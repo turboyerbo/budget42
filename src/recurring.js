@@ -147,24 +147,36 @@ function safeDate(year, month, day) {
  *
  * `today` is injectable so this is testable rather than dependent on the clock.
  */
-export function buildSchedule(recurring, thisMonthTx, year, month, today = new Date()) {
-  const { paid, due } = splitRecurring(recurring, thisMonthTx);
+export function buildSchedule(recurring, thisMonthTx, year, month, today = new Date(),
+                              manualPaid = []) {
+  const { paid } = splitRecurring(recurring, thisMonthTx);
   const paidKeys = new Set(paid.map(r => r.key));
+
+  // Ticked off by hand. Useful in the gap between paying a bill and the
+  // statement arriving, which can be weeks.
+  const manual = new Map(manualPaid.map(p => [p.key, p]));
 
   const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const viewingCurrentMonth =
     year === today.getFullYear() && month === today.getMonth();
 
   const entries = recurring.map(r => {
-    const date     = safeDate(year, month, r.day);
-    const isPaid   = paidKeys.has(r.key);
-    const daysAway = Math.round((date - midnight) / DAY);
+    const date       = safeDate(year, month, r.day);
+    const seenInData = paidKeys.has(r.key);
+    const tick       = manual.get(r.key);
+    const daysAway   = Math.round((date - midnight) / DAY);
 
     let status = 'due';
-    if (isPaid) status = 'paid';
+    if (seenInData || tick) status = 'paid';
     else if (viewingCurrentMonth && daysAway < 0) status = 'overdue';
 
-    return { ...r, date, daysAway, status, viewingCurrentMonth };
+    return {
+      ...r, date, daysAway, status, viewingCurrentMonth,
+      seenInData,                       // a matching transaction exists
+      tickedBy:  tick?.paid_by || null, // who ticked it, if anyone
+      tickedAt:  tick?.paid_at || null,
+      manualOnly: !!tick && !seenInData,
+    };
   });
 
   // Soonest first, but anything overdue floats to the top

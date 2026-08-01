@@ -17,6 +17,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
+         getBillPayments, setBillPaid, syncLocalBillPayments,
          deleteManyRows, getMonthEverything } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
@@ -1607,7 +1608,8 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
-                          billRules, onSaveRule, onDeleteRule, showToast, billsLocal}) {
+                          billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
+                          billPayments, onTogglePaid, profile}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
 
   const detected = detectRecurring(history || []);
@@ -1615,7 +1617,8 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 
   const confirmed  = bills.filter(b => b.confidence === 'high');
   const suggested  = bills.filter(b => b.confidence !== 'high');
-  const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month);
+  const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month,
+                       new Date(), billPayments || []);
   const weekTotal  = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
 
   async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
@@ -1635,41 +1638,72 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
     const c    = allCats.find(x => x.id === e.category) || { icon:'Package', color:C.inkSoft };
     const st   = STATUS[e.status] || STATUS.due;
     const done = e.status === 'paid';
+    const lockedByData = e.seenInData;   // came from a statement, cannot be un-ticked
+
     return (
-      <button onClick={onTap} style={{ display:'flex', alignItems:'center', gap:11,
-        padding:'12px 18px', width:'100%', border:'none', background:'none',
-        cursor:'pointer', textAlign:'left' }}>
-        <div style={{ width:34, height:34, borderRadius:10, background:c.color+'18',
-          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
-          opacity: done ? 0.5 : 1 }}>
-          <CatIcon name={c.icon} size={16} color={c.color}/>
-        </div>
-        <div style={{ flex:1, minWidth:0 }}>
-          <p style={{ margin:0, fontSize:14, fontFamily:SANS,
-            color: done ? C.inkSoft : C.ink,
-            textDecoration: done ? 'line-through' : 'none',
-            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-            {e.label}
-            {e.edited && <span style={{ marginLeft:6, fontSize:9, fontWeight:700,
-              color:C.inkSoft, letterSpacing:'0.04em' }}>EDITED</span>}
-          </p>
-          <p style={{ margin:'2px 0 0', fontSize:11, fontFamily:SANS,
-            color: e.status === 'overdue' ? C.red : C.inkSoft }}>
-            {e.date
-              ? e.date.toLocaleDateString('en-CA', { weekday:'short', month:'short', day:'numeric' })
-              : `around the ${e.day}${e.day===1?'st':e.day===2?'nd':e.day===3?'rd':'th'}`}
-            {e.viewingCurrentMonth && e.daysAway != null ? ' · ' + relativeDay(e.daysAway) : ''}
-            {e.varies ? ' · varies' : ''}
-          </p>
-        </div>
-        <div style={{ textAlign:'right', flexShrink:0 }}>
-          <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
-            color: done ? C.inkSoft : C.ink }}>{fmt(e.amount)}</p>
-          <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.06em',
-            color:st.color, fontFamily:SANS }}>{st.label}</span>
-        </div>
-        <ChevronRight size={14} color={C.sandDark} style={{ flexShrink:0 }}/>
-      </button>
+      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'12px 14px 12px 12px' }}>
+        {/* Tick it off yourself */}
+        <button
+          onClick={() => { if (!lockedByData) onTogglePaid(e, !done); }}
+          disabled={lockedByData}
+          title={lockedByData
+            ? 'Already matched to a transaction in your statements'
+            : done ? 'Mark as not paid' : 'Mark as paid'}
+          style={{ border:'none', background:'none', padding:4, flexShrink:0,
+            cursor: lockedByData ? 'default' : 'pointer' }}>
+          <div style={{ width:22, height:22, borderRadius:6,
+            border:`1.5px solid ${done ? C.green : C.sandDark}`,
+            background: done ? C.green : 'transparent',
+            opacity: lockedByData ? 0.55 : 1,
+            display:'flex', alignItems:'center', justifyContent:'center' }}>
+            {done && <Check size={13} color="#fff" strokeWidth={3}/>}
+          </div>
+        </button>
+
+        <button onClick={onTap} style={{ display:'flex', alignItems:'center', gap:11,
+          flex:1, minWidth:0, border:'none', background:'none',
+          cursor:'pointer', textAlign:'left', padding:0 }}>
+          <div style={{ width:32, height:32, borderRadius:9, background:c.color+'18',
+            display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+            opacity: done ? 0.5 : 1 }}>
+            <CatIcon name={c.icon} size={15} color={c.color}/>
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <p style={{ margin:0, fontSize:14, fontFamily:SANS,
+              color: done ? C.inkSoft : C.ink,
+              textDecoration: done ? 'line-through' : 'none',
+              textDecorationColor: done ? C.green : 'transparent',
+              textDecorationThickness: '1.5px',
+              overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {e.label}
+              {e.edited && <span style={{ marginLeft:6, fontSize:9, fontWeight:700,
+                color:C.inkSoft, letterSpacing:'0.04em' }}>EDITED</span>}
+            </p>
+            <p style={{ margin:'2px 0 0', fontSize:11, fontFamily:SANS,
+              color: e.status === 'overdue' ? C.red : done ? C.green : C.inkSoft }}>
+              {e.manualOnly
+                ? `ticked off by ${e.tickedBy || 'someone'}`
+                : e.seenInData
+                ? 'matched in your statements'
+                : <>
+                    {e.date
+                      ? e.date.toLocaleDateString('en-CA', { weekday:'short', month:'short', day:'numeric' })
+                      : `around the ${e.day}`}
+                    {e.viewingCurrentMonth && e.daysAway != null ? ' · ' + relativeDay(e.daysAway) : ''}
+                    {e.varies ? ' · varies' : ''}
+                  </>}
+            </p>
+          </div>
+          <div style={{ textAlign:'right', flexShrink:0 }}>
+            <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
+              color: done ? C.inkSoft : C.ink,
+              textDecoration: done ? 'line-through' : 'none' }}>{fmt(e.amount)}</p>
+            <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.06em',
+              color:st.color, fontFamily:SANS }}>{st.label}</span>
+          </div>
+          <ChevronRight size={14} color={C.sandDark} style={{ flexShrink:0 }}/>
+        </button>
+      </div>
     );
   };
 
@@ -1732,9 +1766,9 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
           </p>
           <p style={{ margin:'0 0 8px', fontSize:12, color:'#92400e',
             fontFamily:SANS, lineHeight:1.6 }}>
-            Everything here works, but your partner will not see these changes until
-            the table exists. Run this once in Supabase → SQL Editor, then reload —
-            anything you have already saved is uploaded automatically.
+            Everything here works, including ticking bills off, but your partner will
+            not see it until these tables exist. Run this once in Supabase → SQL
+            Editor, then reload — anything already saved is uploaded automatically.
           </p>
           <pre style={{ margin:0, background:'rgba(0,0,0,0.06)', borderRadius:8,
             padding:'10px 12px', fontSize:10, lineHeight:1.6, color:'#92400e',
@@ -1746,6 +1780,15 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 );
 alter table bill_rules enable row level security;
 create policy "allow all on bill_rules" on bill_rules
+  for all using (true) with check (true);
+
+create table if not exists bill_payments (
+  id text primary key, key text, year int, month int,
+  label text, paid_by text,
+  paid_at timestamptz default now()
+);
+alter table bill_payments enable row level security;
+create policy "allow all on bill_payments" on bill_payments
   for all using (true) with check (true);`}</pre>
         </div>
       )}
@@ -1768,8 +1811,9 @@ create policy "allow all on bill_rules" on bill_rules
       <Section title="Coming up"
         items={sched.entries.filter(e => e.status === 'due')}
         note={weekTotal > 0 ? `${fmt(weekTotal)} of this lands within seven days.` : null}/>
-      <Section title="Already charged this month"
-        items={sched.entries.filter(e => e.status === 'paid')}/>
+      <Section title="Paid this month"
+        items={sched.entries.filter(e => e.status === 'paid')}
+        note="Ticked off by either of you, or matched to a transaction in an uploaded statement."/>
 
       {confirmed.length === 0 && (
         <Card style={{ textAlign:'center', padding:'32px 24px' }}>
@@ -3031,6 +3075,15 @@ function describeChange(payload, allCats) {
   const who  = (row.who || 'Your partner');
   const name = who.charAt(0).toUpperCase() + who.slice(1).split(' ')[0];
 
+  if (payload.table === 'bill_payments') {
+    const label = row.label || 'a bill';
+    const by    = row.paid_by || 'Your partner';
+    const cap   = by.charAt(0).toUpperCase() + by.slice(1).split(' ')[0];
+    return payload.eventType === 'DELETE'
+      ? { who: cap, text: `${cap} marked ${label} as not paid` }
+      : { who: cap, text: `${cap} paid ${label}` };
+  }
+
   if (payload.table === 'budget_settings') {
     return { who: name, text: `${name} updated the income or credit-card targets` };
   }
@@ -3561,6 +3614,7 @@ export default function App() {
   const [billRules,  setBillRules ]=useState([]);
   const [showDupes,  setShowDupes ]=useState(false);
   const [billsLocal, setBillsLocal]=useState(false);
+  const [billPayments,setBillPayments]=useState([]);
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
@@ -3607,6 +3661,12 @@ export default function App() {
     loadAll();
   },[authState,month,year]);
 
+  // Ticked-off bills are per month, so reload them when the month changes
+  useEffect(()=>{
+    if(authState!=='app'||!SUPABASE_READY)return;
+    getBillPayments(year,month).then(setBillPayments).catch(()=>{});
+  },[authState,year,month]);
+
   async function loadAll(){
     try{
       const [t,b,s,ai,hist]=await Promise.all([getTxns(year,month),getBankImports(year,month),
@@ -3616,8 +3676,10 @@ export default function App() {
         // If the bill_rules table exists but local edits are waiting, push them up
         try { await syncLocalBillRules(); } catch {}
         setBillRules(await getBillRules());
+        try { await syncLocalBillPayments(); } catch {}
+        setBillPayments(await getBillPayments(year, month));
         const mod = await import('./supabase.js');
-        setBillsLocal(!!mod.billRulesLocalOnly);
+        setBillsLocal(!!mod.billRulesLocalOnly || !!mod.billPaidLocalOnly);
       } catch {}
       setTxns(t);setImports(b);
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
@@ -3675,6 +3737,23 @@ export default function App() {
     await loadAll();
   }
 
+  /** Tick a bill off, or untick it. Marks it paid for this month only. */
+  async function toggleBillPaid(bill, paid) {
+    const me = profile?.name || 'someone';
+    // Update the screen first — waiting on the network to see a tick land feels broken
+    setBillPayments(prev => paid
+      ? [...prev.filter(p => p.key !== bill.key),
+         { key:bill.key, year, month, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
+      : prev.filter(p => p.key !== bill.key));
+    try {
+      await setBillPaid(bill.key, year, month, paid, me, bill.label);
+      showToast(paid ? `${bill.label} marked paid` : `${bill.label} marked unpaid`);
+    } catch (e) {
+      setBillPayments(await getBillPayments(year, month));   // put it back
+      showToast('Could not save — ' + e.message);
+    }
+  }
+
   async function saveBillRule(rule) {
     try {
       await upsertBillRule(rule);
@@ -3721,11 +3800,15 @@ export default function App() {
 
     const unsub=subscribeToPartnerActivity(payload=>{
       const row=payload.new||payload.old||{};
-      const actor=(row.who||'').toLowerCase();
+      const actor=(row.who||row.paid_by||'').toLowerCase();
       // Ignore our own writes — only surface the partner's changes
       if(actor && me && (actor.includes(me)||me.includes(actor)))return;
       // budget_settings rows carry no 'who'; skip rather than misattribute
       if(!actor && payload.table==='budget_settings')return;
+
+      if(payload.table==='bill_payments'){
+        getBillPayments(year,month).then(setBillPayments).catch(()=>{});
+      }
 
       const {who,text}=describeChange(payload,allCats);
       const entry={id:uid(),who,text,at:Date.now()};
@@ -3737,7 +3820,7 @@ export default function App() {
       showToast(text);
     });
     return unsub;
-  },[authState,profile,customCats.length]);
+  },[authState,profile,customCats.length,year,month]);
 
   function clearNotifs(){
     setNotifs([]);
@@ -3872,6 +3955,7 @@ export default function App() {
       {tab==='bills'   && <BillsTab history={history} txns={txns}
           bankImports={imports} allCats={allCats} year={year} month={month}
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
+          billPayments={billPayments} onTogglePaid={toggleBillPaid} profile={profile}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}/>}

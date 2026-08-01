@@ -1029,3 +1029,51 @@ create policy "allow all on bill_rules" on bill_rules
 The build in the screenshot predates v26, which replaced the old 15 categories
 with the 25 from your budget. Rent + home is there now, along with Electricity,
 Cell phone and Rental insurance, and the bill editor offers all of them.
+
+---
+
+## v28 — tick bills off by hand
+
+### Optional migration
+
+```sql
+create table if not exists bill_payments (
+  id text primary key, key text, year int, month int,
+  label text, paid_by text,
+  paid_at timestamptz default now()
+);
+alter table bill_payments enable row level security;
+create policy "allow all on bill_payments" on bill_payments
+  for all using (true) with check (true);
+alter publication supabase_realtime add table bill_payments;
+```
+
+Without it, ticks save to the browser and sync up once the table appears —
+same as `bill_rules`.
+
+### Why manual ticking is needed at all
+
+A bill is already marked paid when a matching transaction turns up. That only
+works after the statement is uploaded, which can be weeks after you paid the
+rent. Ticking covers the gap.
+
+Each bill row has a checkbox. Ticking strikes the name and amount through in
+green, moves it to "Paid this month", and takes it out of the outstanding total.
+
+The two mechanisms coexist rather than compete:
+
+- ticked by hand → shows *ticked off by ness*, and can be unticked
+- matched in a statement → shows *matched in your statements*, and the checkbox
+  is disabled, since unticking would contradict a transaction that exists
+
+Ticks are stored per bill **per month**, so July's rent being paid does not make
+August's look paid. Verified.
+
+### Partner notification
+
+Ticking sends a realtime notification: *"Ness paid Rent"*, or *"Ness marked Rent
+as not paid"* if unticked. It appears as a toast and in the bell panel, and the
+other person's bill list updates without a refresh.
+
+The checkbox updates on screen before the network call returns, and reverts if
+the save fails.

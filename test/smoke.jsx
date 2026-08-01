@@ -86,10 +86,18 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
 })));
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
-  showToast: noop, billsLocal: false };
+  showToast: noop, billsLocal: false,
+  billPayments: [], onTogglePaid: noop, profile: { name:'Jordan' } };
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6, ...billProps })));
+
+check('render BillsTab (bills ticked off)', () => renderToString(React.createElement(BillsTab, {
+  history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+  ...billProps, billPayments: [
+    { key:'stela rent', year:2026, month:6, label:'Rent', paid_by:'ness',
+      paid_at:'2026-07-27T12:00:00Z' },
+  ] })));
 
 check('render BillsTab (local-only mode)', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6,
