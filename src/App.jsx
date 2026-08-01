@@ -148,6 +148,15 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, o
     const billsPaid = bills?.length || 0;
     const totalBills = rules?.length || 0;
     
+    // Build transaction rows separately
+    const txnRows = txns.slice(0, 20).map(t => 
+      `<tr>
+        <td>${t.date}</td>
+        <td>${t.description || t.note || 'Transaction'}</td>
+        <td class="amount">$${Math.abs(t.amount).toFixed(2)}</td>
+      </tr>`
+    ).join('');
+    
     const html = `
 <!DOCTYPE html>
 <html>
@@ -201,13 +210,7 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, o
         </tr>
       </thead>
       <tbody>
-        ${txns.slice(0, 20).map(t => \`
-          <tr>
-            <td>\${t.date}</td>
-            <td>\${t.description || t.note || 'Transaction'}</td>
-            <td class="amount">$\${Math.abs(t.amount).toFixed(2)}</td>
-          </tr>
-        \`).join('')}
+        ${txnRows}
       </tbody>
     </table>
   </div>
