@@ -528,6 +528,76 @@ export function ProcessingModal({stage, fileName, rowCount, aiCount}) {
 }
 
 // ─── Auth Screen (Sign Up / Sign In) ─────────────────────────────────────────
+// ─── DISCLAIMER MODAL ─────────────────────────────────────────────────────────
+function DisclaimerModal({onAcknowledge}) {
+  return (
+    <div style={{
+      position:'fixed', inset:0, zIndex:999,
+      display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'center',
+      background:'rgba(26,26,24,0.7)', padding:20
+    }}>
+      <div style={{
+        background:C.white, borderRadius:16, padding:32,
+        maxWidth:400, textAlign:'center', animation:'slideUp 0.3s ease'
+      }}>
+        <div style={{fontSize:48, marginBottom:16}}>🔒</div>
+        
+        <h1 style={{
+          fontFamily:SERIF, fontSize:24, fontWeight:600, margin:'0 0 16px', color:C.ink
+        }}>
+          Your Privacy Matters
+        </h1>
+        
+        <div style={{
+          background:C.sand, borderRadius:12, padding:16, marginBottom:20,
+          textAlign:'left'
+        }}>
+          <p style={{
+            margin:'0 0 12px', fontSize:14, color:C.ink, lineHeight:1.8, fontFamily:SANS
+          }}>
+            <strong>We do not:</strong>
+          </p>
+          <ul style={{
+            margin:0, paddingLeft:20, fontSize:14, color:C.inkMid, fontFamily:SANS, lineHeight:1.8
+          }}>
+            <li>Use, take, or store your data</li>
+            <li>Track you or your activity</li>
+            <li>Collect any personal information</li>
+            <li>Share data with third parties</li>
+          </ul>
+          
+          <p style={{
+            margin:'12px 0 0', fontSize:14, color:C.ink, fontFamily:SANS, lineHeight:1.8
+          }}>
+            <strong>This is a purely educational tool.</strong>
+          </p>
+        </div>
+        
+        <p style={{
+          margin:'0 0 20px', fontSize:13, color:C.inkMid, fontFamily:SANS, lineHeight:1.6
+        }}>
+          Have suggestions or found a bug? We'd love to hear from you!
+        </p>
+        
+        <a href="mailto:yerbury@gmail.com" style={{
+          display:'inline-block', marginBottom:16, fontSize:13, fontWeight:600,
+          color:C.green, textDecoration:'none', fontFamily:SANS, padding:'8px 0'
+        }}>
+          ✉️ Send feedback: yerbury@gmail.com
+        </a>
+        
+        <button onClick={onAcknowledge} style={{
+          width:'100%', border:'none', background:C.green, color:'#fff',
+          padding:'14px 20px', borderRadius:12, fontSize:14, fontWeight:600,
+          cursor:'pointer', fontFamily:SANS, transition:'all 0.2s'
+        }}>
+          I understand • Let's go
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AuthScreen({onAuth}) {
   const [mode,     setMode]    = useState('signup'); // 'signup' | 'signin'
   const [name,     setName]    = useState('');
@@ -538,6 +608,9 @@ export function AuthScreen({onAuth}) {
   const [loading,  setLoading] = useState(false);
   const [error,    setError]   = useState(null);
   const [done,     setDone]    = useState(false); // after signup: show "invite partner" screen
+  const [disclaimerAcknowledged, setDisclaimerAcknowledged] = useState(
+    !!localStorage.getItem('budget_disclaimer_v1')
+  );
 
   async function handleSignUp(e) {
     e.preventDefault();
@@ -689,6 +762,13 @@ export function AuthScreen({onAuth}) {
           Your data is stored securely in Supabase.<br/>
           Both partners create separate accounts that share the same budget.
         </p>
+      )}
+      
+      {!disclaimerAcknowledged && (
+        <DisclaimerModal onAcknowledge={() => {
+          localStorage.setItem('budget_disclaimer_v1', 'true');
+          setDisclaimerAcknowledged(true);
+        }} />
       )}
     </div>
   );
