@@ -126,6 +126,75 @@ function BottomBar({profile, onSettings, onViewChange, view, onExport, onEmailPr
   );
 }
 
+// ─── PARTNER ACTIVITY HELPER MODAL ───────────────────────────────────────────
+function PartnerActivityHelper({unreviewed, onClose, C, SERIF, SANS}) {
+  if(!unreviewed || unreviewed.length === 0) return null;
+
+  const transactionCount = unreviewed.filter(u => u.table === 'transactions').length;
+  const billCount = unreviewed.filter(u => u.table === 'bill_payments').length;
+  const billRulesCount = unreviewed.filter(u => u.table === 'bill_rules').length;
+
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:850, display:'flex', alignItems:'center', justifyContent:'center'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.65)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:20, padding:'28px 24px', 
+        maxWidth:340, boxShadow:'0 20px 60px rgba(0,0,0,0.3)', animation:'slideUp 0.25s ease'}}>
+        
+        <div style={{textAlign:'center', marginBottom:20}}>
+          <p style={{margin:0, fontSize:28, fontWeight:600, fontFamily:SERIF, color:C.ink}}>
+            👋 Hey, {C.green}welcome back!
+          </p>
+          <p style={{margin:'6px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS}}>
+            Your partner added some new activity
+          </p>
+        </div>
+
+        {transactionCount > 0 && (
+          <div style={{background:C.sand, borderRadius:12, padding:12, marginBottom:12}}>
+            <p style={{margin:0, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+              💰 {transactionCount} new transaction{transactionCount !== 1 ? 's' : ''}
+            </p>
+            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+              Check the History tab to review
+            </p>
+          </div>
+        )}
+
+        {billCount > 0 && (
+          <div style={{background:C.sand, borderRadius:12, padding:12, marginBottom:12}}>
+            <p style={{margin:0, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+              ✅ {billCount} bill{billCount !== 1 ? 's marked' : ' marked'} paid
+            </p>
+            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+              See the Bills tab for details
+            </p>
+          </div>
+        )}
+
+        {billRulesCount > 0 && (
+          <div style={{background:C.sand, borderRadius:12, padding:12, marginBottom:12}}>
+            <p style={{margin:0, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+              📋 {billRulesCount} new bill rule{billRulesCount !== 1 ? 's' : ''}
+            </p>
+            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+              Review in Bills tab
+            </p>
+          </div>
+        )}
+
+        <button onClick={onClose} style={{
+          width:'100%', background:C.green, color:'white', border:'none',
+          borderRadius:12, padding:'12px 20px', fontSize:14, fontWeight:600,
+          fontFamily:SANS, cursor:'pointer', marginTop:16,
+          transition:'all 0.2s'
+        }}>
+          Got it, let's go! 🚀
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── INCOME MODAL ─────────────────────────────────────────────────────────────
 function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
   const [person, setPerson] = React.useState('jordan');
@@ -2031,6 +2100,8 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
   const [amount,setAmount]= useState('');
   const [note,  setNote]  = useState('');
   const [date,  setDate]  = useState(today());
+  const [person,setPerson]= useState('jordan'); // Who spent: jordan or ness
+  const [merchant,setMerchant]= useState(''); // Store, venue, etc.
   const [saving,setSaving]= useState(false);
   const ref=useRef(null);
   useEffect(()=>{ref.current?.focus();},[]);
@@ -2040,8 +2111,8 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
   async function submit() {
     if(!can||saving)return;
     setSaving(true);
-    await onAdd({cat,amount:parseFloat(amount),note:note.trim(),date,who:profile?.name||'unknown'});
-    setCat(null);setAmount('');setNote('');setDate(today());
+    await onAdd({cat,amount:parseFloat(amount),note:note.trim(),date,who:profile?.name||'unknown',person,merchant:merchant.trim()});
+    setCat(null);setAmount('');setNote('');setDate(today());setPerson('jordan');setMerchant('');
     setSaving(false);ref.current?.focus();
   }
   return (
@@ -2080,6 +2151,34 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
             onChange={e=>setNote(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}
             style={{width:'100%',border:'none',outline:'none',fontSize:16,color:C.ink,
               background:'none',fontFamily:SANS,caretColor:C.green}}/>
+        </div>
+        <Divider/>
+        <div style={{padding:'12px 18px'}}>
+          <p style={{margin:'0 0 6px',fontSize:11,color:C.inkSoft,textTransform:'uppercase',
+            letterSpacing:'0.08em',fontFamily:SANS}}>Merchant (store, venue, etc.)</p>
+          <input type="text" placeholder="e.g. Whole Foods, Amazon, Shell Gas" value={merchant}
+            onChange={e=>setMerchant(e.target.value)}
+            style={{width:'100%',border:'none',outline:'none',fontSize:13,color:C.ink,
+              background:C.sand,fontFamily:SANS,padding:'8px 10px',borderRadius:8,caretColor:C.green}}/>
+        </div>
+        <Divider/>
+        <div style={{padding:'12px 18px'}}>
+          <p style={{margin:'0 0 6px',fontSize:11,color:C.inkSoft,textTransform:'uppercase',
+            letterSpacing:'0.08em',fontFamily:SANS}}>Who spent this?</p>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setPerson('jordan')} style={{
+              flex:1,padding:'8px 12px',border:`1.5px solid ${person==='jordan'?C.blue:C.sandDark}`,
+              borderRadius:10,background:person==='jordan'?C.blue+'15':'white',
+              color:person==='jordan'?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
+              cursor:'pointer',transition:'all 0.12s'
+            }}>Jordan</button>
+            <button onClick={()=>setPerson('ness')} style={{
+              flex:1,padding:'8px 12px',border:`1.5px solid ${person==='ness'?C.blue:C.sandDark}`,
+              borderRadius:10,background:person==='ness'?C.blue+'15':'white',
+              color:person==='ness'?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
+              cursor:'pointer',transition:'all 0.12s'
+            }}>Ness</button>
+          </div>
         </div>
         <Divider/>
         <div style={{padding:'12px 18px',display:'flex',gap:12,alignItems:'center'}}>
@@ -3959,11 +4058,13 @@ function describeChange(payload, allCats) {
   const cat   = allCats.find(c => c.id === catId);
   const label = cat ? cat.label : 'a category';
   const amt   = row.amount != null ? fmt(row.amount) : '';
+  const merchant = row.merchant ? ` at ${row.merchant}` : '';
+  const personSpent = row.person ? ` (${row.person})` : '';
 
   if (evt === 'INSERT') {
     return payload.table === 'bank_imports'
       ? { who:name, text:`${name} imported a transaction — ${amt} in ${label}` }
-      : { who:name, text:`${name} added ${amt} to ${label}` };
+      : { who:name, text:`${name} added ${amt} to ${label}${merchant}${personSpent}` };
   }
   if (evt === 'UPDATE') return { who:name, text:`${name} edited a ${label} transaction` };
   if (evt === 'DELETE') return { who:name, text:`${name} removed a transaction` };
@@ -4488,6 +4589,8 @@ export default function App() {
   const [income,     setIncome    ]=useState(DEF_INCOME);
   const [expectedIncome, setExpectedIncome]=useState([]);
   const [showAddIncome,setShowAddIncome]=useState(false);
+  const [unreviewed, setUnreviewed]=useState([]); // Partner transactions not yet reviewed
+  const [showActivityHelper, setShowActivityHelper]=useState(false); // Show helper on login
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
@@ -4722,6 +4825,13 @@ export default function App() {
         try{localStorage.setItem(NOTIFS_KEY,JSON.stringify(next));}catch{}
         return next;
       });
+      
+      // Track unreviewed partner transactions for helper modal
+      if(payload.table === 'transactions' || payload.table === 'bill_payments' || payload.table === 'bill_rules'){
+        setUnreviewed(prev => [...prev, { ...payload, displayText: text }].slice(0,20));
+        setShowActivityHelper(true); // Show helper when partner activity comes in
+      }
+      
       showToast(text);
     });
     return unsub;
@@ -4935,6 +5045,17 @@ export default function App() {
         nameColor={nameColor}
         nameInitials={nameInitials}
       />
+
+      {/* Partner activity helper modal */}
+      {showActivityHelper && unreviewed.length > 0 && (
+        <PartnerActivityHelper
+          unreviewed={unreviewed}
+          onClose={() => setShowActivityHelper(false)}
+          C={C}
+          SERIF={SERIF}
+          SANS={SANS}
+        />
+      )}
 
       {/* Income modal */}
       {showAddIncome && (
