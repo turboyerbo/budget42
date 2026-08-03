@@ -4450,6 +4450,7 @@ const SUPABASE_READY=!!(import.meta.env.VITE_SUPABASE_URL&&import.meta.env.VITE_
 const CUSTOM_CATS_KEY='b42_custom_cats';
 const CAT_TARGETS_KEY='b42_cat_targets';
 const NOTIFS_KEY='b42_notifs';
+const EXPECTED_INCOME_KEY='b42_expected_income';
 const DEF_INCOME={jordan:3984.44,ness:800,sunlife:0};
 
 export default function App() {
@@ -4500,6 +4501,7 @@ export default function App() {
       const cc=localStorage.getItem(CUSTOM_CATS_KEY); if(cc)setCustomCats(JSON.parse(cc));
       const ct=localStorage.getItem(CAT_TARGETS_KEY); if(ct)setCatTargets(JSON.parse(ct));
       const nf=localStorage.getItem(NOTIFS_KEY);      if(nf)setNotifs(JSON.parse(nf));
+      const ei=localStorage.getItem(EXPECTED_INCOME_KEY); if(ei)setExpectedIncome(JSON.parse(ei));
     } catch {}
 
     if(!SUPABASE_READY){setAuthState('auth');return;}
@@ -4746,6 +4748,13 @@ export default function App() {
   useEffect(()=>{ checkAI()
     .then(ok=>{ setAiOn(ok); setAiDiag(aiDiagnostics()); })
     .catch(()=>setAiOn(false)); },[]);
+
+  // Save expected income to localStorage whenever it changes
+  useEffect(()=>{
+    if(typeof window !== 'undefined' && expectedIncome && expectedIncome.length > 0){
+      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(expectedIncome));
+    }
+  }, [expectedIncome]);
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(null),2600);}
   function changeMonth(dir){let m=month+dir,y=year;if(m<0){m=11;y--;}if(m>11){m=0;y++;}setMonth(m);setYear(y);}
