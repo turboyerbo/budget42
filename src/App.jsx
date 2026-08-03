@@ -59,7 +59,7 @@ function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
 }
 
 // ─── BOTTOM BAR ───────────────────────────────────────────────────────────────
-function BottomBar({profile, onSettings, onViewChange, view, onExport, C, SANS, nameColor, nameInitials}) {
+function BottomBar({profile, onSettings, onViewChange, view, onExport, onEmailPreview, C, SANS, nameColor, nameInitials}) {
   const color = nameColor(profile?.name);
   return (
     <div style={{
@@ -67,13 +67,13 @@ function BottomBar({profile, onSettings, onViewChange, view, onExport, C, SANS, 
       background:C.white, borderTop:`1px solid ${C.sandMid}`,
       padding:'8px 16px', paddingBottom:`max(8px, env(safe-area-inset-bottom, 0px))`,
       display:'flex', alignItems:'center', justifyContent:'space-between',
-      gap:12, height:60
+      gap:12, height:60, overflowX:'auto'
     }}>
-      <div style={{display:'flex', gap:8, alignItems:'center'}}>
+      <div style={{display:'flex', gap:8, alignItems:'center', minWidth:0}}>
         <button onClick={onSettings} style={{
           padding:'6px 12px', border:`1px solid ${C.sandDark}`,
           background:C.white, borderRadius:8, cursor:'pointer',
-          fontSize:12, fontFamily:SANS, display:'flex', gap:4, alignItems:'center'
+          fontSize:12, fontFamily:SANS, display:'flex', gap:4, alignItems:'center', flexShrink:0
         }}>
           <Settings size={14} />
           Settings
@@ -82,25 +82,33 @@ function BottomBar({profile, onSettings, onViewChange, view, onExport, C, SANS, 
           padding:'6px 12px', border:`1px solid ${C.sandDark}`,
           background: view==='combined' ? color+'20' : C.white,
           borderRadius:8, cursor:'pointer', fontSize:12, fontFamily:SANS,
-          color: view==='combined' ? color : C.inkMid
+          color: view==='combined' ? color : C.inkMid, flexShrink:0
         }}>
           {view==='combined' ? '👥 Combined' : '👤 Just me'}
         </button>
       </div>
       
-      <div style={{display:'flex', gap:8, alignItems:'center'}}>
+      <div style={{display:'flex', gap:8, alignItems:'center', minWidth:0}}>
+        <button onClick={onEmailPreview} style={{
+          padding:'6px 12px', border:`1px solid ${C.blue}22`,
+          background:C.blue+'10', borderRadius:8, cursor:'pointer',
+          fontSize:12, fontFamily:SANS, fontWeight:600, color:C.blue,
+          display:'flex', gap:4, alignItems:'center', flexShrink:0
+        }} title="Preview weekly email">
+          📧
+        </button>
         <button onClick={onExport} style={{
           padding:'6px 12px', border:`1px solid ${C.green}`,
           background:C.green+'20', borderRadius:8, cursor:'pointer',
           fontSize:12, fontFamily:SANS, fontWeight:600, color:C.green,
-          display:'flex', gap:4, alignItems:'center'
+          display:'flex', gap:4, alignItems:'center', flexShrink:0
         }}>
           <Download size={14} />
           Export
         </button>
         <div style={{
           padding:'4px 8px', borderRadius:99, background:color+'15',
-          display:'flex', alignItems:'center', gap:6
+          display:'flex', alignItems:'center', gap:6, flexShrink:0
         }}>
           <div style={{
             width:24, height:24, borderRadius:'50%', background:color,
@@ -113,6 +121,278 @@ function BottomBar({profile, onSettings, onViewChange, view, onExport, C, SANS, 
             {profile?.name?.split(' ')[0] || 'User'}
           </span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── INCOME MODAL ─────────────────────────────────────────────────────────────
+function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
+  const [person, setPerson] = React.useState('jordan');
+  const [amount, setAmount] = React.useState('');
+  const [date, setDate] = React.useState('');
+  const [recurring, setRecurring] = React.useState(false);
+  const [frequency, setFrequency] = React.useState('monthly');
+  const [description, setDescription] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  async function save() {
+    if (!person || !amount || !date) return;
+    setBusy(true);
+    await onAdd({
+      person: person,
+      amount: parseFloat(amount),
+      date: date,
+      recurring: recurring,
+      frequency: frequency,
+      description: description.trim(),
+      id: 'income-' + Date.now(),
+    });
+    setBusy(false);
+    onClose();
+  }
+
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', flexDirection:'column', justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:'20px 20px 0 0', padding:'22px 20px 34px', animation:'slideUp 0.25s ease', maxHeight:'88dvh', overflowY:'auto'}}>
+        
+        <div style={{display:'flex', alignItems:'center', marginBottom:16}}>
+          <h2 style={{flex:1, margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink}}>
+            Expected Income
+          </h2>
+          <button onClick={onClose} style={{border:'none', background:'none', padding:6, cursor:'pointer'}}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:14}}>
+          <div>
+            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+              Who
+            </label>
+            <select value={person} onChange={e => setPerson(e.target.value)} style={{
+              width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+              background:C.white, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', boxSizing:'border-box'
+            }}>
+              <option value="jordan">Jordan</option>
+              <option value="ness">Ness</option>
+              <option value="both">Both</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+              Amount ($)
+            </label>
+            <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="3500"
+              style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+                background:C.sand, color:C.ink, fontFamily:SERIF, fontSize:14, outline:'none', boxSizing:'border-box'}}/>
+          </div>
+        </div>
+
+        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+          Date (when is money coming in?)
+        </label>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} 
+          style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+            background:C.sand, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
+
+        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+          Description
+        </label>
+        <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Paycheck, bonus, gift, etc"
+          style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+            background:C.sand, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
+
+        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:8}}>
+          Is this recurring?
+        </label>
+        <div style={{display:'flex', gap:10, marginBottom:14}}>
+          <button onClick={() => setRecurring(false)} style={{
+            flex:1, padding:'10px 14px', border:`1.5px solid ${!recurring ? '#1a7a4a' : C.sandDark}`,
+            background: !recurring ? '#1a7a4a' : 'white', color: !recurring ? 'white' : C.ink,
+            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:13, fontFamily:SANS, transition:'all 0.12s'
+          }}>One-time</button>
+          <button onClick={() => setRecurring(true)} style={{
+            flex:1, padding:'10px 14px', border:`1.5px solid ${recurring ? '#1a7a4a' : C.sandDark}`,
+            background: recurring ? '#1a7a4a' : 'white', color: recurring ? 'white' : C.ink,
+            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:13, fontFamily:SANS, transition:'all 0.12s'
+          }}>Recurring</button>
+        </div>
+
+        {recurring && (
+          <>
+            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+              Frequency
+            </label>
+            <select value={frequency} onChange={e => setFrequency(e.target.value)} style={{
+              width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+              background:C.white, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'
+            }}>
+              <option value="weekly">Weekly</option>
+              <option value="bi-weekly">Bi-weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+          </>
+        )}
+
+        <button onClick={save} disabled={busy || !person || !amount || !date} style={{
+          width:'100%', border:'none', background:C.green, color:'#fff',
+          padding:'14px 20px', borderRadius:12, fontSize:14, fontWeight:600,
+          cursor:busy ? 'default' : 'pointer', opacity:busy ? 0.6 : 1,
+          fontFamily:SANS, transition:'all 0.2s'
+        }}>
+          {busy ? 'Saving...' : 'Add Expected Income'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── WEEKLY EMAIL PREVIEW MODAL ───────────────────────────────────────────────
+function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, profile, year, month, onClose, showToast, C, SERIF, SANS}) {
+  const [sending, setSending] = React.useState(false);
+  const allTx = [...txns, ...(bankImports||[])];
+  
+  // Calculate weekly summary
+  const now = new Date();
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 6);
+  
+  const weekTxns = allTx.filter(t => {
+    const txDate = new Date(t.date);
+    return txDate >= startOfWeek && txDate <= endOfWeek;
+  });
+  
+  const totalSpent = weekTxns
+    .filter(t => !['income', 'cc_payment', '_skip', 'transfer'].includes(t.category||t.cat))
+    .reduce((a, t) => a + Math.abs(t.amount||0), 0);
+  
+  const upcomingBills = (billRules || [])
+    .slice(0, 5)
+    .map(b => ({
+      label: b.label,
+      amount: b.amount,
+      date: `~${b.day}th`,
+    }));
+  
+  const billsPaidThisWeek = billPayments?.length || 0;
+
+  async function sendTestEmail() {
+    setSending(true);
+    try {
+      const email = profile?.email || profile?.name?.toLowerCase().replace(' ', '.') + '@example.com';
+      const response = await fetch('/.netlify/functions/send-weekly-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email,
+          spending: { total: totalSpent },
+          bills: { upcoming: upcomingBills, paid: billsPaidThisWeek },
+          income: 0,
+          startDate: startOfWeek.toLocaleDateString('en-CA'),
+          endDate: endOfWeek.toLocaleDateString('en-CA'),
+        }),
+      });
+      
+      if (response.ok) {
+        showToast(`✅ Test email sent to ${email}!`);
+        onClose();
+      } else {
+        showToast('Could not send email (service not configured yet)');
+      }
+    } catch (e) {
+      showToast('Error sending email: ' + e.message);
+    }
+    setSending(false);
+  }
+
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', flexDirection:'column', justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:'20px 20px 0 0', padding:'22px 20px 34px', animation:'slideUp 0.25s ease', maxHeight:'88dvh', overflowY:'auto'}}>
+        
+        <div style={{display:'flex', alignItems:'center', marginBottom:16}}>
+          <h2 style={{flex:1, margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink}}>
+            Weekly Summary Email
+          </h2>
+          <button onClick={onClose} style={{border:'none', background:'none', padding:6, cursor:'pointer'}}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        <div style={{background:C.sand, borderRadius:12, padding:16, marginBottom:16}}>
+          <p style={{margin:'0 0 12px', fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+            📧 Email Preview
+          </p>
+          <div style={{background:'white', borderRadius:10, padding:14, fontSize:13, color:C.ink, fontFamily:SANS, lineHeight:1.6}}>
+            <p style={{margin:'0 0 10px', fontWeight:600}}>📊 Weekly Budget Summary</p>
+            <p style={{margin:0, fontSize:12, color:C.inkSoft}}>
+              {startOfWeek.toLocaleDateString('en-CA')} — {endOfWeek.toLocaleDateString('en-CA')}
+            </p>
+            
+            <div style={{margin:'12px 0', padding:'12px 0', borderTop:`1px solid ${C.sandMid}`, borderBottom:`1px solid ${C.sandMid}`}}>
+              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12}}>
+                <div style={{textAlign:'center'}}>
+                  <p style={{margin:0, fontSize:11, color:C.inkSoft, textTransform:'uppercase'}}>Total Spent</p>
+                  <p style={{margin:'6px 0 0', fontSize:18, fontWeight:600, color:C.ink}}>
+                    ${totalSpent.toFixed(2)}
+                  </p>
+                </div>
+                <div style={{textAlign:'center'}}>
+                  <p style={{margin:0, fontSize:11, color:C.inkSoft, textTransform:'uppercase'}}>Daily Avg</p>
+                  <p style={{margin:'6px 0 0', fontSize:18, fontWeight:600, color:C.ink}}>
+                    ${(totalSpent/7).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {billsPaidThisWeek > 0 && (
+              <p style={{margin:'8px 0', fontSize:12, color:C.green}}>
+                ✅ {billsPaidThisWeek} bill{billsPaidThisWeek !== 1 ? 's' : ''} paid
+              </p>
+            )}
+
+            {upcomingBills.length > 0 && (
+              <div style={{margin:'12px 0 0'}}>
+                <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.ink, textTransform:'uppercase'}}>
+                  Upcoming Bills
+                </p>
+                {upcomingBills.map((b, i) => (
+                  <p key={i} style={{margin:'4px 0', fontSize:12, color:C.inkMid}}>
+                    • {b.label} (${b.amount.toFixed(2)}) — Due {b.date}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <p style={{margin:'0 0 12px', fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
+          <strong>How it works:</strong> An email will be sent every Friday with your week's spending, bills paid, and upcoming deadlines. You can set this up with an external scheduler like EasyCron (free tier available).
+        </p>
+
+        <button onClick={sendTestEmail} disabled={sending} style={{
+          width:'100%', border:'none', background:C.green, color:'#fff',
+          padding:'14px 20px', borderRadius:12, fontSize:14, fontWeight:600,
+          cursor:sending ? 'default' : 'pointer', opacity:sending ? 0.6 : 1,
+          fontFamily:SANS, marginBottom:12, transition:'all 0.2s'
+        }}>
+          {sending ? 'Sending test email...' : '📧 Send Test Email'}
+        </button>
+
+        <button onClick={onClose} style={{
+          width:'100%', border:`1px solid ${C.sandDark}`, background:'white', color:C.ink,
+          padding:'12px 20px', borderRadius:12, fontSize:14, fontWeight:600,
+          cursor:'pointer', fontFamily:SANS, transition:'all 0.2s'
+        }}>
+          Done
+        </button>
       </div>
     </div>
   );
@@ -1103,7 +1383,8 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history,billRules,
-                  onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab}) {
+                  onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
+                  income,setShowAddIncome,billPayments}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -1112,10 +1393,15 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
 
   // Recurring charges are worked out from your own history rather than kept in
   // a hardcoded list. Only what has NOT yet been charged counts as committed —
-  // anything already charged is sitting in `spent`, and adding both double counts.
+  // Recurring charges: detected patterns + manually paid bills this month
   const recurring   = applyBillRules(detectRecurring(history || []), billRules || [])
     .filter(b => b.confidence === 'high');
   const { paid:paidBills, due:dueBills, dueTotal } = splitRecurring(recurring, everythingThisMonth);
+  
+  // Also count bills that were manually checked off in Bills tab this month
+  const billPaymentKeys = new Set((billPayments || []).map(p => p.key));
+  const manuallyPaidThisMonth = (billRules || []).filter(rule => billPaymentKeys.has(rule.key)).length;
+  const totalPaidThisMonth = paidBills.length + manuallyPaidThisMonth;
 
   // Same logic for the card payment: only pledge it if it hasn't gone out yet
   const ccPaidThisMonth = everythingThisMonth
@@ -1220,6 +1506,94 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
           fontFamily:SANS,borderTop:'1px solid rgba(255,255,255,0.2)',paddingTop:10}}>
           🎯 Goal: {goal}
         </p>}
+      </Card>
+
+      {/* Expected Income */}
+      <Card style={{padding:'14px 16px', marginBottom:12, background:C.blue+'08', border:`1px solid ${C.blue}22`}}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12}}>
+          <div>
+            <p style={{margin:0, fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+              Expected Income
+            </p>
+            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+              {income && income.length > 0 ? `${income.length} expected` : 'Add expected income for cash flow visibility'}
+            </p>
+          </div>
+          <button onClick={() => setShowAddIncome(true)} style={{
+            padding:'6px 12px', border:`1px solid ${C.blue}`, borderRadius:8,
+            background:C.blue+'15', color:C.blue, fontSize:12, fontWeight:600,
+            cursor:'pointer', fontFamily:SANS, display:'flex', alignItems:'center', gap:4
+          }}>
+            + Add
+          </button>
+        </div>
+
+        {income && income.length > 0 ? (
+          <div>
+            {income.map(inc => {
+              const incDate = new Date(inc.date);
+              const now = new Date();
+              const isUpcoming = incDate > now;
+              const daysUntil = Math.ceil((incDate - now) / (1000 * 60 * 60 * 24));
+              
+              return (
+                <div key={inc.id} style={{
+                  display:'flex', alignItems:'center', gap:10, padding:'10px 0',
+                  borderBottom:`1px solid ${C.blue}22`, fontSize:13
+                }}>
+                  <div style={{
+                    width:32, height:32, borderRadius:8, background:C.blue+'20',
+                    display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
+                    fontSize:16
+                  }}>
+                    💰
+                  </div>
+                  <div style={{flex:1, minWidth:0}}>
+                    <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+                      {inc.description || (inc.person === 'both' ? 'Both' : inc.person.charAt(0).toUpperCase() + inc.person.slice(1)) + '\'s Income'}
+                    </p>
+                    <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+                      {incDate.toLocaleDateString('en-CA')} {isUpcoming && daysUntil > 0 && `(in ${daysUntil}d)`}
+                      {inc.recurring && ` • Recurring (${inc.frequency})`}
+                    </p>
+                  </div>
+                  <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
+                    +${inc.amount.toFixed(2)}
+                  </p>
+                </div>
+              );
+            })}
+            
+            {/* Projected cash flow */}
+            <div style={{marginTop:12, paddingTop:12, borderTop:`1px solid ${C.blue}33`}}>
+              <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.inkSoft, fontFamily:SANS, textTransform:'uppercase'}}>
+                Cash Flow Projection
+              </p>
+              <div style={{
+                background:C.white, borderRadius:10, padding:12,
+                display:'grid', gridTemplateColumns:'1fr 1fr', gap:10
+              }}>
+                <div>
+                  <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>Today</p>
+                  <p style={{margin:'4px 0 0', fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.ink}}>
+                    {fmt(totalIncome - committed - totalSpent)}
+                  </p>
+                </div>
+                <div>
+                  <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>After Income</p>
+                  <p style={{margin:'4px 0 0', fontFamily:SERIF, fontSize:16, fontWeight:600, 
+                    color: (totalIncome + (income?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent) >= 0 ? C.green : C.red}}>
+                    {fmt(totalIncome + (income?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>
+            Track expected income to see cash flow projections
+          </p>
+        )}
       </Card>
 
       {/* CTFS */}
@@ -1344,10 +1718,10 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             </div>
             <div style={{flex:1,minWidth:0}}>
               <p style={{margin:0,fontSize:13,fontWeight:600,color:C.ink,fontFamily:SANS}}>
-                Recurring charges
+                Detected patterns
               </p>
               <p style={{margin:'1px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
-                {paidBills.length} already charged · {dueBills.length} still to come
+                {totalPaidThisMonth} paid this month · {dueBills.length} upcoming
               </p>
             </div>
             <span style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.ink}}>
@@ -1362,9 +1736,9 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             <div style={{background:C.sand,padding:'6px 0 10px'}}>
               <p style={{margin:'0 18px 6px',fontSize:10,color:C.inkSoft,
                 fontFamily:SANS,lineHeight:1.6}}>
-                Worked out from your own statements — anything charged in at least two
-                different months for a steady amount. Only the ones that haven't been
-                charged yet count towards "still to come".
+                Patterns detected from your statements — charges that appear in at least two different months. 
+                <br/><br/>
+                <strong>For THIS month's payment status, check the Bills tab ↑</strong>
               </p>
               {dueBills.map(b=>(
                 <div key={b.key} style={{display:'flex',alignItems:'center',gap:8,
@@ -4106,10 +4480,13 @@ export default function App() {
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
   const [showExport, setShowExport]=useState(false);
+  const [showEmailPreview, setShowEmailPreview]=useState(false);
   const [billRules,  setBillRules ]=useState([]);
   const [showDupes,  setShowDupes ]=useState(false);
   const [billsLocal, setBillsLocal]=useState(false);
   const [billPayments,setBillPayments]=useState([]);
+  const [income,     setIncome    ]=useState([]);
+  const [showAddIncome,setShowAddIncome]=useState(false);
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
@@ -4473,7 +4850,8 @@ export default function App() {
           onDeleteRow={deleteRow}
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}
-          setQuickAddCat={setQuickAddCat} setTab={setTab}/>}
+          setQuickAddCat={setQuickAddCat} setTab={setTab}
+          income={income} setShowAddIncome={setShowAddIncome} billPayments={billPayments}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
@@ -4542,11 +4920,45 @@ export default function App() {
         onViewChange={() => setView(view === 'combined' ? 'solo' : 'combined')}
         view={view}
         onExport={() => setShowExport(true)}
+        onEmailPreview={() => setShowEmailPreview(true)}
         C={C}
         SANS={SANS}
         nameColor={nameColor}
         nameInitials={nameInitials}
       />
+
+      {/* Income modal */}
+      {showAddIncome && (
+        <IncomeModal 
+          onClose={() => setShowAddIncome(false)}
+          onAdd={async (incomeEntry) => {
+            setIncome([...(income || []), incomeEntry]);
+            showToast(`Expected income added: $${incomeEntry.amount.toFixed(2)}`);
+          }}
+          SERIF={SERIF}
+          SANS={SANS}
+          C={C}
+          MONTHS={MONTHS}
+        />
+      )}
+
+      {/* Weekly email preview modal */}
+      {showEmailPreview && (
+        <WeeklyEmailPreviewModal 
+          txns={txns}
+          bankImports={imports}
+          billPayments={billPayments}
+          billRules={billRules}
+          profile={profile}
+          year={year}
+          month={month}
+          onClose={() => setShowEmailPreview(false)}
+          showToast={showToast}
+          C={C}
+          SERIF={SERIF}
+          SANS={SANS}
+        />
+      )}
 
       {/* Export modal */}
       {showExport && (
