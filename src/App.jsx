@@ -32,6 +32,12 @@ import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName
 import { buildValidationReport, findExistingDuplicates } from './validate.js';
 import React from 'react';
 
+// ─── LOCAL STORAGE KEYS ───────────────────────────────────────────────────────
+const CUSTOM_CATS_KEY = 'b42_custom_cats';
+const CAT_TARGETS_KEY = 'b42_cat_targets';
+const NOTIFS_KEY = 'b42_notifs';
+const EXPECTED_INCOME_KEY = 'b42_expected_income';
+
 // ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
 function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
   return (
@@ -263,14 +269,21 @@ function EditCategoryTargetModal({catId, catLabel, currentTarget, onSave, onClos
 }
 
 // ─── INCOME MODAL ─────────────────────────────────────────────────────────────
-function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
-  const [person, setPerson] = React.useState('jordan');
-  const [amount, setAmount] = React.useState('');
-  const [date, setDate] = React.useState('');
-  const [recurring, setRecurring] = React.useState(false);
-  const [frequency, setFrequency] = React.useState('monthly');
-  const [description, setDescription] = React.useState('');
+function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS, editingIncome}) {
+  const [person, setPerson] = React.useState(editingIncome?.person || 'jordan');
+  const [amount, setAmount] = React.useState(editingIncome?.amount?.toString() || '');
+  const [date, setDate] = React.useState(editingIncome?.date || '');
+  const [recurring, setRecurring] = React.useState(editingIncome?.recurring || false);
+  const [frequency, setFrequency] = React.useState(editingIncome?.frequency || 'monthly');
+  const [description, setDescription] = React.useState(editingIncome?.description || '');
+  const [actual, setActual] = React.useState(editingIncome?.actual?.toString() || '');
   const [busy, setBusy] = React.useState(false);
+
+  // Show actual amount field if date is in past (income should have been received)
+  const dateObj = new Date(date);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const showActualField = dateObj <= today;
 
   async function save() {
     if (!person || !amount || !date) return;
@@ -282,7 +295,8 @@ function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
       recurring: recurring,
       frequency: frequency,
       description: description.trim(),
-      id: 'income-' + Date.now(),
+      actual: actual ? parseFloat(actual) : null,
+      id: editingIncome?.id || ('income-' + Date.now()),
     });
     setBusy(false);
     onClose();
@@ -374,13 +388,29 @@ function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
           </>
         )}
 
+        {showActualField && (
+          <>
+            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
+              Actual Amount Received ($)
+            </label>
+            <input type="number" value={actual} onChange={e => setActual(e.target.value)} placeholder="Leave blank if not received yet"
+              style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+                background:C.sand, color:C.ink, fontFamily:SERIF, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
+            {actual && parseFloat(actual) !== parseFloat(amount) && (
+              <p style={{margin:'0 0 14px 0', fontSize:12, color:parseFloat(actual) > parseFloat(amount) ? C.green : C.red, fontFamily:SANS}}>
+                {parseFloat(actual) > parseFloat(amount) ? '✓ Received more than expected!' : '⚠ Received less than expected'}
+              </p>
+            )}
+          </>
+        )}
+
         <button onClick={save} disabled={busy || !person || !amount || !date} style={{
           width:'100%', border:'none', background:C.green, color:'#fff',
           padding:'14px 20px', borderRadius:12, fontSize:14, fontWeight:600,
           cursor:busy ? 'default' : 'pointer', opacity:busy ? 0.6 : 1,
           fontFamily:SANS, transition:'all 0.2s'
         }}>
-          {busy ? 'Saving...' : 'Add Expected Income'}
+          {busy ? 'Saving...' : editingIncome ? 'Update Income' : 'Add Expected Income'}
         </button>
       </div>
     </div>
@@ -1520,7 +1550,7 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history,billRules,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  income,expectedIncome,setShowAddIncome,billPayments,setEditingCatTarget}) {
+                  income,expectedIncome,setShowAddIncome,billPayments,setEditingCatTarget,setEditingIncome,setExpectedIncome,showToast}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -1685,17 +1715,51 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                     💰
                   </div>
                   <div style={{flex:1, minWidth:0}}>
-                    <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS}}>
-                      {inc.description || (inc.person === 'both' ? 'Both' : inc.person.charAt(0).toUpperCase() + inc.person.slice(1)) + '\'s Income'}
-                    </p>
+                    <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:2}}>
+                      <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+                        {inc.description || (inc.person === 'both' ? 'Both' : inc.person.charAt(0).toUpperCase() + inc.person.slice(1)) + '\'s Income'}
+                      </p>
+                      {inc.actual && (
+                        <span style={{fontSize:10, padding:'2px 6px', borderRadius:4, background:inc.actual >= inc.amount ? C.green+'20' : C.red+'20', 
+                          color:inc.actual >= inc.amount ? C.green : C.red, fontWeight:600, fontFamily:SANS}}>
+                          {inc.actual >= inc.amount ? 'Received' : 'Under'}
+                        </span>
+                      )}
+                    </div>
                     <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
-                      {incDate.toLocaleDateString('en-CA')} {isUpcoming && daysUntil > 0 && `(in ${daysUntil}d)`}
+                      {incDate.toLocaleDateString('en-CA')} {incDate > now && daysUntil > 0 && `(in ${daysUntil}d)`}
                       {inc.recurring && ` • Recurring (${inc.frequency})`}
                     </p>
                   </div>
-                  <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
-                    +${inc.amount.toFixed(2)}
-                  </p>
+                  <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:4}}>
+                    <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
+                      {inc.actual ? `$${inc.actual.toFixed(2)}` : `+$${inc.amount.toFixed(2)}`}
+                    </p>
+                    {inc.actual && inc.actual !== inc.amount && (
+                      <p style={{margin:0, fontFamily:SERIF, fontSize:11, color:C.inkSoft, whiteSpace:'nowrap'}}>
+                        Expected: $${inc.amount.toFixed(2)}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {setEditingIncome(inc); setShowAddIncome(true);}}
+                    style={{padding:'6px 10px', border:'none', background:C.sand, color:C.ink,
+                      borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:SANS}}
+                    title="Edit income">
+                    ✏️
+                  </button>
+                  <button
+                    onClick={() => {
+                      const updated = expectedIncome.filter(e => e.id !== inc.id);
+                      setExpectedIncome(updated);
+                      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+                      showToast('Income entry deleted');
+                    }}
+                    style={{padding:'6px 10px', border:'none', background:C.red+'20', color:C.red,
+                      borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:SANS}}
+                    title="Delete income">
+                    🗑️
+                  </button>
                 </div>
               );
             })}
@@ -4622,10 +4686,6 @@ export function ResetModal({ year, month, onClose, onDone, showToast }) {
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 const SUPABASE_READY=!!(import.meta.env.VITE_SUPABASE_URL&&import.meta.env.VITE_SUPABASE_ANON_KEY);
-const CUSTOM_CATS_KEY='b42_custom_cats';
-const CAT_TARGETS_KEY='b42_cat_targets';
-const NOTIFS_KEY='b42_notifs';
-const EXPECTED_INCOME_KEY='b42_expected_income';
 const DEF_INCOME={jordan:3984.44,ness:800,sunlife:0};
 
 export default function App() {
@@ -4666,6 +4726,8 @@ export default function App() {
   const [unreviewed, setUnreviewed]=useState([]); // Partner transactions not yet reviewed
   const [showActivityHelper, setShowActivityHelper]=useState(false); // Show helper on login
   const [editingCatTarget, setEditingCatTarget]=useState(null); // { catId, newAmount }
+  const [editingIncome, setEditingIncome]=useState(null); // Income entry being edited
+  const [showIncomeList, setShowIncomeList]=useState(false); // Show income list for editing
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
@@ -5045,7 +5107,7 @@ export default function App() {
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}
           setQuickAddCat={setQuickAddCat} setTab={setTab}
-          income={income} expectedIncome={expectedIncome} setShowAddIncome={setShowAddIncome} billPayments={billPayments} setEditingCatTarget={setEditingCatTarget}/>}
+          income={income} expectedIncome={expectedIncome} setShowAddIncome={setShowAddIncome} billPayments={billPayments} setEditingCatTarget={setEditingCatTarget} setEditingIncome={setEditingIncome} setExpectedIncome={setExpectedIncome} showToast={showToast}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
@@ -5143,7 +5205,7 @@ export default function App() {
             setCatTargets(updated);
             localStorage.setItem(CAT_TARGETS_KEY, JSON.stringify(updated));
             try {
-              await upsertCategoryTargets(updated);
+              await upsertCategoryTargets(updated, profile?.name || 'unknown');
             } catch (e) {
               showToast('Could not save to server, but saved locally');
             }
@@ -5159,11 +5221,23 @@ export default function App() {
       {/* Income modal */}
       {showAddIncome && (
         <IncomeModal 
-          onClose={() => setShowAddIncome(false)}
+          onClose={() => {setShowAddIncome(false); setEditingIncome(null);}}
           onAdd={async (incomeEntry) => {
-            setExpectedIncome([...(expectedIncome || []), incomeEntry]);
-            showToast(`Expected income added: $${incomeEntry.amount.toFixed(2)}`);
+            if (editingIncome) {
+              // Update existing
+              const updated = expectedIncome.map(e => e.id === editingIncome.id ? incomeEntry : e);
+              setExpectedIncome(updated);
+              localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+              showToast(`Income updated: $${incomeEntry.amount.toFixed(2)}`);
+            } else {
+              // Add new
+              setExpectedIncome([...(expectedIncome || []), incomeEntry]);
+              localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify([...(expectedIncome || []), incomeEntry]));
+              showToast(`Expected income added: $${incomeEntry.amount.toFixed(2)}`);
+            }
+            setEditingIncome(null);
           }}
+          editingIncome={editingIncome}
           SERIF={SERIF}
           SANS={SANS}
           C={C}
