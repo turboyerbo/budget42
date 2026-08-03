@@ -195,6 +195,73 @@ function PartnerActivityHelper({unreviewed, onClose, C, SERIF, SANS}) {
   );
 }
 
+// ─── EDIT CATEGORY TARGET MODAL ───────────────────────────────────────────
+function EditCategoryTargetModal({catId, catLabel, currentTarget, onSave, onClose, C, SERIF, SANS}) {
+  const [amount, setAmount] = React.useState(currentTarget.toString());
+  const [saving, setSaving] = React.useState(false);
+
+  async function handleSave() {
+    if (!amount || parseFloat(amount) < 0) return;
+    setSaving(true);
+    await onSave(catId, parseFloat(amount));
+    setSaving(false);
+    onClose();
+  }
+
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', alignItems:'center', justifyContent:'center'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:16, padding:'28px 24px', 
+        maxWidth:340, boxShadow:'0 20px 60px rgba(0,0,0,0.3)', animation:'slideUp 0.25s ease'}}>
+        
+        <h2 style={{margin:'0 0 8px', fontFamily:SERIF, fontSize:20, fontWeight:600, color:C.ink}}>
+          Budget for {catLabel}
+        </h2>
+        <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
+          This month's spending target (override average)
+        </p>
+
+        <div style={{margin:'20px 0', display:'flex', alignItems:'center', gap:6}}>
+          <span style={{fontSize:24, fontWeight:400, color:C.sandDark, fontFamily:SERIF}}>$</span>
+          <input 
+            type="number" 
+            value={amount}
+            onChange={e => setAmount(e.target.value)}
+            autoFocus
+            style={{
+              fontFamily:SERIF, fontSize:32, fontWeight:600, color:C.ink,
+              border:'none', outline:'none', background:'none', width:200,
+              textAlign:'center', borderBottom:`2px solid ${C.green}`
+            }}
+            onKeyDown={e => e.key === 'Enter' && handleSave()}
+          />
+        </div>
+
+        <p style={{margin:'8px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+          Originally: ${currentTarget.toFixed(2)} (average from previous months)
+        </p>
+
+        <div style={{display:'flex', gap:8, marginTop:20}}>
+          <button onClick={onClose} style={{
+            flex:1, border:`1px solid ${C.sandDark}`, background:'white', color:C.ink,
+            padding:'12px', borderRadius:10, fontWeight:600, fontSize:13, fontFamily:SANS,
+            cursor:'pointer'
+          }}>
+            Cancel
+          </button>
+          <button onClick={handleSave} disabled={!amount || parseFloat(amount) < 0 || saving} style={{
+            flex:1, border:'none', background:C.green, color:'white',
+            padding:'12px', borderRadius:10, fontWeight:600, fontSize:13, fontFamily:SANS,
+            cursor:saving ? 'default' : 'pointer', opacity:saving ? 0.6 : 1
+          }}>
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── INCOME MODAL ─────────────────────────────────────────────────────────────
 function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS}) {
   const [person, setPerson] = React.useState('jordan');
@@ -1453,7 +1520,7 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history,billRules,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  income,expectedIncome,setShowAddIncome,billPayments}) {
+                  income,expectedIncome,setShowAddIncome,billPayments,setEditingCatTarget}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -1889,7 +1956,14 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                         <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
                           color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
                         {target>0&&<div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:0}}>
-                          <span style={{fontSize:11,color:C.inkSoft,fontFamily:SANS}}>{fmtK(target)}</span>
+                          <button 
+                            onClick={e=>{e.stopPropagation();setEditingCatTarget(cat.id);}}
+                            style={{fontSize:11,color:C.inkSoft,fontFamily:SANS,background:'none',border:'none',
+                              cursor:'pointer',padding:'0 4px',borderRadius:4,transition:'all 0.12s'}}
+                            onMouseEnter={e=>e.target.style.background=C.sand}
+                            onMouseLeave={e=>e.target.style.background='none'}>
+                            {fmtK(target)} ✏️
+                          </button>
                           {suggested[cat.id]&&<span style={{fontSize:9,color:C.sandDark,fontFamily:SANS,opacity:0.6}}>
                             suggested ${suggested[cat.id]}
                           </span>}
@@ -4591,6 +4665,7 @@ export default function App() {
   const [showAddIncome,setShowAddIncome]=useState(false);
   const [unreviewed, setUnreviewed]=useState([]); // Partner transactions not yet reviewed
   const [showActivityHelper, setShowActivityHelper]=useState(false); // Show helper on login
+  const [editingCatTarget, setEditingCatTarget]=useState(null); // { catId, newAmount }
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
@@ -4970,7 +5045,7 @@ export default function App() {
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}
           setQuickAddCat={setQuickAddCat} setTab={setTab}
-          income={income} expectedIncome={expectedIncome} setShowAddIncome={setShowAddIncome} billPayments={billPayments}/>}
+          income={income} expectedIncome={expectedIncome} setShowAddIncome={setShowAddIncome} billPayments={billPayments} setEditingCatTarget={setEditingCatTarget}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
@@ -5051,6 +5126,30 @@ export default function App() {
         <PartnerActivityHelper
           unreviewed={unreviewed}
           onClose={() => setShowActivityHelper(false)}
+          C={C}
+          SERIF={SERIF}
+          SANS={SANS}
+        />
+      )}
+
+      {/* Edit category target modal */}
+      {editingCatTarget && (
+        <EditCategoryTargetModal
+          catId={editingCatTarget}
+          catLabel={allCats.find(c => c.id === editingCatTarget)?.label || 'Category'}
+          currentTarget={catTargets[editingCatTarget] || allCats.find(c => c.id === editingCatTarget)?.target || 0}
+          onSave={async (catId, newAmount) => {
+            const updated = { ...catTargets, [catId]: newAmount };
+            setCatTargets(updated);
+            localStorage.setItem(CAT_TARGETS_KEY, JSON.stringify(updated));
+            try {
+              await upsertCategoryTargets(updated);
+            } catch (e) {
+              showToast('Could not save to server, but saved locally');
+            }
+            showToast(`Budget for ${allCats.find(c => c.id === catId)?.label} updated to $${newAmount.toFixed(2)}`);
+          }}
+          onClose={() => setEditingCatTarget(null)}
           C={C}
           SERIF={SERIF}
           SANS={SANS}
