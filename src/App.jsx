@@ -1384,7 +1384,7 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,history,billRules,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  income,setShowAddIncome,billPayments}) {
+                  income,expectedIncome,setShowAddIncome,billPayments}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const me=firstName(profile?.name);
@@ -1516,7 +1516,7 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
               Expected Income
             </p>
             <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
-              {income && income.length > 0 ? `${income.length} expected` : 'Add expected income for cash flow visibility'}
+              {expectedIncome && expectedIncome.length > 0 ? `${expectedIncome.length} expected` : 'Add expected income for cash flow visibility'}
             </p>
           </div>
           <button onClick={() => setShowAddIncome(true)} style={{
@@ -1528,9 +1528,9 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
           </button>
         </div>
 
-        {income && income.length > 0 ? (
+        {expectedIncome && expectedIncome.length > 0 ? (
           <div>
-            {income.map(inc => {
+            {expectedIncome.map(inc => {
               const incDate = new Date(inc.date);
               const now = new Date();
               const isUpcoming = incDate > now;
@@ -1582,8 +1582,8 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                 <div>
                   <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>After Income</p>
                   <p style={{margin:'4px 0 0', fontFamily:SERIF, fontSize:16, fontWeight:600, 
-                    color: (totalIncome + (income?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent) >= 0 ? C.green : C.red}}>
-                    {fmt(totalIncome + (income?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent)}
+                    color: (totalIncome + (expectedIncome?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent) >= 0 ? C.green : C.red}}>
+                    {fmt(totalIncome + (expectedIncome?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent)}
                   </p>
                 </div>
               </div>
@@ -4484,7 +4484,8 @@ export default function App() {
   const [showDupes,  setShowDupes ]=useState(false);
   const [billsLocal, setBillsLocal]=useState(false);
   const [billPayments,setBillPayments]=useState([]);
-  const [income,     setIncome    ]=useState([]);
+  const [income,     setIncome    ]=useState(DEF_INCOME);
+  const [expectedIncome, setExpectedIncome]=useState([]);
   const [showAddIncome,setShowAddIncome]=useState(false);
 
   // Alphabetical everywhere, so a category is always where you expect it —
@@ -4850,7 +4851,7 @@ export default function App() {
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}
           setQuickAddCat={setQuickAddCat} setTab={setTab}
-          income={income} setShowAddIncome={setShowAddIncome} billPayments={billPayments}/>}
+          income={income} expectedIncome={expectedIncome} setShowAddIncome={setShowAddIncome} billPayments={billPayments}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
@@ -4931,7 +4932,7 @@ export default function App() {
         <IncomeModal 
           onClose={() => setShowAddIncome(false)}
           onAdd={async (incomeEntry) => {
-            setIncome([...(income || []), incomeEntry]);
+            setExpectedIncome([...(expectedIncome || []), incomeEntry]);
             showToast(`Expected income added: $${incomeEntry.amount.toFixed(2)}`);
           }}
           SERIF={SERIF}
