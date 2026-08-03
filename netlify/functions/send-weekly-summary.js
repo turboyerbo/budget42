@@ -1,7 +1,8 @@
-// Netlify Function: Send weekly budget summary email
+// Netlify Function: Send weekly budget summary email via Brevo
+// Requires env vars: BREVO_EMAIL, BREVO_API_KEY
 // Call via: curl -X POST https://budgetfortwo.netlify.app/.netlify/functions/send-weekly-summary -H "Content-Type: application/json" -d '{...}'
 
-const fetch = require('node-fetch');
+const nodemailer = require('nodemailer');
 
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
@@ -24,33 +25,42 @@ exports.handler = async (event) => {
       endDate,
     });
 
-    // Send via Resend
-    if (!process.env.RESEND_API_KEY) {
-      return { statusCode: 500, body: JSON.stringify({ error: 'Email service not configured' }) };
+    // Check for required env vars
+    if (!process.env.BREVO_EMAIL || !process.env.BREVO_API_KEY) {
+      return { 
+        statusCode: 500, 
+        body: JSON.stringify({ error: 'Email service not configured. Set BREVO_EMAIL and BREVO_API_KEY env vars.' }) 
+      };
     }
 
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
+    // Configure Brevo SMTP transport
+    const transporter = nodemailer.createTransport({
+      host: 'smtp-relay.brevo.com',
+      port: 587,
+      secure: false, // TLS
+      auth: {
+        user: process.env.BREVO_EMAIL,
+        pass: process.env.BREVO_API_KEY,
       },
-      body: JSON.stringify({
-        from: 'Budget For Two <updates@budgetfortwo.com>',
-        to: email,
-        subject: `📊 Weekly Budget Summary - ${startDate} to ${endDate}`,
-        html: emailHTML,
-      }),
     });
 
-    if (!response.ok) {
-      console.error('Resend error:', await response.text());
-      return { statusCode: 500, body: JSON.stringify({ error: 'Failed to send email' }) };
-    }
+    // Send email
+    const info = await transporter.sendMail({
+      from: `"Budget For Two" <${process.env.BREVO_EMAIL}>`,
+      to: email,
+      subject: `📊 Weekly Budget Summary - ${startDate} to ${endDate}`,
+      html: emailHTML,
+    });
+
+    console.log('Email sent successfully:', info.messageId);
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ success: true, message: 'Email sent' }),
+      body: JSON.stringify({ 
+        success: true, 
+        message: 'Email sent',
+        messageId: info.messageId,
+      }),
     };
   } catch (error) {
     console.error('Error:', error);
