@@ -2,6 +2,7 @@
 // Requires env vars: BREVO_EMAIL, BREVO_API_KEY
 // Call via: curl -X POST https://budgetfortwo.netlify.app/.netlify/functions/send-weekly-summary -H "Content-Type: application/json" -d '{...}'
 
+/* eslint-disable no-undef */
 const nodemailer = require('nodemailer');
 
 exports.handler = async (event) => {

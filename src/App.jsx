@@ -4464,7 +4464,6 @@ export default function App() {
   const [year,       setYear      ]=useState(now.getFullYear());
   const [txns,       setTxns      ]=useState([]);
   const [imports,    setImports   ]=useState([]);
-  const [income,     setIncome    ]=useState(DEF_INCOME);
   const [ccTarget,   setCcTarget  ]=useState(500);
   const [customCats, setCustomCats]=useState([]);
   const [catTargets, setCatTargets]=useState({});
