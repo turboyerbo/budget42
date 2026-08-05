@@ -39,6 +39,7 @@ const NOTIFS_KEY = 'b42_notifs';
 const EXPECTED_INCOME_KEY = 'b42_expected_income';
 const GOALS_KEY = 'b42_goals';
 const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
+const today = () => new Date().toISOString().slice(0,10);
 
 // ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
 function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
@@ -271,14 +272,15 @@ function EditCategoryTargetModal({catId, catLabel, currentTarget, onSave, onClos
 }
 
 // ─── QUICK GOAL DEPOSIT MODAL ────────────────────────────────────────────────
-function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS}) {
+function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS, defaultDate}) {
   const [amount, setAmount] = React.useState('');
+  const [date, setDate] = React.useState(defaultDate || today());
   const [saving, setSaving] = React.useState(false);
 
   async function save() {
     if (!amount || parseFloat(amount) <= 0) return;
     setSaving(true);
-    await onSave(parseFloat(amount));
+    await onSave(parseFloat(amount), date);
     setSaving(false);
     onClose();
   }
@@ -296,7 +298,7 @@ function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS}) {
           {goal.description || 'Add deposit to this goal'}
         </p>
 
-        <div style={{margin:'20px 0', display:'flex', alignItems:'center', gap:6}}>
+        <div style={{margin:'20px 0', display:'flex', alignItems:'center', gap:6, justifyContent:'center'}}>
           <span style={{fontSize:24, fontWeight:400, color:C.sandDark, fontFamily:SERIF}}>$</span>
           <input 
             type="number" 
@@ -311,6 +313,15 @@ function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS}) {
             }}
             onKeyDown={e => e.key === 'Enter' && save()}
           />
+        </div>
+
+        <div style={{marginBottom:12}}>
+          <label style={{fontSize:11, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:3, textAlign:'center'}}>
+            Deposit date
+          </label>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+              background:C.sand, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'}}/>
         </div>
 
         <p style={{margin:'12px 0', fontSize:11, color:C.inkSoft, fontFamily:SANS, textAlign:'center'}}>
@@ -982,7 +993,6 @@ const PICKABLE_ICONS = Object.keys(ICON_MAP);
 const fmt   = n => '$' + Math.abs(n).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtK  = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : fmt(n);
 const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-const today = () => new Date().toISOString().slice(0,10);
 
 // Derive avatar color from name
 function nameColor(name) {
@@ -2559,10 +2569,14 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
       {depositingGoalId && (
         <QuickGoalDepositModal
           goal={goals.find(g => g.id === depositingGoalId) || {}}
-          onSave={async (amount) => {
+          onSave={async (amount, date) => {
             const updated = goals.map(g => 
               g.id === depositingGoalId 
-                ? {...g, currentBalance: (g.currentBalance || 0) + amount}
+                ? {
+                    ...g,
+                    currentBalance: (g.currentBalance || 0) + amount,
+                    deposits: [...(g.deposits || []), {id: 'dep-' + Date.now(), date: date || today(), amount}]
+                  }
                 : g
             );
             setGoals(updated);
@@ -2976,53 +2990,42 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
 }
 
 // ─── CALENDAR TAB ────────────────────────────────────────────────────────────
-export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, goals, allCats}) {
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, setExpectedIncome, goals, setGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
+  const [selectedDay, setSelectedDay] = useState(null);
   const today = new Date();
-  const currentDate = new Date(year, month, 1);
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDayOfWeek = new Date(year, month, 1).getDay();
-  
-  const allTxns = [...txns, ...bankImports];
-  const txnsByDay = {};
-  allTxns.forEach(t => {
-    const day = new Date(t.date).getDate();
-    if (!txnsByDay[day]) txnsByDay[day] = [];
-    txnsByDay[day].push(t);
-  });
-  
-  const incomeByDay = {};
-  allTxns.filter(t => (t.category || t.cat) === 'income').forEach(t => {
-    const day = new Date(t.date).getDate();
-    if (!incomeByDay[day]) incomeByDay[day] = 0;
-    incomeByDay[day] += t.amount;
-  });
-  
+
+  // Merged bills (detected + manual overrides), same source of truth as the Bills tab
+  const detected = detectRecurring(history || []);
+  const mergedBills = applyBillRules(detected, billRules || []).filter(b => b.confidence === 'high');
+
   const billsByDay = {};
-  billRules.forEach(rule => {
-    const day = rule.day_of_month;
-    if (!billsByDay[day]) billsByDay[day] = [];
-    billsByDay[day].push(rule);
+  mergedBills.forEach(b => {
+    const d = Math.min(b.day, daysInMonth); // clamp to last day of shorter months
+    if (!billsByDay[d]) billsByDay[d] = [];
+    billsByDay[d].push(b);
   });
-  
-  const ccByDay = {};
-  allTxns.filter(t => (t.category || t.cat) === 'cc_payment').forEach(t => {
-    const day = new Date(t.date).getDate();
-    if (!ccByDay[day]) ccByDay[day] = 0;
-    ccByDay[day] += t.amount;
+
+  const incomeByDay = {};
+  (expectedIncome || []).forEach(inc => {
+    const d = new Date(inc.date).getDate();
+    if (!incomeByDay[d]) incomeByDay[d] = [];
+    incomeByDay[d].push(inc);
   });
-  
-  const expectedIncomeByDay = {};
-  expectedIncome.forEach(inc => {
-    const day = new Date(inc.date).getDate();
-    if (!expectedIncomeByDay[day]) expectedIncomeByDay[day] = [];
-    expectedIncomeByDay[day].push(inc);
+
+  const depositsByDay = {};
+  (goals || []).forEach(g => {
+    (g.deposits || []).forEach(dep => {
+      const d = new Date(dep.date).getDate();
+      if (!depositsByDay[d]) depositsByDay[d] = [];
+      depositsByDay[d].push({...dep, goalId: g.id, goalLabel: g.label});
+    });
   });
 
   const days = Array(firstDayOfWeek).fill(null).concat(Array.from({length: daysInMonth}, (_, i) => i + 1));
   const weeks = [];
-  for (let i = 0; i < days.length; i += 7) {
-    weeks.push(days.slice(i, i + 7));
-  }
+  for (let i = 0; i < days.length; i += 7) weeks.push(days.slice(i, i + 7));
 
   const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -3031,10 +3034,12 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
       <h2 style={{margin: '0 0 16px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
         📅 Financial Calendar
       </h2>
+      <p style={{margin: '0 0 16px', fontSize: 12, color: C.inkSoft, fontFamily: SANS}}>
+        Tap any day to see and edit what's happening — predicted income, bills due, and goal deposits.
+      </p>
 
       {/* Calendar Grid */}
       <Card style={{padding: '16px', background: C.white}}>
-        {/* Week day headers */}
         <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 12}}>
           {weekDays.map(day => (
             <div key={day} style={{textAlign: 'center', fontSize: 11, fontWeight: 600, color: C.inkSoft, fontFamily: SANS, padding: '8px 0'}}>
@@ -3043,104 +3048,62 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
           ))}
         </div>
 
-        {/* Calendar days */}
         <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4}}>
           {weeks.map((week, weekIdx) => 
             week.map((day, dayIdx) => {
-              const hasIncome = day && incomeByDay[day];
-              const hasBills = day && billsByDay[day] && billsByDay[day].length > 0;
-              const hasCC = day && ccByDay[day];
-              const hasExpectedIncome = day && expectedIncomeByDay[day] && expectedIncomeByDay[day].length > 0;
+              const dayIncome = day && incomeByDay[day];
+              const dayBills = day && billsByDay[day];
+              const dayDeposits = day && depositsByDay[day];
               const isToday = day && today.getDate() === day && today.getMonth() === month && today.getFullYear() === year;
-              
+              const hasAnything = dayIncome || dayBills || dayDeposits;
+
               return (
-                <div
+                <button
                   key={`${weekIdx}-${dayIdx}`}
+                  onClick={() => day && setSelectedDay(day)}
+                  disabled={!day}
                   style={{
                     aspectRatio: '1',
-                    border: `1px solid ${C.sandMid}`,
+                    border: `1px solid ${isToday ? C.blue : C.sandMid}`,
                     borderRadius: 8,
                     padding: '6px',
                     background: isToday ? C.blue + '08' : C.white,
-                    borderColor: isToday ? C.blue : C.sandMid,
                     display: 'flex',
                     flexDirection: 'column',
                     fontSize: 12,
                     fontFamily: SANS,
-                    minHeight: '70px'
+                    minHeight: '70px',
+                    cursor: day ? 'pointer' : 'default',
+                    textAlign: 'left'
                   }}>
                   <div style={{fontSize: 11, fontWeight: 600, color: isToday ? C.blue : C.ink, marginBottom: 4}}>
                     {day || ''}
                   </div>
-                  
+
                   {day && (
                     <div style={{display: 'flex', flexDirection: 'column', gap: 2, flex: 1}}>
-                      {hasIncome && (
-                        <div style={{
-                          fontSize: 9,
-                          padding: '2px 4px',
-                          borderRadius: 3,
-                          background: C.green + '20',
-                          color: C.green,
-                          fontWeight: 600,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          💰 ${hasIncome.toFixed(0)}
+                      {dayIncome && dayIncome.length > 0 && (
+                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.green + '20',
+                          color: C.green, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
+                          💰 {fmt(dayIncome.reduce((a,i)=>a+i.amount,0))}
                         </div>
                       )}
-                      
-                      {hasBills && (
-                        <div style={{
-                          fontSize: 9,
-                          padding: '2px 4px',
-                          borderRadius: 3,
-                          background: C.red + '20',
-                          color: C.red,
-                          fontWeight: 600,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          📋 {hasBills.length} bill{hasBills.length !== 1 ? 's' : ''}
+                      {dayBills && dayBills.length > 0 && (
+                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.red + '20',
+                          color: C.red, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
+                          📋 {dayBills.length} bill{dayBills.length !== 1 ? 's' : ''}
                         </div>
                       )}
-                      
-                      {hasCC && (
-                        <div style={{
-                          fontSize: 9,
-                          padding: '2px 4px',
-                          borderRadius: 3,
-                          background: C.amber + '20',
-                          color: C.amber,
-                          fontWeight: 600,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          💳 ${hasCC.toFixed(0)}
+                      {dayDeposits && dayDeposits.length > 0 && (
+                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.purple + '20',
+                          color: C.purple, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
+                          🎯 {fmt(dayDeposits.reduce((a,d)=>a+d.amount,0))}
                         </div>
                       )}
-                      
-                      {hasExpectedIncome && (
-                        <div style={{
-                          fontSize: 9,
-                          padding: '2px 4px',
-                          borderRadius: 3,
-                          background: C.blue + '20',
-                          color: C.blue,
-                          fontWeight: 600,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          🏦 Income
-                        </div>
-                      )}
+                      {!hasAnything && <div style={{flex:1}}/>}
                     </div>
                   )}
-                </div>
+                </button>
               );
             })
           )}
@@ -3153,20 +3116,301 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
         <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8}}>
           <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
             <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.green + '40'}}/>
-            <span style={{fontSize: 11, color: C.inkSoft}}>Income</span>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Predicted income</span>
           </div>
           <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
             <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.red + '40'}}/>
-            <span style={{fontSize: 11, color: C.inkSoft}}>Bills</span>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Bills due</span>
           </div>
           <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
-            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.amber + '40'}}/>
-            <span style={{fontSize: 11, color: C.inkSoft}}>CC Payment</span>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.purple + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Goal deposits</span>
           </div>
-          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
-            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.blue + '40'}}/>
-            <span style={{fontSize: 11, color: C.inkSoft}}>Expected Income</span>
-          </div>
+        </div>
+      </div>
+
+      {selectedDay && (
+        <DayDetailPanel
+          day={selectedDay}
+          year={year}
+          month={month}
+          bills={billsByDay[selectedDay] || []}
+          incomeEntries={incomeByDay[selectedDay] || []}
+          deposits={depositsByDay[selectedDay] || []}
+          goals={goals || []}
+          setGoals={setGoals}
+          expectedIncome={expectedIncome || []}
+          setExpectedIncome={setExpectedIncome}
+          onSaveRule={onSaveRule}
+          onDeleteRule={onDeleteRule}
+          showToast={showToast}
+          onClose={() => setSelectedDay(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── DAY DETAIL PANEL (calendar click-through, everything editable) ──────────
+function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals, setGoals,
+                          expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, showToast, onClose}) {
+  const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  const dateLabel = new Date(year, month, day).toLocaleDateString('en-CA', {weekday:'long', month:'long', day:'numeric'});
+
+  const [addingIncome, setAddingIncome] = useState(false);
+  const [newIncAmount, setNewIncAmount] = useState('');
+  const [newIncSource, setNewIncSource] = useState('');
+  const [newIncAccount, setNewIncAccount] = useState('');
+
+  const [addingBill, setAddingBill] = useState(false);
+  const [newBillLabel, setNewBillLabel] = useState('');
+  const [newBillAmount, setNewBillAmount] = useState('');
+
+  const [addingDeposit, setAddingDeposit] = useState(false);
+  const [depositGoalId, setDepositGoalId] = useState(goals[0]?.id || '');
+  const [newDepositAmount, setNewDepositAmount] = useState('');
+
+  const inputStyle = {
+    width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+    background:C.white, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'
+  };
+
+  function saveIncome() {
+    const amt = parseFloat(newIncAmount);
+    if (isNaN(amt) || amt <= 0) { showToast('Enter an amount'); return; }
+    const entry = {id:'income-'+Date.now(), date:dateStr, amount:amt, description:newIncSource.trim(), account:newIncAccount.trim(), person:'both'};
+    const updated = [...expectedIncome, entry].sort((a,b)=>new Date(a.date)-new Date(b.date));
+    setExpectedIncome(updated);
+    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    showToast('Income entry added');
+    setAddingIncome(false); setNewIncAmount(''); setNewIncSource(''); setNewIncAccount('');
+  }
+
+  function updateIncome(id, field, value) {
+    const updated = expectedIncome.map(e => e.id === id ? {...e, [field]: field === 'amount' ? (parseFloat(value)||0) : value} : e);
+    setExpectedIncome(updated);
+    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+  }
+
+  function deleteIncome(id) {
+    const updated = expectedIncome.filter(e => e.id !== id);
+    setExpectedIncome(updated);
+    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    showToast('Income entry deleted');
+  }
+
+  async function updateBill(bill, field, value) {
+    await onSaveRule({
+      key: bill.key,
+      label: field === 'label' ? value : bill.label,
+      amount: field === 'amount' ? (parseFloat(value)||0) : bill.amount,
+      day: bill.day,
+      category: bill.category,
+      status: bill.detected ? 'confirmed' : 'manual',
+      recurring: bill.recurring ?? true,
+      payment_type: bill.payment_type || 'other',
+      frequency: bill.recurring === false ? 'one-time' : 'monthly',
+    });
+    showToast('Bill updated');
+  }
+
+  async function saveNewBill() {
+    const amt = parseFloat(newBillAmount);
+    if (!newBillLabel.trim() || isNaN(amt) || amt <= 0) { showToast('Enter a name and amount'); return; }
+    await onSaveRule({
+      key: 'manual:' + uid(),
+      label: newBillLabel.trim(),
+      amount: amt,
+      day: day,
+      category: 'other',
+      status: 'manual',
+      recurring: true,
+      payment_type: 'other',
+      frequency: 'monthly',
+    });
+    showToast('Bill added');
+    setAddingBill(false); setNewBillLabel(''); setNewBillAmount('');
+  }
+
+  async function removeBill(bill) {
+    await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
+    showToast(bill.manual ? 'Bill deleted' : 'Hidden from bills');
+  }
+
+  function saveDeposit() {
+    const amt = parseFloat(newDepositAmount);
+    if (!depositGoalId || isNaN(amt) || amt <= 0) { showToast('Pick a goal and enter an amount'); return; }
+    const updated = goals.map(g => g.id === depositGoalId
+      ? {...g, currentBalance: (g.currentBalance||0) + amt, deposits: [...(g.deposits||[]), {id:'dep-'+Date.now(), date:dateStr, amount:amt}]}
+      : g);
+    setGoals(updated);
+    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+    showToast('Deposit added to ' + (goals.find(g=>g.id===depositGoalId)?.label || 'goal'));
+    setAddingDeposit(false); setNewDepositAmount('');
+  }
+
+  function updateDeposit(goalId, depId, value) {
+    const amt = parseFloat(value) || 0;
+    const updated = goals.map(g => {
+      if (g.id !== goalId) return g;
+      const oldDep = (g.deposits||[]).find(d=>d.id===depId);
+      const oldAmt = oldDep ? oldDep.amount : 0;
+      const newDeposits = (g.deposits||[]).map(d => d.id===depId ? {...d, amount:amt} : d);
+      return {...g, deposits:newDeposits, currentBalance: (g.currentBalance||0) - oldAmt + amt};
+    });
+    setGoals(updated);
+    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+  }
+
+  function deleteDeposit(goalId, depId) {
+    const updated = goals.map(g => {
+      if (g.id !== goalId) return g;
+      const oldDep = (g.deposits||[]).find(d=>d.id===depId);
+      const oldAmt = oldDep ? oldDep.amount : 0;
+      return {...g, deposits:(g.deposits||[]).filter(d=>d.id!==depId), currentBalance: Math.max(0,(g.currentBalance||0) - oldAmt)};
+    });
+    setGoals(updated);
+    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+    showToast('Deposit removed');
+  }
+
+  return (
+    <div style={{position:'fixed', inset:0, zIndex:770, display:'flex', flexDirection:'column', justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
+      <div style={{position:'relative', background:C.white, borderRadius:'20px 20px 0 0',
+        padding:'22px 20px 34px', animation:'slideUp 0.25s ease', maxHeight:'85dvh', overflowY:'auto'}}>
+
+        <div style={{display:'flex', alignItems:'center', marginBottom:18}}>
+          <h2 style={{flex:1, margin:0, fontFamily:SERIF, fontSize:20, fontWeight:600, color:C.ink}}>
+            {dateLabel}
+          </h2>
+          <button onClick={onClose} style={{border:'none', background:'none', padding:6, cursor:'pointer'}}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        {/* PREDICTED INCOME */}
+        <div style={{marginBottom:20}}>
+          <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.green, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
+            💰 Predicted income
+          </p>
+          {incomeEntries.length === 0 && !addingIncome && (
+            <p style={{margin:'0 0 8px', fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>Nothing predicted this day</p>
+          )}
+          {incomeEntries.map(inc => (
+            <div key={inc.id} style={{display:'flex', alignItems:'center', gap:6, padding:'6px 0', borderBottom:`1px solid ${C.sandMid}`}}>
+              <input defaultValue={inc.description} placeholder="Source"
+                onBlur={e=>updateIncome(inc.id,'description',e.target.value)}
+                style={{...inputStyle, flex:1.4}}/>
+              <input defaultValue={inc.account} placeholder="Account"
+                onBlur={e=>updateIncome(inc.id,'account',e.target.value)}
+                style={{...inputStyle, flex:1}}/>
+              <span style={{fontFamily:SERIF, fontSize:13, color:C.inkSoft}}>$</span>
+              <input type="number" defaultValue={inc.amount} placeholder="0.00"
+                onBlur={e=>updateIncome(inc.id,'amount',e.target.value)}
+                style={{...inputStyle, width:70, flex:'none'}}/>
+              <button onClick={()=>deleteIncome(inc.id)} style={{border:'none', background:C.red+'20', color:C.red,
+                borderRadius:6, padding:'6px 8px', cursor:'pointer', fontSize:11}}>🗑️</button>
+            </div>
+          ))}
+          {addingIncome ? (
+            <div style={{background:C.sand, borderRadius:10, padding:10, marginTop:8}}>
+              <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, marginBottom:6}}>
+                <input placeholder="Source (e.g. NORR)" value={newIncSource} onChange={e=>setNewIncSource(e.target.value)} style={inputStyle}/>
+                <input placeholder="Account" value={newIncAccount} onChange={e=>setNewIncAccount(e.target.value)} style={inputStyle}/>
+              </div>
+              <div style={{display:'flex', gap:6}}>
+                <input type="number" placeholder="Amount" value={newIncAmount} onChange={e=>setNewIncAmount(e.target.value)} style={inputStyle}/>
+                <button onClick={saveIncome} style={{border:'none', background:C.green, color:'white', borderRadius:8, padding:'0 14px', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>Save</button>
+                <button onClick={()=>setAddingIncome(false)} style={{border:`1px solid ${C.sandDark}`, background:'white', color:C.ink, borderRadius:8, padding:'0 12px', fontSize:12, cursor:'pointer', fontFamily:SANS}}>×</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={()=>setAddingIncome(true)} style={{width:'100%', marginTop:6, padding:'8px', border:`1px dashed ${C.green}55`,
+              borderRadius:8, background:'none', color:C.green, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+              + Add predicted income for this day
+            </button>
+          )}
+        </div>
+
+        {/* BILLS DUE */}
+        <div style={{marginBottom:20}}>
+          <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.red, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
+            📋 Bills due
+          </p>
+          {bills.length === 0 && !addingBill && (
+            <p style={{margin:'0 0 8px', fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>No bills due this day</p>
+          )}
+          {bills.map(bill => (
+            <div key={bill.key} style={{display:'flex', alignItems:'center', gap:6, padding:'6px 0', borderBottom:`1px solid ${C.sandMid}`}}>
+              <input defaultValue={bill.label} onBlur={e=>{if(e.target.value.trim() && e.target.value!==bill.label) updateBill(bill,'label',e.target.value);}}
+                style={{...inputStyle, flex:1.4}}/>
+              <span style={{fontFamily:SERIF, fontSize:13, color:C.inkSoft}}>$</span>
+              <input type="number" defaultValue={bill.amount} onBlur={e=>{const v=parseFloat(e.target.value); if(!isNaN(v) && v!==bill.amount) updateBill(bill,'amount',e.target.value);}}
+                style={{...inputStyle, width:80, flex:'none'}}/>
+              <button onClick={()=>removeBill(bill)} style={{border:'none', background:C.red+'20', color:C.red,
+                borderRadius:6, padding:'6px 8px', cursor:'pointer', fontSize:11}}>🗑️</button>
+            </div>
+          ))}
+          {addingBill ? (
+            <div style={{background:C.sand, borderRadius:10, padding:10, marginTop:8}}>
+              <div style={{display:'flex', gap:6}}>
+                <input placeholder="Bill name" value={newBillLabel} onChange={e=>setNewBillLabel(e.target.value)} style={{...inputStyle, flex:1.4}}/>
+                <input type="number" placeholder="Amount" value={newBillAmount} onChange={e=>setNewBillAmount(e.target.value)} style={{...inputStyle, width:80, flex:'none'}}/>
+              </div>
+              <div style={{display:'flex', gap:6, marginTop:6}}>
+                <button onClick={saveNewBill} style={{border:'none', background:C.red, color:'white', borderRadius:8, padding:'8px 14px', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS, flex:1}}>Save bill</button>
+                <button onClick={()=>setAddingBill(false)} style={{border:`1px solid ${C.sandDark}`, background:'white', color:C.ink, borderRadius:8, padding:'8px 12px', fontSize:12, cursor:'pointer', fontFamily:SANS}}>×</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={()=>setAddingBill(true)} style={{width:'100%', marginTop:6, padding:'8px', border:`1px dashed ${C.red}55`,
+              borderRadius:8, background:'none', color:C.red, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+              + Add a bill due this day
+            </button>
+          )}
+        </div>
+
+        {/* GOAL DEPOSITS */}
+        <div>
+          <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.purple, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
+            🎯 Goal deposits
+          </p>
+          {deposits.length === 0 && !addingDeposit && (
+            <p style={{margin:'0 0 8px', fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>No goal deposits this day</p>
+          )}
+          {deposits.map(dep => (
+            <div key={dep.id} style={{display:'flex', alignItems:'center', gap:6, padding:'6px 0', borderBottom:`1px solid ${C.sandMid}`}}>
+              <span style={{flex:1.4, fontSize:13, color:C.ink, fontFamily:SANS, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                {dep.goalLabel}
+              </span>
+              <span style={{fontFamily:SERIF, fontSize:13, color:C.inkSoft}}>$</span>
+              <input type="number" defaultValue={dep.amount}
+                onBlur={e=>{const v=parseFloat(e.target.value); if(!isNaN(v) && v!==dep.amount) updateDeposit(dep.goalId, dep.id, e.target.value);}}
+                style={{...inputStyle, width:80, flex:'none'}}/>
+              <button onClick={()=>deleteDeposit(dep.goalId, dep.id)} style={{border:'none', background:C.red+'20', color:C.red,
+                borderRadius:6, padding:'6px 8px', cursor:'pointer', fontSize:11}}>🗑️</button>
+            </div>
+          ))}
+          {goals.length > 0 && (addingDeposit ? (
+            <div style={{background:C.sand, borderRadius:10, padding:10, marginTop:8}}>
+              <div style={{display:'flex', gap:6}}>
+                <select value={depositGoalId} onChange={e=>setDepositGoalId(e.target.value)} style={{...inputStyle, flex:1.4}}>
+                  {goals.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
+                </select>
+                <input type="number" placeholder="Amount" value={newDepositAmount} onChange={e=>setNewDepositAmount(e.target.value)} style={{...inputStyle, width:80, flex:'none'}}/>
+              </div>
+              <div style={{display:'flex', gap:6, marginTop:6}}>
+                <button onClick={saveDeposit} style={{border:'none', background:C.purple, color:'white', borderRadius:8, padding:'8px 14px', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS, flex:1}}>Save deposit</button>
+                <button onClick={()=>setAddingDeposit(false)} style={{border:`1px solid ${C.sandDark}`, background:'white', color:C.ink, borderRadius:8, padding:'8px 12px', fontSize:12, cursor:'pointer', fontFamily:SANS}}>×</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={()=>setAddingDeposit(true)} style={{width:'100%', marginTop:6, padding:'8px', border:`1px dashed ${C.purple}55`,
+              borderRadius:8, background:'none', color:C.purple, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+              + Add a goal deposit for this day
+            </button>
+          ))}
         </div>
       </div>
     </div>
@@ -5274,9 +5518,9 @@ export default function App() {
   const [editingIncome, setEditingIncome]=useState(null); // Income entry being edited
   const [showIncomeList, setShowIncomeList]=useState(false); // Show income list for editing
   const [goals, setGoals] = useState([
-    { id: 'goal-short', person: 'shared', label: 'Short-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0 },
-    { id: 'goal-medium', person: 'shared', label: 'Medium-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0 },
-    { id: 'goal-long', person: 'shared', label: 'Long-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0 }
+    { id: 'goal-short', person: 'shared', label: 'Short-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0, deposits: [] },
+    { id: 'goal-medium', person: 'shared', label: 'Medium-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0, deposits: [] },
+    { id: 'goal-long', person: 'shared', label: 'Long-term Goal', target: 0, monthlyContribution: 0, description: '', currentBalance: 0, deposits: [] }
   ]);
   const [showGoalsModal, setShowGoalsModal] = useState(false);
   const [depositingGoalId, setDepositingGoalId] = useState(null);
@@ -5672,7 +5916,9 @@ export default function App() {
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
-          expectedIncome={expectedIncome} goals={goals} allCats={allCats}/>}
+          expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
+          goals={goals} setGoals={setGoals} allCats={allCats} history={history}
+          showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='goals'   && <GoalsTab txns={txns} bankImports={imports}
           billPayments={billPayments} billRules={billRules} profile={profile}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}

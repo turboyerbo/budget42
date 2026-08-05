@@ -142,7 +142,8 @@ check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, 
 
 check('render CalendarTab', () => renderToString(React.createElement(CalendarTab, {
   year: 2026, month: 6, txns, bankImports: imports, billRules: [], billPayments: [],
-  expectedIncome: [], goals: [], allCats })));
+  expectedIncome: [], setExpectedIncome: noop, goals: [], setGoals: noop, allCats,
+  history, showToast: noop, onSaveRule: noop, onDeleteRule: noop })));
 
 check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {
   txns, bankImports: imports, allCats, year: 2026, month: 6,
