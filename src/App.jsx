@@ -38,6 +38,7 @@ const CAT_TARGETS_KEY = 'b42_cat_targets';
 const NOTIFS_KEY = 'b42_notifs';
 const EXPECTED_INCOME_KEY = 'b42_expected_income';
 const GOALS_KEY = 'b42_goals';
+const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
 
 // ─── TOP NAVIGATION ───────────────────────────────────────────────────────────
 function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
@@ -1713,6 +1714,157 @@ export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow 
 }
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
+// ─── PREDICTED INCOME EDITOR (inline, expands under the hero) ────────────────
+function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C, SERIF, SANS}) {
+  const [editingId, setEditingId] = useState(null); // id of entry being edited, or 'new'
+  const [fDate, setFDate] = useState(today());
+  const [fAmount, setFAmount] = useState('');
+  const [fSource, setFSource] = useState('');
+  const [fAccount, setFAccount] = useState('');
+
+  function startNew() {
+    setEditingId('new');
+    setFDate(today()); setFAmount(''); setFSource(''); setFAccount('');
+  }
+  function startEdit(entry) {
+    setEditingId(entry.id);
+    setFDate(entry.date || today());
+    setFAmount(entry.amount != null ? String(entry.amount) : '');
+    setFSource(entry.description || '');
+    setFAccount(entry.account || '');
+  }
+  function cancel() { setEditingId(null); }
+
+  function save() {
+    const amt = parseFloat(fAmount);
+    if (!fDate || isNaN(amt) || amt <= 0) { showToast('Enter a date and amount'); return; }
+    const entry = {
+      id: editingId === 'new' ? ('income-' + Date.now()) : editingId,
+      date: fDate,
+      amount: amt,
+      description: fSource.trim(),
+      account: fAccount.trim(),
+      person: 'both',
+    };
+    const list = expectedIncome || [];
+    const updated = editingId === 'new'
+      ? [...list, entry]
+      : list.map(e => e.id === editingId ? {...e, ...entry} : e);
+    updated.sort((a,b)=>new Date(a.date)-new Date(b.date));
+    setExpectedIncome(updated);
+    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    showToast(editingId === 'new' ? 'Income entry added' : 'Income entry updated');
+    setEditingId(null);
+  }
+
+  function remove(id) {
+    const updated = (expectedIncome || []).filter(e => e.id !== id);
+    setExpectedIncome(updated);
+    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    showToast('Income entry deleted');
+  }
+
+  const sum = (expectedIncome || []).reduce((a,i)=>a+(i.amount||0),0);
+  const inputStyle = {
+    width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+    background:C.white, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'
+  };
+
+  return (
+    <Card style={{padding:'14px 16px', marginTop:8, marginBottom:12, background:C.blue+'08', border:`1px solid ${C.blue}22`}}>
+      <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10}}>
+        <p style={{margin:0, fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS}}>
+          Predicted income sources
+        </p>
+        <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.blue}}>
+          {fmt(sum)}
+        </p>
+      </div>
+
+      {(expectedIncome || []).length > 0 && (
+        <div style={{marginBottom:10}}>
+          {expectedIncome.map(inc => (
+            <div key={inc.id} style={{
+              display:'flex', alignItems:'center', gap:8, padding:'8px 0',
+              borderBottom:`1px solid ${C.blue}18`, fontSize:12}}>
+              <div style={{flex:1, minWidth:0}}>
+                <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS,
+                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                  {inc.description || 'Income'}
+                </p>
+                <p style={{margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
+                  {new Date(inc.date).toLocaleDateString('en-CA')}
+                  {inc.account && ` • ${inc.account}`}
+                </p>
+              </div>
+              <p style={{margin:0, fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
+                +{fmt(inc.amount)}
+              </p>
+              <button onClick={()=>startEdit(inc)} style={{padding:'5px 8px', border:'none',
+                background:C.sand, color:C.ink, borderRadius:6, cursor:'pointer', fontSize:11}}>
+                ✏️
+              </button>
+              <button onClick={()=>remove(inc.id)} style={{padding:'5px 8px', border:'none',
+                background:C.red+'20', color:C.red, borderRadius:6, cursor:'pointer', fontSize:11}}>
+                🗑️
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editingId ? (
+        <div style={{background:C.white, borderRadius:10, padding:12}}>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8}}>
+            <div>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                Expected date
+              </label>
+              <input type="date" value={fDate} onChange={e=>setFDate(e.target.value)} style={inputStyle}/>
+            </div>
+            <div>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                Expected amount
+              </label>
+              <input type="number" placeholder="0.00" value={fAmount} onChange={e=>setFAmount(e.target.value)} style={inputStyle}/>
+            </div>
+          </div>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:10}}>
+            <div>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                Source of income
+              </label>
+              <input type="text" placeholder="e.g. NORR paycheck" value={fSource} onChange={e=>setFSource(e.target.value)} style={inputStyle}/>
+            </div>
+            <div>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                Deposit account
+              </label>
+              <input type="text" placeholder="e.g. Joint chequing" value={fAccount} onChange={e=>setFAccount(e.target.value)} style={inputStyle}/>
+            </div>
+          </div>
+          <div style={{display:'flex', gap:8}}>
+            <button onClick={cancel} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
+              color:C.ink, padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer'}}>
+              Cancel
+            </button>
+            <button onClick={save} style={{flex:1, border:'none', background:C.blue,
+              color:'white', padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer'}}>
+              Save
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={startNew} style={{
+          width:'100%', padding:'10px', border:`1px dashed ${C.blue}55`, borderRadius:8,
+          background:'none', color:C.blue, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+          + Add expected income
+        </button>
+      )}
+    </Card>
+  );
+}
+
 export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   allCats,onSaveSettings,catTargets,suggested,onAcceptSuggested,
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
@@ -1721,6 +1873,14 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
                   income,expectedIncome,setShowAddIncome,billPayments,setEditingCatTarget,setEditingIncome,setExpectedIncome,showToast,goals,setGoals,setShowGoalsModal,depositingGoalId,setDepositingGoalId}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
+  const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetOverride, setBudgetOverride] = useState(() => {
+    try {
+      const v = localStorage.getItem(BUDGET_OVERRIDE_KEY);
+      return v !== null ? parseFloat(v) : null;
+    } catch { return null; }
+  });
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
   const everythingThisMonth=everything;   // both people, before the view filter
@@ -1769,6 +1929,19 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
   const totalSpent=Object.entries(txByCat)
     .filter(([k])=>!excludedIds.has(k))
     .reduce((a,[,v])=>a+v,0);
+
+  // Predicted income comes from what you've entered as expected, not from transactions
+  const predictedIncomeTotal = (expectedIncome||[]).reduce((a,i)=>a+(i.amount||0),0);
+
+  // What's actually landed in accounts this month, minus what's gone out
+  const actuallyAvailableNow = totalIncome - totalSpent;
+
+  // Sum of every category's target — the default "budgeted for spending" figure,
+  // unless the couple has manually overridden it
+  const categoryBudgetSum = allCats
+    .filter(c=>!excludedIds.has(c.id))
+    .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
+  const budgetedForSpending = budgetOverride != null ? budgetOverride : categoryBudgetSum;
 
   // Same merchant, same day, both of you → you were out together
   const { shared:sharedMoments } = findSharedMoments(allTx);
@@ -1926,23 +2099,61 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
           {surplus>=0?fmt(surplus):'–'+fmt(Math.abs(surplus))}
         </p>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
-          {[['Predicted Income',fmt(totalIncome),null],
-            ['Actually Available Now',fmt(totalIncome-committed),null],
-            ['Bills to pay this month',fmt(committed),dueBills.length]].map(([l,v,n])=>(
-            <div key={l}>
-              <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-                textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>{l}</p>
-              <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
-                color:'rgba(255,255,255,0.95)'}}>{v}</p>
-              {n!=null&&n>0&&(
-                <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
-                  {n} bill{n===1?'':'s'} not yet charged
-                </p>
-              )}
-            </div>
-          ))}
+          <button onClick={()=>setShowPredictedIncomePanel(v=>!v)} style={{
+            border:'none',background:'none',textAlign:'left',cursor:'pointer',padding:0,
+            display:'flex',flexDirection:'column',gap:0}}>
+            <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS,
+              display:'flex',alignItems:'center',gap:4}}>
+              Predicted Income
+              <ChevronRight size={11} color="rgba(255,255,255,0.65)"
+                style={{transform:showPredictedIncomePanel?'rotate(90deg)':'none',transition:'transform 0.15s'}}/>
+            </p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
+              color:'rgba(255,255,255,0.95)',textDecoration:'underline',textDecorationColor:'rgba(255,255,255,0.35)',
+              textUnderlineOffset:3}}>
+              {fmt(predictedIncomeTotal)}
+            </p>
+            {expectedIncome && expectedIncome.length > 0 && (
+              <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
+                {expectedIncome.length} entr{expectedIncome.length===1?'y':'ies'}
+              </p>
+            )}
+          </button>
+
+          <div>
+            <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Actually Available Now</p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
+              color:'rgba(255,255,255,0.95)'}}>{fmt(actuallyAvailableNow)}</p>
+            <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
+              deposited − spent
+            </p>
+          </div>
+
+          <div>
+            <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Bills to pay this month</p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
+              color:'rgba(255,255,255,0.95)'}}>{fmt(committed)}</p>
+            {dueBills.length>0&&(
+              <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
+                {dueBills.length} bill{dueBills.length===1?'':'s'} not yet charged
+              </p>
+            )}
+          </div>
         </div>
       </Card>
+
+      {/* Predicted income editor — expands under the hero */}
+      {showPredictedIncomePanel && (
+        <PredictedIncomeEditor
+          expectedIncome={expectedIncome}
+          setExpectedIncome={setExpectedIncome}
+          showToast={showToast}
+          C={C} SERIF={SERIF} SANS={SANS}
+        />
+      )}
 
       {/* Spending summary below hero */}
       <Card style={{padding:'14px 16px', marginTop:12, marginBottom:12, background:C.sand}}>
@@ -1951,159 +2162,57 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
               Amount budgeted for spending
             </p>
-            <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: C.ink}}>
-              {fmt(totalSpent)}
-            </p>
+            {editingBudget ? (
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <span style={{fontFamily:SERIF,fontSize:18,color:C.ink}}>$</span>
+                <input
+                  type="number"
+                  autoFocus
+                  defaultValue={budgetedForSpending.toFixed(2)}
+                  onBlur={e=>{
+                    const v=parseFloat(e.target.value);
+                    if(!isNaN(v)){
+                      setBudgetOverride(v);
+                      localStorage.setItem(BUDGET_OVERRIDE_KEY, String(v));
+                      showToast('Spending budget updated');
+                    }
+                    setEditingBudget(false);
+                  }}
+                  onKeyDown={e=>{if(e.key==='Enter')e.target.blur(); if(e.key==='Escape')setEditingBudget(false);}}
+                  style={{width:90,border:`1px solid ${C.sandDark}`,borderRadius:7,padding:'3px 7px',
+                    fontSize:16,fontWeight:600,color:C.ink,fontFamily:SERIF,background:C.white}}/>
+              </div>
+            ) : (
+              <button onClick={()=>setEditingBudget(true)} style={{
+                border:'none',background:'none',padding:0,cursor:'pointer',textAlign:'left',
+                display:'flex',alignItems:'center',gap:6}}>
+                <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: C.ink}}>
+                  {fmt(budgetedForSpending)}
+                </p>
+                <span style={{fontSize:11,color:C.inkSoft}}>✏️</span>
+              </button>
+            )}
+            {budgetOverride != null && (
+              <button onClick={()=>{
+                setBudgetOverride(null);
+                localStorage.removeItem(BUDGET_OVERRIDE_KEY);
+                showToast('Reset to sum of category targets');
+              }} style={{border:'none',background:'none',padding:0,marginTop:2,cursor:'pointer',
+                fontSize:10,color:C.inkSoft,textDecoration:'underline',fontFamily:SANS}}>
+                Reset to category totals ({fmt(categoryBudgetSum)})
+              </button>
+            )}
           </div>
           <div>
             <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
               Spent so far
             </p>
-            <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: totalSpent > 0 ? C.red : C.green}}>
+            <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: totalSpent > budgetedForSpending ? C.red : C.ink}}>
               {fmt(totalSpent)}
             </p>
           </div>
         </div>
       </Card>
-
-      {/* Expected Income */}
-      <Card style={{padding:'14px 16px', marginBottom:12, background:C.blue+'08', border:`1px solid ${C.blue}22`}}>
-        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12}}>
-          <div>
-            <p style={{margin:0, fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS}}>
-              Expected Income
-            </p>
-            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
-              {expectedIncome && expectedIncome.length > 0 ? `${expectedIncome.length} expected` : 'Add expected income for cash flow visibility'}
-            </p>
-          </div>
-          <button onClick={() => setShowAddIncome(true)} style={{
-            padding:'6px 12px', border:`1px solid ${C.blue}`, borderRadius:8,
-            background:C.blue+'15', color:C.blue, fontSize:12, fontWeight:600,
-            cursor:'pointer', fontFamily:SANS, display:'flex', alignItems:'center', gap:4
-          }}>
-            + Add
-          </button>
-        </div>
-
-        {expectedIncome && expectedIncome.length > 0 ? (
-          <div>
-            {expectedIncome.map(inc => {
-              const incDate = new Date(inc.date);
-              const now = new Date();
-              const isUpcoming = incDate > now;
-              const daysUntil = Math.ceil((incDate - now) / (1000 * 60 * 60 * 24));
-              
-              return (
-                <div key={inc.id} style={{
-                  display:'flex', alignItems:'center', gap:10, padding:'10px 0',
-                  borderBottom:`1px solid ${C.blue}22`, fontSize:13
-                }}>
-                  <div style={{
-                    width:32, height:32, borderRadius:8, background:C.blue+'20',
-                    display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0,
-                    fontSize:16
-                  }}>
-                    💰
-                  </div>
-                  <div style={{flex:1, minWidth:0}}>
-                    <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:2}}>
-                      <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS}}>
-                        {inc.description || (inc.person === 'both' ? 'Both' : inc.person.charAt(0).toUpperCase() + inc.person.slice(1)) + '\'s Income'}
-                      </p>
-                      {inc.actual && (
-                        <span style={{fontSize:10, padding:'2px 6px', borderRadius:4, background:inc.actual >= inc.amount ? C.green+'20' : C.red+'20', 
-                          color:inc.actual >= inc.amount ? C.green : C.red, fontWeight:600, fontFamily:SANS}}>
-                          {inc.actual >= inc.amount ? 'Received' : 'Under'}
-                        </span>
-                      )}
-                    </div>
-                    <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
-                      {incDate.toLocaleDateString('en-CA')} {incDate > now && daysUntil > 0 && `(in ${daysUntil}d)`}
-                      {inc.recurring && ` • Recurring (${inc.frequency})`}
-                    </p>
-                  </div>
-                  <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:4}}>
-                    <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
-                      {inc.actual ? `$${inc.actual.toFixed(2)}` : `+$${inc.amount.toFixed(2)}`}
-                    </p>
-                    {inc.actual && inc.actual !== inc.amount && (
-                      <p style={{margin:0, fontFamily:SERIF, fontSize:11, color:C.inkSoft, whiteSpace:'nowrap'}}>
-                        Expected: $${inc.amount.toFixed(2)}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => {setEditingIncome(inc); setShowAddIncome(true);}}
-                    style={{padding:'6px 10px', border:'none', background:C.sand, color:C.ink,
-                      borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:SANS}}
-                    title="Edit income">
-                    ✏️
-                  </button>
-                  <button
-                    onClick={() => {
-                      const updated = expectedIncome.filter(e => e.id !== inc.id);
-                      setExpectedIncome(updated);
-                      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
-                      showToast('Income entry deleted');
-                    }}
-                    style={{padding:'6px 10px', border:'none', background:C.red+'20', color:C.red,
-                      borderRadius:6, cursor:'pointer', fontSize:12, fontWeight:500, fontFamily:SANS}}
-                    title="Delete income">
-                    🗑️
-                  </button>
-                </div>
-              );
-            })}
-            
-            {/* Projected cash flow */}
-            <div style={{marginTop:12, paddingTop:12, borderTop:`1px solid ${C.blue}33`}}>
-              <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.inkSoft, fontFamily:SANS, textTransform:'uppercase'}}>
-                Cash Flow Projection
-              </p>
-              <div style={{
-                background:C.white, borderRadius:10, padding:12,
-                display:'grid', gridTemplateColumns:'1fr 1fr', gap:10
-              }}>
-                <div>
-                  <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>Today</p>
-                  <p style={{margin:'4px 0 0', fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.ink}}>
-                    {fmt(totalIncome - committed - totalSpent)}
-                  </p>
-                </div>
-                <div>
-                  <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>After Income</p>
-                  <p style={{margin:'4px 0 0', fontFamily:SERIF, fontSize:16, fontWeight:600, 
-                    color: (totalIncome + (expectedIncome?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent) >= 0 ? C.green : C.red}}>
-                    {fmt(totalIncome + (expectedIncome?.reduce((a,i) => a+i.amount, 0) || 0) - committed - totalSpent)}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>
-            Track expected income to see cash flow projections
-          </p>
-        )}
-      </Card>
-
-      {/* CTFS */}
-      <div style={{background:C.redLight,border:`1px solid ${C.red}22`,borderRadius:14,
-        padding:'12px 16px',marginBottom:12,display:'flex',gap:10,alignItems:'center'}}>
-        <div style={{flex:1}}>
-          <p style={{margin:'0 0 2px',fontSize:13,fontWeight:600,color:C.red,fontFamily:SANS}}>
-            CTFS debt — $18,933 at 22% APR
-          </p>
-          <div style={{display:'flex',alignItems:'center',gap:6}}>
-            <span style={{fontSize:12,color:'#9b2c2c',fontFamily:SANS}}>Payment target: $</span>
-            <input type="number" value={ccTarget}
-              onChange={e=>{const v=parseFloat(e.target.value)||0;setCcTarget(v);onSaveSettings(v);}}
-              style={{width:68,border:`1px solid ${C.red}44`,borderRadius:7,padding:'3px 7px',
-                fontSize:13,fontWeight:600,color:C.red,background:'#fff',fontFamily:SANS}}/>
-          </div>
-        </div>
-      </div>
 
       {/* Suggested targets - show inline with categories instead of big block */}
       {Object.keys(suggested||{}).length>0&&(
@@ -2197,80 +2306,6 @@ export function HomeTab({txns,bankImports,ccTarget,setCcTarget,
             </p>
           )}
         </div>
-      )}
-
-      {(dueBills.length>0||paidBills.length>0)&&(
-        <Card style={{padding:'8px 0'}}>
-          <button onClick={()=>setOpenCat(openCat==='__bills'?null:'__bills')}
-            style={{display:'flex',alignItems:'center',gap:10,padding:'10px 18px',
-              width:'100%',border:'none',background:'none',cursor:'pointer',textAlign:'left'}}>
-            <div style={{width:30,height:30,borderRadius:9,background:C.blue+'18',
-              display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-              <CalendarDays size={15} color={C.blue}/>
-            </div>
-            <div style={{flex:1,minWidth:0}}>
-              <p style={{margin:0,fontSize:13,fontWeight:600,color:C.ink,fontFamily:SANS}}>
-                Detected patterns
-              </p>
-              <p style={{margin:'1px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
-                {totalPaidThisMonth} paid this month · {dueBills.length} upcoming
-              </p>
-            </div>
-            <span style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.ink}}>
-              {fmt(dueTotal)}
-            </span>
-            <ChevronRight size={14} color={C.sandDark}
-              style={{transform:openCat==='__bills'?'rotate(90deg)':'none',
-                transition:'transform 0.15s'}}/>
-          </button>
-
-          {openCat==='__bills'&&(
-            <div style={{background:C.sand,padding:'6px 0 10px'}}>
-              <p style={{margin:'0 18px 6px',fontSize:10,color:C.inkSoft,
-                fontFamily:SANS,lineHeight:1.6}}>
-                Patterns detected from your statements — charges that appear in at least two different months. 
-                <br/><br/>
-                <strong>For THIS month's payment status, check the Bills tab ↑</strong>
-              </p>
-              {dueBills.map(b=>(
-                <div key={b.key} style={{display:'flex',alignItems:'center',gap:8,
-                  padding:'7px 18px 7px 30px'}}>
-                  <div style={{width:6,height:6,borderRadius:99,background:C.blue,flexShrink:0}}/>
-                  <span style={{flex:1,fontSize:12,color:C.ink,fontFamily:SANS,
-                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {b.label}
-                  </span>
-                  <span style={{fontSize:10,color:C.inkSoft,fontFamily:SANS}}>
-                    ~{b.day}{b.day===1?'st':b.day===2?'nd':b.day===3?'rd':'th'}
-                  </span>
-                  <span style={{fontFamily:SERIF,fontSize:14,fontWeight:600,color:C.ink,
-                    minWidth:56,textAlign:'right'}}>{fmt(b.amount)}</span>
-                </div>
-              ))}
-              {paidBills.map(b=>(
-                <div key={b.key} style={{display:'flex',alignItems:'center',gap:8,
-                  padding:'7px 18px 7px 30px',opacity:0.5}}>
-                  <Check size={11} color={C.green} strokeWidth={3} style={{flexShrink:0}}/>
-                  <span style={{flex:1,fontSize:12,color:C.inkMid,fontFamily:SANS,
-                    textDecoration:'line-through',
-                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {b.label}
-                  </span>
-                  <span style={{fontSize:10,color:C.green,fontFamily:SANS}}>charged</span>
-                  <span style={{fontFamily:SERIF,fontSize:14,fontWeight:600,color:C.inkSoft,
-                    minWidth:56,textAlign:'right'}}>{fmt(b.amount)}</span>
-                </div>
-              ))}
-              {recurring.length===0&&(
-                <p style={{margin:'0 18px',fontSize:12,color:C.inkSoft,
-                  fontFamily:SANS,fontStyle:'italic'}}>
-                  Not enough history yet. Upload two or more months and your recurring
-                  bills will be spotted automatically.
-                </p>
-              )}
-            </div>
-          )}
-        </Card>
       )}
 
       <SL>Spending this month</SL>
