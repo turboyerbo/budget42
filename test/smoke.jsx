@@ -74,6 +74,10 @@ const noop = () => {};
     profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
     view: v, setView: noop, history, billRules: [],
     onDeleteRow: noop, duplicateCount: 2, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    income: {}, expectedIncome: [], setShowAddIncome: noop, billPayments: [],
+    setEditingCatTarget: noop, setEditingIncome: noop, setExpectedIncome: noop,
+    showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop
   })));
 });
 
@@ -83,6 +87,11 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
   onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
   profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
   view: 'combined', setView: noop, history: [], billRules: [],
+  onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+  setQuickAddCat: noop, setTab: noop,
+  income: {}, expectedIncome: [], setShowAddIncome: noop, billPayments: [],
+  setEditingCatTarget: noop, setEditingIncome: noop, setExpectedIncome: noop,
+  showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop
 })));
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
