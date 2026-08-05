@@ -12,7 +12,7 @@ import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
-  AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
+  AutomationTab, AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
@@ -183,6 +183,11 @@ check('render UploadTab (no AI)', () => renderToString(React.createElement(Uploa
   showToast: noop, onImported: noop, allCats, aiOn: false,
   aiDiag: { present:true, reason:'rejected', length:20, startsWith:'sk-ant-abc…',
             endsWith:'…1234', looksValid:true } })));
+
+check('render AutomationTab', () => renderToString(React.createElement(AutomationTab, {
+  txns, bankImports: imports, allCats, year: 2026, month: 6,
+  personView: 'combined', profile, showToast: noop, onImported: noop,
+  aiOn: true, aiDiag: null })));
 
 // Screens reached only through interaction — still worth rendering once
 check('render AuthScreen', () => renderToString(React.createElement(AuthScreen, { onAuth: noop })));

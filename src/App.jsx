@@ -5034,6 +5034,37 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
   );
 }
 
+// ─── AUTOMATION TAB (Charts + Upload combined) ────────────────────────────────
+export function AutomationTab({txns,bankImports,allCats,year,month,personView,profile,
+                                showToast,onImported,aiOn,aiDiag}) {
+  const [section, setSection] = useState('charts'); // 'charts' | 'upload'
+
+  return (
+    <div>
+      <div style={{padding:'16px 16px 0'}}>
+        <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
+          marginBottom:4}}>
+          {[['charts','📊 Charts'],['upload','⬆️ Upload']].map(([k,l])=>(
+            <button key={k} onClick={()=>setSection(k)} style={{flex:1,border:'none',
+              borderRadius:9,padding:'8px 0',fontSize:13,fontWeight:600,cursor:'pointer',
+              fontFamily:SANS,background:section===k?C.white:'transparent',
+              color:section===k?C.ink:C.inkSoft,
+              boxShadow:section===k?'0 1px 3px rgba(0,0,0,0.1)':'none'}}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+      {section==='charts'
+        ? <ChartsTab txns={txns} bankImports={bankImports} allCats={allCats}
+            year={year} month={month} personView={personView} profile={profile}/>
+        : <UploadTab showToast={showToast} onImported={onImported} allCats={allCats}
+            aiOn={aiOn} aiDiag={aiDiag}/>}
+    </div>
+  );
+}
+
+
 // ─── Partner activity ─────────────────────────────────────────────────────────
 // Describes a realtime change in plain language, e.g.
 //   "Ness added $42.10 to Groceries"
@@ -5938,13 +5969,9 @@ export default function App() {
   const NAV=[
     {id:'home',   label:'Home',   Icon:Home},
     {id:'spending',label:'Spending',Icon:Wallet},
-    {id:'add',    label:'Add',    Icon:Plus,    accent:true},
-    {id:'history',label:'History',Icon:History},
     {id:'bills',  label:'Bills',  Icon:CalendarDays},
     {id:'calendar',label:'Calendar',Icon:Calendar},
-    {id:'goals',  label:'Goals',  Icon:Heart},
-    {id:'charts', label:'Charts', Icon:PieChart},
-    {id:'upload', label:'Upload', Icon:Upload},
+    {id:'automation',label:'Automation',Icon:PieChart},
   ];
 
   return (
@@ -6020,12 +6047,9 @@ export default function App() {
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
           goals={goals} setGoals={setGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
-      {tab==='goals'   && <GoalsTab txns={txns} bankImports={imports}
-          billPayments={billPayments} billRules={billRules} profile={profile}/>}
-      {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
-          year={year} month={month} personView={view} profile={profile}/>}
-      {tab==='upload'  && <UploadTab showToast={showToast} onImported={loadAll}
-          allCats={allCats} aiOn={aiOn} aiDiag={aiDiag}/>}
+      {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCats}
+          year={year} month={month} personView={view} profile={profile}
+          showToast={showToast} onImported={loadAll} aiOn={aiOn} aiDiag={aiDiag}/>}
 
       {showReset && (
         <ResetModal
