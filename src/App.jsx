@@ -1925,11 +1925,103 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C,
   );
 }
 
+// ─── GOAL ROW (inline-editable, used inside the accordion) ───────────────────
+function GoalRow({goal, onUpdate, onDeposit}) {
+  const [label, setLabel] = useState(goal.label);
+  const [description, setDescription] = useState(goal.description || '');
+  const [monthly, setMonthly] = useState(goal.monthlyContribution ? String(goal.monthlyContribution) : '');
+  const [target, setTarget] = useState(goal.target ? String(goal.target) : '');
+
+  // Keep in sync if the goal changes from elsewhere (e.g. a deposit changes currentBalance,
+  // or another field is edited and the parent re-renders with fresh data).
+  useEffect(() => { setLabel(goal.label); }, [goal.label]);
+  useEffect(() => { setDescription(goal.description || ''); }, [goal.description]);
+  useEffect(() => { setMonthly(goal.monthlyContribution ? String(goal.monthlyContribution) : ''); }, [goal.monthlyContribution]);
+  useEffect(() => { setTarget(goal.target ? String(goal.target) : ''); }, [goal.target]);
+
+  const currentBalance = goal.currentBalance || 0;
+  const goalMonthly = goal.monthlyContribution || 0;
+  const effectiveTarget = goal.target || goalMonthly * 12;
+  const progress = effectiveTarget > 0 ? (currentBalance / effectiveTarget) * 100 : 0;
+  const isComplete = currentBalance >= effectiveTarget && effectiveTarget > 0;
+
+  const fieldStyle = {
+    width:'100%', padding:'7px 8px', border:`1px solid ${C.sandDark}`, borderRadius:7,
+    background:C.white, color:C.ink, fontFamily:SERIF, fontSize:13, outline:'none', boxSizing:'border-box'
+  };
+
+  return (
+    <div style={{padding:'14px 0', borderTop:`1px solid ${C.sandMid}`}}>
+      <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:6}}>
+        <input value={label} onChange={e=>setLabel(e.target.value)}
+          onBlur={()=>{ if(label.trim() && label.trim()!==goal.label) onUpdate('label', label.trim()); else setLabel(goal.label); }}
+          style={{flex:1, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS,
+            border:'none', borderBottom:`1px solid ${C.sandMid}`, background:'none',
+            padding:'2px 0 6px', outline:'none'}}/>
+        {isComplete && <span style={{fontSize:14}}>✓</span>}
+      </div>
+
+      <input value={description} onChange={e=>setDescription(e.target.value)}
+        onBlur={()=>{ if(description.trim()!==(goal.description||'')) onUpdate('description', description.trim()); }}
+        placeholder="What's this goal for? (optional)"
+        style={{width:'100%', fontSize:11, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic',
+          border:'none', background:'none', padding:'0 0 10px', outline:'none', boxSizing:'border-box'}}/>
+
+      <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:10}}>
+        <div>
+          <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+            Monthly contribution $
+          </label>
+          <input type="number" value={monthly} onChange={e=>setMonthly(e.target.value)}
+            onBlur={()=>{ const v=parseFloat(monthly)||0; if(v!==goalMonthly) onUpdate('monthlyContribution', v); }}
+            placeholder="0" style={fieldStyle}/>
+        </div>
+        <div>
+          <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+            Target $ (optional)
+          </label>
+          <input type="number" value={target} onChange={e=>setTarget(e.target.value)}
+            onBlur={()=>{ const v=parseFloat(target)||0; if(v!==(goal.target||0)) onUpdate('target', v); }}
+            placeholder="auto" style={fieldStyle}/>
+        </div>
+      </div>
+
+      <div style={{display:'flex', alignItems:'baseline', gap:4, marginBottom:6}}>
+        <p style={{margin:0, fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.green}}>
+          ${currentBalance.toFixed(0)}
+        </p>
+        {effectiveTarget > 0 && (
+          <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+            / ${effectiveTarget.toFixed(0)} saved
+          </p>
+        )}
+      </div>
+
+      {effectiveTarget > 0 && (
+        <div style={{width:'100%', height:6, background:C.sandDark+'33', borderRadius:3, overflow:'hidden', marginBottom:10}}>
+          <div style={{width:`${Math.min(progress,100)}%`, height:'100%',
+            background: progress>=100 ? C.green : C.blue, transition:'width 0.3s ease'}}/>
+        </div>
+      )}
+
+      <button onClick={onDeposit} style={{
+        width:'100%', padding:'8px 12px', border:'none', background:C.green+'20', color:C.green,
+        borderRadius:8, cursor:'pointer', fontSize:12, fontWeight:600, fontFamily:SANS, transition:'all 0.12s'
+      }}
+        onMouseEnter={e=>{e.target.style.background=C.green+'30';}}
+        onMouseLeave={e=>{e.target.style.background=C.green+'20';}}>
+        + Add Deposit
+      </button>
+    </div>
+  );
+}
+
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
                   history,billRules,billPayments,expectedIncome,setExpectedIncome,
-                  showToast,profile,goals,setGoals,setShowGoalsModal,depositingGoalId,setDepositingGoalId}) {
+                  showToast,profile,goals,setGoals,depositingGoalId,setDepositingGoalId}) {
   const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
   const [editingBudget, setEditingBudget] = useState(false);
+  const [expandedGroup, setExpandedGroup] = useState(null); // 'jordan' | 'mariel' | 'couple' | null
   const [budgetOverride, setBudgetOverride] = useState(() => {
     try {
       const v = localStorage.getItem(BUDGET_OVERRIDE_KEY);
@@ -1987,125 +2079,18 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
   const surplus=totalIncome-committed-totalSpent;
 
+  // Every edit here writes straight to state + localStorage in one shot — no
+  // separate "batch edit then save" step, so nothing can be lost in between.
+  function updateGoalField(goalId, field, value) {
+    const updated = goals.map(g => g.id === goalId ? {...g, [field]: value} : g);
+    setGoals(updated);
+    try { localStorage.setItem(GOALS_KEY, JSON.stringify(updated)); } catch {}
+    showToast('Goal updated');
+  }
+
   return (
     <div style={{padding:'16px 16px 0'}}>
-      {/* Financial Goals — the whole point of this page, grouped per person */}
-      <div style={{marginBottom: 16}}>
-        <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12}}>
-          <h3 style={{margin: 0, fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
-            🎯 Financial Goals
-          </h3>
-          <button 
-            onClick={() => setShowGoalsModal(true)}
-            style={{border: 'none', background: C.green, color: 'white', padding: '6px 12px', 
-              borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: SANS}}>
-            Edit Goals
-          </button>
-        </div>
-
-        {GOAL_GROUPS.map(({person, label: groupLabel}) => {
-          const groupGoals = goals.filter(g => g.person === person);
-          if (groupGoals.length === 0) return null;
-          return (
-            <div key={person} style={{marginBottom: 16}}>
-              <p style={{margin: '0 0 8px', fontSize: 11, fontWeight: 700, color: C.inkSoft, fontFamily: SANS,
-                textTransform: 'uppercase', letterSpacing: '0.06em'}}>
-                {groupLabel}
-              </p>
-              <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10}}>
-                {groupGoals.map(goal => {
-                  const goalMonthly = goal.monthlyContribution || 0;
-                  const currentBalance = goal.currentBalance || 0;
-                  const target = goal.target || goalMonthly * 12; // Default target is 12 months of contributions
-                  const progress = target > 0 ? (currentBalance / target) * 100 : 0;
-                  const isComplete = currentBalance >= target && target > 0;
-
-                  return (
-                    <Card 
-                      key={goal.id} 
-                      style={{
-                        padding: '14px', 
-                        background: isComplete ? C.green + '15' : C.sand, 
-                        borderLeft: `4px solid ${isComplete ? C.green : C.blue}`,
-                        transition: 'all 0.2s'
-                      }}>
-                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6}}>
-                        <p style={{margin: 0, fontSize: 12, fontWeight: 600, color: C.ink, fontFamily: SANS}}>
-                          {goal.label}
-                        </p>
-                        {isComplete && <span style={{fontSize: 14}}>✓</span>}
-                      </div>
-
-                      {goal.description && (
-                        <p style={{margin: '0 0 6px', fontSize: 10, color: C.inkSoft, fontFamily: SANS, fontStyle: 'italic'}}>
-                          {goal.description}
-                        </p>
-                      )}
-
-                      <div style={{display: 'flex', alignItems: 'baseline', gap: 4, marginBottom: 8}}>
-                        <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: C.green}}>
-                          ${currentBalance.toFixed(0)}
-                        </p>
-                        {target > 0 && (
-                          <p style={{margin: 0, fontSize: 11, color: C.inkSoft, fontFamily: SANS}}>
-                            / ${target.toFixed(0)}
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Progress bar */}
-                      {target > 0 && (
-                        <div style={{
-                          width: '100%',
-                          height: 6,
-                          background: C.sandDark + '33',
-                          borderRadius: 3,
-                          overflow: 'hidden',
-                          marginBottom: 8
-                        }}>
-                          <div style={{
-                            width: `${Math.min(progress, 100)}%`,
-                            height: '100%',
-                            background: progress >= 100 ? C.green : C.blue,
-                            transition: 'width 0.3s ease'
-                          }}/>
-                        </div>
-                      )}
-
-                      <p style={{margin: '0', fontSize: 10, color: C.inkSoft, fontFamily: SANS}}>
-                        {goalMonthly > 0 ? `$${goalMonthly.toFixed(0)}/month` : 'No monthly target'}
-                      </p>
-
-                      <button
-                        onClick={e => {e.stopPropagation(); setDepositingGoalId(goal.id);}}
-                        style={{
-                          width: '100%',
-                          marginTop: 10,
-                          padding: '8px 12px',
-                          border: 'none',
-                          background: C.green + '20',
-                          color: C.green,
-                          borderRadius: 8,
-                          cursor: 'pointer',
-                          fontSize: 12,
-                          fontWeight: 600,
-                          fontFamily: SANS,
-                          transition: 'all 0.12s'
-                        }}
-                        onMouseEnter={e => {e.target.style.background = C.green + '30';}}
-                        onMouseLeave={e => {e.target.style.background = C.green + '20';}}>
-                        + Add Deposit
-                      </button>
-                    </Card>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Whose money are we looking at */}
+      {/* Dashboard — the critical numbers, front and center */}
       <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
         marginBottom:12}}>
         {[['mine','Just me'],['combined','Combined']].map(([k,l])=>(
@@ -2190,7 +2175,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
       )}
 
       {/* Spending summary below hero */}
-      <Card style={{padding:'14px 16px', marginTop:12, marginBottom:12, background:C.sand}}>
+      <Card style={{padding:'14px 16px', marginTop:12, marginBottom:20, background:C.sand}}>
         <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>
           <div>
             <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
@@ -2248,6 +2233,52 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         </div>
       </Card>
 
+      {/* Financial Goals — grouped per person, each a dropdown */}
+      <h3 style={{margin: '0 0 12px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
+        🎯 Financial Goals
+      </h3>
+
+      {GOAL_GROUPS.map(({person, label: groupLabel}) => {
+        const groupGoals = goals.filter(g => g.person === person);
+        if (groupGoals.length === 0) return null;
+        const totalBalance = groupGoals.reduce((a,g)=>a+(g.currentBalance||0),0);
+        const totalMonthly = groupGoals.reduce((a,g)=>a+(g.monthlyContribution||0),0);
+        const isOpen = expandedGroup === person;
+
+        return (
+          <Card key={person} style={{marginBottom: 10, padding: 0, overflow: 'hidden'}}>
+            <button onClick={()=>setExpandedGroup(isOpen ? null : person)} style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '14px 16px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left'
+            }}>
+              <div>
+                <p style={{margin: 0, fontSize: 14, fontWeight: 700, color: C.ink, fontFamily: SANS}}>
+                  {groupLabel}
+                </p>
+                <p style={{margin: '2px 0 0', fontSize: 11, color: C.inkSoft, fontFamily: SANS}}>
+                  {fmt(totalBalance)} saved · {fmt(totalMonthly)}/month across {groupGoals.length} goal{groupGoals.length===1?'':'s'}
+                </p>
+              </div>
+              <ChevronRight size={16} color={C.inkSoft}
+                style={{transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0}}/>
+            </button>
+
+            {isOpen && (
+              <div style={{padding: '0 16px 12px'}}>
+                {groupGoals.map(goal => (
+                  <GoalRow
+                    key={goal.id}
+                    goal={goal}
+                    onUpdate={(field, value) => updateGoalField(goal.id, field, value)}
+                    onDeposit={() => setDepositingGoalId(goal.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </Card>
+        );
+      })}
+
       {depositingGoalId && (
         <QuickGoalDepositModal
           goal={goals.find(g => g.id === depositingGoalId) || {}}
@@ -2274,6 +2305,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     </div>
   );
 }
+
 
 // ─── SPENDING TAB ─────────────────────────────────────────────────────────────
 export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcceptSuggested,
@@ -6019,7 +6051,7 @@ export default function App() {
           view={view} setView={setView} history={history} billRules={billRules}
           billPayments={billPayments} profile={profile}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
-          showToast={showToast} goals={goals} setGoals={setGoals} setShowGoalsModal={setShowGoalsModal}
+          showToast={showToast} goals={goals} setGoals={setGoals}
           depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}/>}
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
           allCats={allCats} catTargets={catTargets}

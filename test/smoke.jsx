@@ -84,7 +84,7 @@ const goals = [
     profile, view: v, setView: noop, history, billRules: [],
     billPayments: [],
     expectedIncome: [], setExpectedIncome: noop,
-    showToast: noop, goals, setGoals: noop, setShowGoalsModal: noop,
+    showToast: noop, goals, setGoals: noop,
     depositingGoalId: null, setDepositingGoalId: noop
   })));
 
@@ -106,7 +106,7 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
   profile, view: 'combined', setView: noop, history: [], billRules: [],
   billPayments: [],
   expectedIncome: [], setExpectedIncome: noop,
-  showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop,
+  showToast: noop, goals: [], setGoals: noop,
   depositingGoalId: null, setDepositingGoalId: noop
 })));
 
