@@ -11,7 +11,7 @@ import { detectRecurring, splitRecurring } from '../src/recurring.js';
 import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
-import App, { HomeTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
+import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
@@ -65,33 +65,60 @@ const allCats = [
   {id:'income',label:'Income',icon:'Leaf',target:0,color:'#1a7a4a',excluded:true,isIncome:true},
 ];
 const noop = () => {};
+const goals = [
+  { id: 'g1', person: 'jordan', label: 'Short-term Goal', target: 5000, monthlyContribution: 500, description: 'Emergency fund', currentBalance: 1200, deposits: [] },
+  { id: 'g2', person: 'jordan', label: 'Medium-term Goal', target: 3000, monthlyContribution: 200, description: '', currentBalance: 0, deposits: [] },
+  { id: 'g3', person: 'jordan', label: 'Long-term Goal', target: 20000, monthlyContribution: 300, description: '', currentBalance: 0, deposits: [] },
+  { id: 'g4', person: 'mariel', label: 'Short-term Goal', target: 600, monthlyContribution: 100, description: '', currentBalance: 600, deposits: [] },
+  { id: 'g5', person: 'mariel', label: 'Medium-term Goal', target: 2200, monthlyContribution: 250, description: '', currentBalance: 500, deposits: [] },
+  { id: 'g6', person: 'mariel', label: 'Long-term Goal', target: 4000, monthlyContribution: 150, description: '', currentBalance: 0, deposits: [] },
+  { id: 'g7', person: 'couple', label: 'Short-term Goal', target: 1000, monthlyContribution: 100, description: '', currentBalance: 0, deposits: [] },
+  { id: 'g8', person: 'couple', label: 'Medium-term Goal', target: 5000, monthlyContribution: 400, description: '', currentBalance: 0, deposits: [] },
+  { id: 'g9', person: 'couple', label: 'Long-term Goal', target: 15000, monthlyContribution: 750, description: '', currentBalance: 13000, deposits: [] },
+];
 
 ['mine','combined'].forEach(v => {
   check('render HomeTab (' + v + ')', () => renderToString(React.createElement(HomeTab, {
-    txns, bankImports: imports, ccTarget: 500, setCcTarget: noop,
-    allCats, onSaveSettings: noop, catTargets: {}, suggested: {},
+    txns, bankImports: imports, ccTarget: 500,
+    allCats, catTargets: {},
+    profile, view: v, setView: noop, history, billRules: [],
+    billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop,
+    showToast: noop, goals, setGoals: noop, setShowGoalsModal: noop,
+    depositingGoalId: null, setDepositingGoalId: noop
+  })));
+
+  check('render SpendingTab (' + v + ')', () => renderToString(React.createElement(SpendingTab, {
+    txns, bankImports: imports,
+    allCats, catTargets: {}, suggested: {},
     onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
     profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
-    view: v, setView: noop, history, billRules: [],
+    view: v, setView: noop,
     onDeleteRow: noop, duplicateCount: 2, onReviewDuplicates: noop,
     setQuickAddCat: noop, setTab: noop,
-    income: {}, expectedIncome: [], setShowAddIncome: noop, billPayments: [],
-    setEditingCatTarget: noop, setEditingIncome: noop, setExpectedIncome: noop,
-    showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop
+    setEditingCatTarget: noop, showToast: noop
   })));
 });
 
 check('render HomeTab (no history)', () => renderToString(React.createElement(HomeTab, {
-  txns: [], bankImports: [], ccTarget: 0, setCcTarget: noop,
-  allCats, onSaveSettings: noop, catTargets: {}, suggested: {},
+  txns: [], bankImports: [], ccTarget: 0,
+  allCats, catTargets: {},
+  profile, view: 'combined', setView: noop, history: [], billRules: [],
+  billPayments: [],
+  expectedIncome: [], setExpectedIncome: noop,
+  showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop,
+  depositingGoalId: null, setDepositingGoalId: noop
+})));
+
+check('render SpendingTab (no history)', () => renderToString(React.createElement(SpendingTab, {
+  txns: [], bankImports: [],
+  allCats, catTargets: {}, suggested: {},
   onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
   profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
-  view: 'combined', setView: noop, history: [], billRules: [],
+  view: 'combined', setView: noop,
   onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
   setQuickAddCat: noop, setTab: noop,
-  income: {}, expectedIncome: [], setShowAddIncome: noop, billPayments: [],
-  setEditingCatTarget: noop, setEditingIncome: noop, setExpectedIncome: noop,
-  showToast: noop, goals: [], setGoals: noop, setShowGoalsModal: noop
+  setEditingCatTarget: noop, showToast: noop
 })));
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
