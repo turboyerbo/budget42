@@ -11,7 +11,7 @@ import { detectRecurring, splitRecurring } from '../src/recurring.js';
 import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
-import App, { HomeTab, BillsTab, HistoryTab, ChartsTab, UploadTab,
+import App, { HomeTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
@@ -139,6 +139,10 @@ check('render BillsTab (future month)', () => renderToString(React.createElement
 check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, {
   txns, bankImports: imports, allCats,
   onDeleteTxn: noop, onDeleteImport: noop, onSaveNote: noop })));
+
+check('render CalendarTab', () => renderToString(React.createElement(CalendarTab, {
+  year: 2026, month: 6, txns, bankImports: imports, billRules: [], billPayments: [],
+  expectedIncome: [], goals: [], allCats })));
 
 check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {
   txns, bankImports: imports, allCats, year: 2026, month: 6,

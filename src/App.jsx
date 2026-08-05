@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
   ShoppingBasket, Utensils, Wine, Car, Train, Pill, Stethoscope,
   Ticket, Code2, CreditCard, Shirt, Plane, Scissors, Scale, Package,
-  Home, Plus, History, CalendarDays, Upload, PieChart,
+  Home, Plus, History, CalendarDays, Calendar, Upload, PieChart,
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
   Bell, BellRing, Landmark, HelpCircle, Heart, Settings, Download,
@@ -2940,6 +2940,204 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
   );
 }
 
+// ─── CALENDAR TAB ────────────────────────────────────────────────────────────
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, goals, allCats}) {
+  const today = new Date();
+  const currentDate = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDayOfWeek = new Date(year, month, 1).getDay();
+  
+  const allTxns = [...txns, ...bankImports];
+  const txnsByDay = {};
+  allTxns.forEach(t => {
+    const day = new Date(t.date).getDate();
+    if (!txnsByDay[day]) txnsByDay[day] = [];
+    txnsByDay[day].push(t);
+  });
+  
+  const incomeByDay = {};
+  allTxns.filter(t => (t.category || t.cat) === 'income').forEach(t => {
+    const day = new Date(t.date).getDate();
+    if (!incomeByDay[day]) incomeByDay[day] = 0;
+    incomeByDay[day] += t.amount;
+  });
+  
+  const billsByDay = {};
+  billRules.forEach(rule => {
+    const day = rule.day_of_month;
+    if (!billsByDay[day]) billsByDay[day] = [];
+    billsByDay[day].push(rule);
+  });
+  
+  const ccByDay = {};
+  allTxns.filter(t => (t.category || t.cat) === 'cc_payment').forEach(t => {
+    const day = new Date(t.date).getDate();
+    if (!ccByDay[day]) ccByDay[day] = 0;
+    ccByDay[day] += t.amount;
+  });
+  
+  const expectedIncomeByDay = {};
+  expectedIncome.forEach(inc => {
+    const day = new Date(inc.date).getDate();
+    if (!expectedIncomeByDay[day]) expectedIncomeByDay[day] = [];
+    expectedIncomeByDay[day].push(inc);
+  });
+
+  const days = Array(firstDayOfWeek).fill(null).concat(Array.from({length: daysInMonth}, (_, i) => i + 1));
+  const weeks = [];
+  for (let i = 0; i < days.length; i += 7) {
+    weeks.push(days.slice(i, i + 7));
+  }
+
+  const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  return (
+    <div style={{padding: '16px'}}>
+      <h2 style={{margin: '0 0 16px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
+        📅 Financial Calendar
+      </h2>
+
+      {/* Calendar Grid */}
+      <Card style={{padding: '16px', background: C.white}}>
+        {/* Week day headers */}
+        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 12}}>
+          {weekDays.map(day => (
+            <div key={day} style={{textAlign: 'center', fontSize: 11, fontWeight: 600, color: C.inkSoft, fontFamily: SANS, padding: '8px 0'}}>
+              {day}
+            </div>
+          ))}
+        </div>
+
+        {/* Calendar days */}
+        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4}}>
+          {weeks.map((week, weekIdx) => 
+            week.map((day, dayIdx) => {
+              const hasIncome = day && incomeByDay[day];
+              const hasBills = day && billsByDay[day] && billsByDay[day].length > 0;
+              const hasCC = day && ccByDay[day];
+              const hasExpectedIncome = day && expectedIncomeByDay[day] && expectedIncomeByDay[day].length > 0;
+              const isToday = day && today.getDate() === day && today.getMonth() === month && today.getFullYear() === year;
+              
+              return (
+                <div
+                  key={`${weekIdx}-${dayIdx}`}
+                  style={{
+                    aspectRatio: '1',
+                    border: `1px solid ${C.sandMid}`,
+                    borderRadius: 8,
+                    padding: '6px',
+                    background: isToday ? C.blue + '08' : C.white,
+                    borderColor: isToday ? C.blue : C.sandMid,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    fontSize: 12,
+                    fontFamily: SANS,
+                    minHeight: '70px'
+                  }}>
+                  <div style={{fontSize: 11, fontWeight: 600, color: isToday ? C.blue : C.ink, marginBottom: 4}}>
+                    {day || ''}
+                  </div>
+                  
+                  {day && (
+                    <div style={{display: 'flex', flexDirection: 'column', gap: 2, flex: 1}}>
+                      {hasIncome && (
+                        <div style={{
+                          fontSize: 9,
+                          padding: '2px 4px',
+                          borderRadius: 3,
+                          background: C.green + '20',
+                          color: C.green,
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          💰 ${hasIncome.toFixed(0)}
+                        </div>
+                      )}
+                      
+                      {hasBills && (
+                        <div style={{
+                          fontSize: 9,
+                          padding: '2px 4px',
+                          borderRadius: 3,
+                          background: C.red + '20',
+                          color: C.red,
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          📋 {hasBills.length} bill{hasBills.length !== 1 ? 's' : ''}
+                        </div>
+                      )}
+                      
+                      {hasCC && (
+                        <div style={{
+                          fontSize: 9,
+                          padding: '2px 4px',
+                          borderRadius: 3,
+                          background: C.amber + '20',
+                          color: C.amber,
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          💳 ${hasCC.toFixed(0)}
+                        </div>
+                      )}
+                      
+                      {hasExpectedIncome && (
+                        <div style={{
+                          fontSize: 9,
+                          padding: '2px 4px',
+                          borderRadius: 3,
+                          background: C.blue + '20',
+                          color: C.blue,
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          🏦 Income
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </Card>
+
+      {/* Legend */}
+      <div style={{marginTop: 16, padding: '12px 16px', background: C.sand, borderRadius: 10, fontSize: 12, fontFamily: SANS}}>
+        <p style={{margin: '0 0 8px', fontWeight: 600, color: C.ink}}>Legend:</p>
+        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8}}>
+          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.green + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Income</span>
+          </div>
+          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.red + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Bills</span>
+          </div>
+          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.amber + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>CC Payment</span>
+          </div>
+          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.blue + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>Expected Income</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
@@ -5370,6 +5568,7 @@ export default function App() {
     {id:'add',    label:'Add',    Icon:Plus,    accent:true},
     {id:'history',label:'History',Icon:History},
     {id:'bills',  label:'Bills',  Icon:CalendarDays},
+    {id:'calendar',label:'Calendar',Icon:Calendar},
     {id:'goals',  label:'Goals',  Icon:Heart},
     {id:'charts', label:'Charts', Icon:PieChart},
     {id:'upload', label:'Upload', Icon:Upload},
@@ -5436,6 +5635,9 @@ export default function App() {
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
           billPayments={billPayments} onTogglePaid={toggleBillPaid} profile={profile}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
+      {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
+          bankImports={imports} billRules={billRules} billPayments={billPayments}
+          expectedIncome={expectedIncome} goals={goals} allCats={allCats}/>}
       {tab==='goals'   && <GoalsTab txns={txns} bankImports={imports}
           billPayments={billPayments} billRules={billRules} profile={profile}/>}
       {tab==='charts'  && <ChartsTab txns={txns} bankImports={imports} allCats={allCats}
