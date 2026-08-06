@@ -176,6 +176,56 @@ check('HomeTab: Actual Income section is visible and shows the real total', () =
   }
 });
 
+check('HomeTab: Available Money = Income − Spent − Bills Paid, no double-counting', () => {
+  // A recognized bill (rent) plus one discretionary grocery run, both charged
+  // this month, plus a paycheck. The two spend buckets must sum to exactly
+  // what was spent — nothing counted twice, nothing missing.
+  const rentBillHistory = [
+    mk({ year:2026, month:4, date:'2026-05-01', description:'STELA RENT', amount:1900, category:'rent' }),
+    mk({ year:2026, month:5, date:'2026-06-01', description:'STELA RENT', amount:1900, category:'rent' }),
+  ];
+  const rentThisMonth = mk({ description:'STELA RENT', amount:1900, category:'rent', date:'2026-07-01' });
+  const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
+  const paycheck = mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15' });
+
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [rentThisMonth, groceries, paycheck], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+    history: [...rentBillHistory, rentThisMonth, groceries, paycheck],
+    billRules: [], billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+
+  if (!html.includes('Available Money')) throw new Error('expected an "Available Money" hero label');
+  if (!html.includes('Bills Paid This Month')) throw new Error('expected a "Bills Paid This Month" stat');
+  if (!html.includes('1,900.00')) throw new Error('expected the $1,900 rent to appear as bills paid');
+  if (!html.includes('120.00')) throw new Error('expected the $120 groceries to appear as spent this month');
+  // Available = 5000 - 120 - 1900 = 2980.00 — must appear once, not some
+  // double-subtracted lower figure like 980.00 (5000-120-1900-1900)
+  if (!html.includes('2,980.00')) throw new Error('Available Money is wrong — looks like bills were subtracted twice');
+});
+
+check('SpendingTab: dashboard shows Still Available To Spend', () => {
+  const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
+  const html = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [groceries],
+    allCats, catTargets: {}, suggested: {},
+    onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
+    profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view: 'combined', setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
+  }));
+  if (!html.includes('Still Available To Spend')) throw new Error('expected the Spending tab dashboard hero');
+  if (!html.includes('120.00')) throw new Error('expected the $120 grocery spend to appear');
+});
+
 ['mine','combined'].forEach(v => {
   check('render HomeTab (' + v + ')', () => renderToString(React.createElement(HomeTab, {
     txns, bankImports: imports, ccTarget: 500,
@@ -184,7 +234,8 @@ check('HomeTab: Actual Income section is visible and shows the real total', () =
     billPayments: [],
     expectedIncome: expectedIncomeMock, setExpectedIncome: noop, onAddTxn: noop,
     showToast: noop, goals, onSaveGoals: noop,
-    depositingGoalId: null, setDepositingGoalId: noop
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
   })));
 
   check('render SpendingTab (' + v + ')', () => renderToString(React.createElement(SpendingTab, {
@@ -207,7 +258,8 @@ check('render HomeTab (no history)', () => renderToString(React.createElement(Ho
   billPayments: [],
   expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
   showToast: noop, goals: [], onSaveGoals: noop,
-  depositingGoalId: null, setDepositingGoalId: noop
+  depositingGoalId: null, setDepositingGoalId: noop,
+  setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
 })));
 
 check('render SpendingTab (no history)', () => renderToString(React.createElement(SpendingTab, {
@@ -248,21 +300,29 @@ check('render BillsTab (with user rules)', () => renderToString(React.createElem
     { key:'manual:gym', label:'Gym', amount:59.99, day:5, status:'manual', category:'other' },
   ] })));
 
-check('BillsTab: hidden bills are shown with a way to restore them', () => {
+check('BillsTab: no "hidden bills" restore section exists — deleting is final', () => {
   const html = renderToString(React.createElement(BillsTab, {
     history, txns, bankImports: imports, allCats, year: 2026, month: 6,
     ...billProps, billRules: [
       { key:'netflix', label:'Netflix', status:'hidden' },
     ]
   }));
-  if (!html.includes('Hidden bills')) throw new Error('expected a "Hidden bills" section to render');
-  if (!html.includes('Netflix')) throw new Error('expected the hidden bill\'s name (Netflix) to still be visible');
-  if (!html.includes('Restore')) throw new Error('expected a way to restore a hidden bill');
+  if (html.includes('Hidden bills')) throw new Error('expected no "Hidden bills" section — this was removed for simplicity');
+  if (html.includes('Restore')) throw new Error('expected no "Restore" affordance anywhere');
 });
 
 check('render BillEditModal (existing)', () => renderToString(React.createElement(BillEditModal, {
   bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
   allCats, onSave: noop, onDelete: noop, onClose: noop })));
+
+check('BillEditModal: delete button always says "Delete this bill", no ambiguous "Not a bill"', () => {
+  const html = renderToString(React.createElement(BillEditModal, {
+    bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
+    allCats, onSave: noop, onDelete: noop, onClose: noop
+  }));
+  if (html.includes('Not a bill')) throw new Error('found the old ambiguous "Not a bill" wording');
+  if (!html.includes('Delete this bill')) throw new Error('expected a consistent "Delete this bill" button');
+});
 
 check('render BillEditModal (new)', () => renderToString(React.createElement(BillEditModal, {
   bill: null, allCats, onSave: noop, onDelete: noop, onClose: noop })));

@@ -2183,22 +2183,18 @@ function GoalRow({goal, accent, onUpdate, onDeposit}) {
 
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
                   year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,onAddTxn,
-                  showToast,profile,partnerName,goals,onSaveGoals,depositingGoalId,setDepositingGoalId}) {
+                  showToast,profile,partnerName,goals,onSaveGoals,depositingGoalId,setDepositingGoalId,
+                  onEditTxnSave,onDeleteTxn,setTab}) {
   const myName = profile?.name || 'You';
   const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
-  const [editingBudget, setEditingBudget] = useState(false);
   const [expandedGroup, setExpandedGroup] = useState(null); // 'jordan' | 'mariel' | 'couple' | null
   const [showAddActualIncome, setShowAddActualIncome] = useState(false);
   const [aiAmount, setAiAmount] = useState('');
   const [aiDate, setAiDate] = useState(() => today());
   const [aiSource, setAiSource] = useState('');
   const [savingActualIncome, setSavingActualIncome] = useState(false);
-  const [budgetOverride, setBudgetOverride] = useState(() => {
-    try {
-      const v = localStorage.getItem(BUDGET_OVERRIDE_KEY);
-      return v !== null ? parseFloat(v) : null;
-    } catch { return null; }
-  });
+  const [showIncomeDetail, setShowIncomeDetail] = useState(false);
+  const [editingIncomeTxn, setEditingIncomeTxn] = useState(null);
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
 
@@ -2223,24 +2219,20 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   const everythingThisMonth=everything;   // both people, before the view filter
 
   // Recurring charges are worked out from your own history rather than kept in
-  // a hardcoded list. Only what has NOT yet been charged counts as committed.
-  const recurring   = applyBillRules(detectRecurring(history || []), billRules || [])
+  // a hardcoded list. Uses the exact same buildSchedule the Bills tab uses, so
+  // the two tabs never disagree about what's due, paid, or overdue.
+  const recurring = applyBillRules(detectRecurring(history || []), billRules || [])
     .filter(b => b.confidence === 'high');
-  const { due:dueBills, dueTotal } = splitRecurring(recurring, everythingThisMonth);
+  const sched = buildSchedule(recurring, everythingThisMonth, year, month, new Date(), billPayments || []);
+  const dueTotal = sched.outstandingTotal;
+  const dueBills = sched.outstanding;
 
   // Bills from a past month that were never paid don't just disappear — they're
-  // still owed, so they count toward what's committed this month too.
+  // still owed, so they count toward what's still to pay too.
   const carriedOver = getCarriedOverBills(recurring, history || [], allBillPayments || [], year, month);
   const carriedOverTotal = carriedOver.reduce((a,b)=>a+b.amount,0);
 
   // Same logic for the card payment: only pledge it if it hasn't gone out yet
-  const ccPaidThisMonth = everythingThisMonth
-    .filter(t=>(t.category||t.cat)==='cc_payment')
-    .reduce((a,t)=>a+t.amount,0);
-  const ccStillDue = Math.max(0, ccTarget - ccPaidThisMonth);
-
-  const committed = dueTotal + ccStillDue + carriedOverTotal;
-
   // "Mine" shows only your own transactions. "Combined" shows the household.
   const allTx = view==='mine'
     ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
@@ -2266,23 +2258,29 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     .filter(([k])=>!excludedIds.has(k))
     .reduce((a,[,v])=>a+v,0);
 
+  // Split that same total into two honest buckets: money that went to a
+  // recognized bill's category, and everything else (discretionary). The two
+  // always add up to totalSpent exactly — this is a relabeling of the same
+  // transactions, not a second, separate pool of money.
+  const billCategoryIds = new Set(recurring.map(b => b.category));
+  let billsPaidThisMonth = 0, discretionarySpent = 0;
+  Object.entries(txByCat).forEach(([catId, amt]) => {
+    if (excludedIds.has(catId)) return;
+    if (billCategoryIds.has(catId)) billsPaidThisMonth += amt;
+    else discretionarySpent += amt;
+  });
+
   // Predicted income comes from what you've entered as expected for THIS month,
   // not from transactions, and not from entries you predicted for other months
   const predictedIncomeTotal = (expectedIncome||[])
     .filter(i => { const d = new Date(i.date); return d.getFullYear()===year && d.getMonth()===month; })
     .reduce((a,i)=>a+(i.amount||0),0);
 
-  // What's actually landed in accounts this month, minus what's gone out
-  const actuallyAvailableNow = totalIncome - totalSpent;
-
-  // Sum of every category's target — the default "budgeted for spending" figure,
-  // unless the couple has manually overridden it
-  const categoryBudgetSum = allCats
-    .filter(c=>!excludedIds.has(c.id))
-    .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
-  const budgetedForSpending = budgetOverride != null ? budgetOverride : categoryBudgetSum;
-
-  const surplus=totalIncome-committed-totalSpent;
+  // AVAILABLE MONEY = Actual Income − Money Spent This Month − Bills Paid This
+  // Month. The two subtracted terms are the exact same totalSpent split into
+  // two buckets above, so this equals totalIncome − totalSpent — no double
+  // counting, just presented as the two lines you actually asked to see.
+  const availableMoney = totalIncome - discretionarySpent - billsPaidThisMonth;
 
   // Every edit here writes straight to state + localStorage + Supabase in one
   // shot — no separate "batch edit then save" step, so nothing can be lost
@@ -2317,57 +2315,45 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
       <Card style={{background:C.green,padding:'20px 20px'}}>
         <p style={{fontSize:11,color:'rgba(255,255,255,0.7)',textTransform:'uppercase',
           letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>
-          Spending Money {view==='combined'?'(after goals and bills are paid)':'(after goals and bills are paid)'}
+          Available Money
         </p>
         <p style={{fontFamily:SERIF,fontSize:44,fontWeight:600,color:'#fff',margin:'0 0 16px',
           letterSpacing:'-0.02em',lineHeight:1}}>
-          {surplus>=0?fmt(surplus):'–'+fmt(Math.abs(surplus))}
+          {availableMoney>=0?fmt(availableMoney):'–'+fmt(Math.abs(availableMoney))}
         </p>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
-          <button onClick={()=>setShowPredictedIncomePanel(v=>!v)} style={{
-            border:'none',background:'none',textAlign:'left',cursor:'pointer',padding:0,
-            display:'flex',flexDirection:'column',gap:0}}>
-            <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS,
-              display:'flex',alignItems:'center',gap:4}}>
-              Predicted Income
-              <ChevronRight size={11} color="rgba(255,255,255,0.65)"
-                style={{transform:showPredictedIncomePanel?'rotate(90deg)':'none',transition:'transform 0.15s'}}/>
-            </p>
-            <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
-              color:'rgba(255,255,255,0.95)',textDecoration:'underline',textDecorationColor:'rgba(255,255,255,0.35)',
-              textUnderlineOffset:3}}>
-              {fmt(predictedIncomeTotal)}
-            </p>
-            {expectedIncome && expectedIncome.length > 0 && (
-              <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
-                {expectedIncome.length} entr{expectedIncome.length===1?'y':'ies'}
-              </p>
-            )}
-          </button>
-
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Available This Month</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Actual Income</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
-              color:'rgba(255,255,255,0.95)'}}>{fmt(actuallyAvailableNow)}</p>
-            <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
-              deposited − spent
-            </p>
+              color:'rgba(255,255,255,0.95)'}}>{fmt(totalIncome)}</p>
           </div>
 
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Bills to pay this month</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Spent This Month</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
-              color:'rgba(255,255,255,0.95)'}}>{fmt(committed)}</p>
-            {dueBills.length>0&&(
-              <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
-                {dueBills.length} bill{dueBills.length===1?'':'s'} not yet charged
-              </p>
-            )}
+              color:'rgba(255,255,255,0.95)'}}>{fmt(discretionarySpent)}</p>
+          </div>
+
+          <div>
+            <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Bills Paid This Month</p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
+              color:'rgba(255,255,255,0.95)'}}>{fmt(billsPaidThisMonth)}</p>
           </div>
         </div>
+
+        {(dueTotal + carriedOverTotal) > 0 && (
+          <p style={{margin:'14px 0 0', fontSize:11, color:'rgba(255,255,255,0.75)',
+            fontFamily:SANS, borderTop:'1px solid rgba(255,255,255,0.2)', paddingTop:10}}>
+            {fmt(dueTotal + carriedOverTotal)} more in bills not charged yet — see{' '}
+            <button onClick={()=>setTab?.('bills')} style={{border:'none', background:'none', padding:0,
+              color:'#fff', fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11, textDecoration:'underline'}}>
+              Bills
+            </button>. Not subtracted above — nothing's left the account yet.
+          </p>
+        )}
       </Card>
 
       {/* Actual income this month — same visual weight as Predicted Income in the
@@ -2392,14 +2378,62 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
             No deposits recorded yet this month — income is read straight off your statements.
           </p>
         ) : (
-          <div style={{display:'flex', flexDirection:'column', gap:8, paddingTop:10, borderTop:`1px solid ${C.green}22`, marginBottom:12}}>
-            {Object.entries(incomeByPerson).sort((a,b)=>b[1]-a[1]).map(([person,amt])=>(
-              <div key={person} style={{display:'flex', alignItems:'center', gap:10}}>
-                <UserAvatar name={person} size={26}/>
-                <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, textTransform:'capitalize', fontWeight:600}}>{capitalize(person)}</span>
-                <span style={{fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.ink}}>{fmt(amt)}</span>
+          <div style={{paddingTop:10, borderTop:`1px solid ${C.green}22`, marginBottom:12}}>
+            <div style={{display:'flex', flexDirection:'column', gap:8, marginBottom:10}}>
+              {Object.entries(incomeByPerson).sort((a,b)=>b[1]-a[1]).map(([person,amt])=>(
+                <div key={person} style={{display:'flex', alignItems:'center', gap:10}}>
+                  <UserAvatar name={person} size={26}/>
+                  <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, textTransform:'capitalize', fontWeight:600}}>{capitalize(person)}</span>
+                  <span style={{fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.ink}}>{fmt(amt)}</span>
+                </div>
+              ))}
+            </div>
+
+            <button onClick={()=>setShowIncomeDetail(v=>!v)} style={{
+              display:'flex', alignItems:'center', gap:6, width:'100%', border:'none', background:'none',
+              padding:'6px 0', cursor:'pointer', fontFamily:SANS}}>
+              <span style={{flex:1, textAlign:'left', fontSize:12, color:C.green, fontWeight:600}}>
+                {showIncomeDetail ? 'Hide deposits' : `Show every deposit (${incomeRows.length})`}
+              </span>
+              <ChevronRight size={13} color={C.green}
+                style={{transform:showIncomeDetail?'rotate(90deg)':'none', transition:'transform 0.15s'}}/>
+            </button>
+
+            {showIncomeDetail && (
+              <div style={{marginTop:6}}>
+                {incomeRows.slice().sort((a,b)=>new Date(b.date)-new Date(a.date)).map(tx=>(
+                  <div key={tx.id} style={{display:'flex', alignItems:'center', gap:8,
+                    padding:'8px 0', borderTop:`1px solid ${C.green}18`}}>
+                    <div style={{flex:1, minWidth:0}}>
+                      <p style={{margin:0, fontSize:12, color:C.ink, fontFamily:SANS, fontWeight:600,
+                        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                        {tx.note || tx.description || 'Deposit'}
+                      </p>
+                      <p style={{margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
+                        {tx.date}{tx.source?' · '+instLabel(tx.source):''}{tx.who?' · '+tx.who:''}
+                      </p>
+                    </div>
+                    <p style={{margin:0, fontFamily:SERIF, fontSize:13, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
+                      +{fmt(tx.amount)}
+                    </p>
+                    <button onClick={()=>setEditingIncomeTxn(tx)} title="Edit this deposit"
+                      style={{padding:'5px 7px', border:'none', background:C.sand, color:C.ink,
+                        borderRadius:6, cursor:'pointer', fontSize:11, flexShrink:0}}>
+                      ✏️
+                    </button>
+                    <button onClick={()=>onDeleteTxn?.(tx)} title="Delete — this isn't real income"
+                      style={{padding:'5px 7px', border:'none', background:C.red+'20', color:C.red,
+                        borderRadius:6, cursor:'pointer', fontSize:11, flexShrink:0}}>
+                      🗑️
+                    </button>
+                  </div>
+                ))}
+                <p style={{margin:'8px 0 0', fontSize:10, color:C.inkSoft, fontFamily:SANS, lineHeight:1.5}}>
+                  If a deposit shouldn't be counted as income — a duplicate, a transfer between
+                  your own accounts, a refund — edit its category or delete it here.
+                </p>
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -2454,6 +2488,23 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         )}
       </Card>
 
+      {/* Predicted income — planning ahead, separate from what's actually landed above */}
+      <button onClick={()=>setShowPredictedIncomePanel(v=>!v)} style={{
+        width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px solid ${C.blue}33`,
+        background:C.blue+'0a', borderRadius:12, padding:'12px 14px', marginBottom:12, cursor:'pointer'}}>
+        <span style={{fontSize:16}}>📅</span>
+        <div style={{flex:1, textAlign:'left'}}>
+          <p style={{margin:0, fontSize:12, fontWeight:700, color:C.blue, fontFamily:SANS}}>
+            Predicted income {predictedIncomeTotal>0 && `— ${fmt(predictedIncomeTotal)} expected`}
+          </p>
+          <p style={{margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+            Plan ahead, then confirm it here once it lands
+          </p>
+        </div>
+        <ChevronRight size={14} color={C.blue}
+          style={{transform:showPredictedIncomePanel?'rotate(90deg)':'none', transition:'transform 0.15s'}}/>
+      </button>
+
       {/* Predicted income editor — expands under the hero */}
       {showPredictedIncomePanel && (
         <PredictedIncomeEditor
@@ -2466,64 +2517,20 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         />
       )}
 
-      {/* Spending summary below hero */}
-      <Card style={{padding:'14px 16px', marginTop:0, marginBottom:20, background:C.sand}}>
-        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>
-          <div>
-            <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
-              Amount budgeted for spending
-            </p>
-            {editingBudget ? (
-              <div style={{display:'flex',alignItems:'center',gap:6}}>
-                <span style={{fontFamily:SERIF,fontSize:18,color:C.ink}}>$</span>
-                <input
-                  type="number"
-                  autoFocus
-                  defaultValue={budgetedForSpending.toFixed(2)}
-                  onBlur={e=>{
-                    const v=parseFloat(e.target.value);
-                    if(!isNaN(v)){
-                      setBudgetOverride(v);
-                      localStorage.setItem(BUDGET_OVERRIDE_KEY, String(v));
-                      showToast('Spending budget updated');
-                    }
-                    setEditingBudget(false);
-                  }}
-                  onKeyDown={e=>{if(e.key==='Enter')e.target.blur(); if(e.key==='Escape')setEditingBudget(false);}}
-                  style={{width:90,border:`1px solid ${C.sandDark}`,borderRadius:7,padding:'3px 7px',
-                    fontSize:16,fontWeight:600,color:C.ink,fontFamily:SERIF,background:C.white}}/>
-              </div>
-            ) : (
-              <button onClick={()=>setEditingBudget(true)} style={{
-                border:'none',background:'none',padding:0,cursor:'pointer',textAlign:'left',
-                display:'flex',alignItems:'center',gap:6}}>
-                <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: C.ink}}>
-                  {fmt(budgetedForSpending)}
-                </p>
-                <span style={{fontSize:11,color:C.inkSoft}}>✏️</span>
-              </button>
-            )}
-            {budgetOverride != null && (
-              <button onClick={()=>{
-                setBudgetOverride(null);
-                localStorage.removeItem(BUDGET_OVERRIDE_KEY);
-                showToast('Reset to sum of category targets');
-              }} style={{border:'none',background:'none',padding:0,marginTop:2,cursor:'pointer',
-                fontSize:10,color:C.inkSoft,textDecoration:'underline',fontFamily:SANS}}>
-                Reset to category totals ({fmt(categoryBudgetSum)})
-              </button>
-            )}
-          </div>
-          <div>
-            <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
-              Spent so far
-            </p>
-            <p style={{margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 600, color: totalSpent > budgetedForSpending ? C.red : C.ink}}>
-              {fmt(totalSpent)}
-            </p>
-          </div>
+      <button onClick={()=>setTab?.('spending')} style={{
+        width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px solid ${C.sandDark}55`,
+        background:C.sand, borderRadius:12, padding:'12px 14px', marginBottom:20, cursor:'pointer'}}>
+        <span style={{fontSize:16}}>🛒</span>
+        <div style={{flex:1, textAlign:'left'}}>
+          <p style={{margin:0, fontSize:12, fontWeight:700, color:C.ink, fontFamily:SANS}}>
+            Category-by-category budget
+          </p>
+          <p style={{margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+            See what's budgeted and spent in each category, in Spending
+          </p>
         </div>
-      </Card>
+        <ChevronRight size={14} color={C.inkSoft}/>
+      </button>
 
       {/* Financial Goals — grouped per person, each a dropdown */}
       <h3 style={{margin: '0 0 12px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
@@ -2613,6 +2620,15 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
           SANS={SANS}
         />
       )}
+
+      {editingIncomeTxn && (
+        <EditTransactionModal
+          tx={editingIncomeTxn}
+          allCats={allCats}
+          onSave={async updates => { await onEditTxnSave?.(editingIncomeTxn, updates); }}
+          onClose={() => setEditingIncomeTxn(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2629,6 +2645,13 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   const [showAdd, setShowAdd] = useState(false);
   const [showScan, setShowScan] = useState(false);
   const [editingTxn, setEditingTxn] = useState(null); // the transaction being date/amount/category-edited
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetOverride, setBudgetOverride] = useState(() => {
+    try {
+      const v = localStorage.getItem(BUDGET_OVERRIDE_KEY);
+      return v !== null ? parseFloat(v) : null;
+    } catch { return null; }
+  });
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
 
@@ -2641,6 +2664,21 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
+  const totalSpent=Object.entries(txByCat)
+    .filter(([k])=>!excludedIds.has(k))
+    .reduce((a,[,v])=>a+v,0);
+
+  // Spent in the last 7 days — same "is this week tight?" question Bills asks
+  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
+  const weekSpent = allTx
+    .filter(t => !excludedIds.has(t.category||t.cat) && new Date(t.date) >= weekAgo)
+    .reduce((a,t)=>a+t.amount,0);
+
+  const categoryBudgetSum = allCats
+    .filter(c=>!excludedIds.has(c.id))
+    .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
+  const budgetedForSpending = budgetOverride != null ? budgetOverride : categoryBudgetSum;
+  const remainingToSpend = budgetedForSpending - totalSpent;
 
   // Same merchant, same day, both of you → you were out together
   const { shared:sharedMoments } = findSharedMoments(allTx);
@@ -2659,7 +2697,70 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
   return (
     <div style={{padding:'16px 16px 0'}}>
-      {/* Whose money are we looking at */}
+      {/* Dashboard — mirrors the Bills tab so the two feel like one system */}
+      <Card style={{background:C.green,padding:'20px 20px', marginBottom:12}}>
+        <p style={{fontSize:11,color:'rgba(255,255,255,0.7)',textTransform:'uppercase',
+          letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>
+          Still Available To Spend
+        </p>
+        <p style={{fontFamily:SERIF,fontSize:40,fontWeight:600,color:'#fff',margin:'0 0 14px',
+          letterSpacing:'-0.02em',lineHeight:1}}>
+          {remainingToSpend>=0?fmt(remainingToSpend):'–'+fmt(Math.abs(remainingToSpend))}
+        </p>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+          <div>
+            <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>This week</p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,
+              color:'rgba(255,255,255,0.95)'}}>{fmt(weekSpent)}</p>
+          </div>
+          <div>
+            <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Spent so far</p>
+            <p style={{margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,
+              color:'rgba(255,255,255,0.95)'}}>{fmt(totalSpent)}</p>
+          </div>
+          <div>
+            <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.65)',
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Budgeted</p>
+            {editingBudget ? (
+              <input
+                type="number" autoFocus defaultValue={budgetedForSpending.toFixed(2)}
+                onBlur={e=>{
+                  const v=parseFloat(e.target.value);
+                  if(!isNaN(v)){
+                    setBudgetOverride(v);
+                    localStorage.setItem(BUDGET_OVERRIDE_KEY, String(v));
+                    showToast('Spending budget updated');
+                  }
+                  setEditingBudget(false);
+                }}
+                onKeyDown={e=>{if(e.key==='Enter')e.target.blur(); if(e.key==='Escape')setEditingBudget(false);}}
+                style={{width:80,border:'none',borderRadius:6,padding:'2px 6px',
+                  fontSize:16,fontWeight:600,color:C.ink,fontFamily:SERIF,background:'#fff'}}/>
+            ) : (
+              <button onClick={()=>setEditingBudget(true)} style={{border:'none',background:'none',
+                padding:0,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}>
+                <p style={{margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,
+                  color:'rgba(255,255,255,0.95)'}}>{fmt(budgetedForSpending)}</p>
+                <span style={{fontSize:10}}>✏️</span>
+              </button>
+            )}
+          </div>
+        </div>
+        {budgetOverride != null && (
+          <button onClick={()=>{
+            setBudgetOverride(null);
+            localStorage.removeItem(BUDGET_OVERRIDE_KEY);
+            showToast('Reset to sum of category targets');
+          }} style={{border:'none',background:'none',padding:0,marginTop:10,cursor:'pointer',
+            fontSize:10,color:'rgba(255,255,255,0.65)',textDecoration:'underline',fontFamily:SANS}}>
+            Reset budget to category totals ({fmt(categoryBudgetSum)})
+          </button>
+        )}
+      </Card>
+
+
       <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
         marginBottom:12}}>
         {[['mine','Just me'],['combined','Combined']].map(([k,l])=>(
@@ -3376,11 +3477,16 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
         </button>
 
         {bill && (
-          <button onClick={() => onDelete(bill)}
+          <button onClick={() => {
+              const msg = bill.manual
+                ? `Delete "${bill.label}" for good?`
+                : `Remove "${bill.label}" from your bills? Any charges already in your statements stay put — this just stops tracking it as a bill.`;
+              if (window.confirm(msg)) onDelete(bill);
+            }}
             style={{ width:'100%', border:`1px solid ${C.red}44`, padding:'13px',
               borderRadius:12, background:C.white, color:C.red, fontSize:14,
               fontWeight:600, cursor:'pointer', fontFamily:SANS }}>
-            {bill.manual ? 'Delete this bill' : 'Not a bill — hide it'}
+            Delete this bill
           </button>
         )}
       </div>
@@ -3632,8 +3738,13 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
   }
 
   async function removeBill(bill) {
-    await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
-    showToast(`Hidden — find "${bill.label}" under Hidden bills on the Bills tab to bring it back`);
+    if (bill.manual) {
+      await onDeleteRule(bill.key);
+      showToast(`Deleted "${bill.label}"`);
+    } else {
+      await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
+      showToast(`Removed "${bill.label}" from your bills`);
+    }
   }
 
   function saveDeposit() {
@@ -3841,24 +3952,22 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
   );
   const needsReview = carriedOver.filter(e => thisMonthActiveKeys.has(e.key));
 
-  // Bills that were hidden — kept visible in their own section so "hide"
-  // isn't a one-way trip into the void. Reads straight off billRules since
-  // hiding never deletes the row, it just flips status.
-  const hiddenRules = (billRules || []).filter(r => r.status === 'hidden');
-
   async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
+
+  /** Delete a bill for good. Manually-added bills are removed outright —
+   *  the row is gone. Auto-detected bills can't erase the real transactions
+   *  they were found from, so this stops tracking the pattern as a bill
+   *  instead; either way, there's no "hidden bills" list to manage — once
+   *  deleted, it's off your list. */
   async function removeRule(bill) {
-    await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
+    if (bill.manual) {
+      await onDeleteRule(bill.key);
+      showToast(`Deleted "${bill.label}"`);
+    } else {
+      await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
+      showToast(`Removed "${bill.label}" from your bills`);
+    }
     setEditing(undefined);
-    showToast(`Hidden — find "${bill.label}" under Hidden bills at the bottom to bring it back`);
-  }
-  async function unhideRule(rule) {
-    await onSaveRule({
-      key: rule.key,
-      label: rule.label,
-      status: rule.key.startsWith('manual:') ? 'manual' : 'confirmed',
-    });
-    showToast(`"${rule.label}" is back`);
   }
 
   const STATUS = {
@@ -4140,34 +4249,6 @@ create policy "allow all on bill_payments" on bill_payments
                       padding:'6px 9px', background:C.white, fontSize:11,
                       color:C.inkSoft, cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
                     Hide
-                  </button>
-                </div>
-              </div>
-            ))}
-          </Card>
-        </>
-      )}
-
-      {hiddenRules.length > 0 && (
-        <>
-          <SL>Hidden bills</SL>
-          <p style={{ margin:'-4px 2px 8px', fontSize:11, color:C.inkSoft,
-            fontFamily:SANS, lineHeight:1.6 }}>
-            Hidden, not deleted — bring any of these back whenever you want.
-          </p>
-          <Card style={{ padding:'4px 0', marginBottom:20 }}>
-            {hiddenRules.map((r, i) => (
-              <div key={r.key}>{i > 0 && <Divider/>}
-                <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 18px' }}>
-                  <p style={{ flex:1, minWidth:0, margin:0, fontSize:13, color:C.inkMid, fontFamily:SANS,
-                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                    {r.label}
-                  </p>
-                  <button onClick={() => unhideRule(r)}
-                    style={{ border:'none', borderRadius:8, padding:'6px 12px',
-                      background:C.green+'18', color:C.green, fontSize:11, fontWeight:700,
-                      cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
-                    Restore
                   </button>
                 </div>
               </div>
@@ -6587,7 +6668,8 @@ export default function App() {
           billPayments={billPayments} allBillPayments={allBillPayments} profile={profile} partnerName={partnerName}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome} onAddTxn={addTxn}
           showToast={showToast} goals={goals} onSaveGoals={saveGoals}
-          depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}/>}
+          depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}
+          setTab={setTab} onEditTxnSave={handleEditTxnSave} onDeleteTxn={deleteRow}/>}
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
           allCats={allCats} catTargets={catTargets}
           suggested={suggested} onAcceptSuggested={acceptSuggested}
