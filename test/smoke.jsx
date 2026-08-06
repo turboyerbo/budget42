@@ -254,6 +254,72 @@ check('HomeTab: Available Money = Income − Spent − Bills Paid, no double-cou
   if (!html.includes('2,980.00')) throw new Error('Available Money is wrong — looks like bills were subtracted twice');
 });
 
+// Regression guard for a real, reproducible bug: new Date('2026-08-01') parses
+// as UTC midnight. In any timezone behind UTC (Toronto included), reading it
+// back with local getters like getMonth() rolls it back to the previous day —
+// and for an entry dated the 1st, that means the previous MONTH. It would
+// then vanish from that month's filtered "predicted income" view entirely,
+// which is exactly what was reported. This test forces the timezone that
+// actually exhibits the bug (the sandbox defaults to UTC, where the bug does
+// NOT reproduce), so it only proves something if parseLocalDate is doing its
+// job rather than passing by accident.
+check('Predicted income dated the 1st does not vanish in a timezone behind UTC', () => {
+  const originalTZ = process.env.TZ;
+  process.env.TZ = 'America/Toronto';
+  try {
+    // Sanity-check the premise: naive parsing really does exhibit the bug
+    // here, so this test would actually catch a regression, not pass blindly.
+    const naive = new Date('2026-08-01');
+    if (naive.getMonth() !== 6) {
+      throw new Error('test premise failed: naive Date parsing did not reproduce the known bug in this environment — the TZ setting may not be taking effect');
+    }
+
+    const augFirstEntry = { id:'inc1', date:'2026-08-01', amount:2012, description:'NORR', account:'', person:'both' };
+    const html = renderToString(React.createElement(HomeTab, {
+      txns: [], bankImports: [], ccTarget: 0,
+      allCats, catTargets: {}, year: 2026, month: 7, // viewing August (0-indexed 7)
+      profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+      history: [], billRules: [], billPayments: [],
+      expectedIncome: [augFirstEntry], setExpectedIncome: noop, onAddTxn: noop,
+      showToast: noop, goals: [], onSaveGoals: noop,
+      depositingGoalId: null, setDepositingGoalId: noop,
+      setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+    }));
+
+    if (!html.includes('2,012.00')) {
+      throw new Error('the $2,012 predicted income dated Aug 1 did not appear while viewing August — it vanished into the wrong month');
+    }
+  } finally {
+    process.env.TZ = originalTZ;
+  }
+});
+
+check('CalendarTab: predicted and actual income are shown separately, never summed together', () => {
+  const originalTZ = process.env.TZ;
+  process.env.TZ = 'America/Toronto';
+  try {
+    const predicted = { id:'inc1', date:'2026-07-15', amount:2000, description:'Expected paycheck', account:'', person:'both' };
+    const actualDeposit = mk({ description:'NORR PAYROLL', amount:3984.44, category:'income', direction:'credit', date:'2026-07-15' });
+
+    const html = renderToString(React.createElement(CalendarTab, {
+      year: 2026, month: 6, txns: [], bankImports: [actualDeposit],
+      billRules: [], billPayments: [],
+      expectedIncome: [predicted], setExpectedIncome: noop,
+      goals: [], onSaveGoals: noop, allCats, history: [],
+      showToast: noop, onSaveRule: noop, onDeleteRule: noop
+    }));
+
+    // Each figure should appear on its own — never combined into one 5984.44
+    if (html.includes('5,984.44')) {
+      throw new Error('predicted and actual income were added together into one figure — they must stay separate');
+    }
+    if (!html.includes('2,000')) throw new Error('expected the $2,000 predicted income to appear on its own');
+    if (!html.includes('3,984.44')) throw new Error('expected the $3,984.44 actual income to appear on its own');
+  } finally {
+    process.env.TZ = originalTZ;
+  }
+});
+
 check('SpendingTab: dashboard shows Still Available To Spend', () => {
   const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
   const html = renderToString(React.createElement(SpendingTab, {

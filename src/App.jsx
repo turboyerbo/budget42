@@ -46,6 +46,17 @@ const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
 const today = () => new Date().toISOString().slice(0,10);
 const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const capitalize = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+// `new Date('2026-08-01')` parses as UTC midnight — in any timezone behind
+// UTC (Toronto included), reading it back with local getters like getMonth()
+// silently shifts it to the previous day, and near a month boundary that
+// means the previous MONTH. An entry dated the 1st then vanishes from that
+// month's filtered view entirely. Parsing the parts directly and building
+// the Date with the local constructor sidesteps the UTC round-trip.
+function parseLocalDate(dateStr) {
+  const [y, m, d] = String(dateStr || '').split('-').map(Number);
+  if (!y || !m || !d) return new Date(dateStr);
+  return new Date(y, m - 1, d);
+}
 // Today's date if it falls within the given month, otherwise the 1st of that month —
 // used so "add income/expense for this month" forms default sensibly when you're
 // looking at a month other than the current one.
@@ -434,7 +445,7 @@ function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, pr
   endOfWeek.setDate(startOfWeek.getDate() + 6);
   
   const weekTxns = allTx.filter(t => {
-    const txDate = new Date(t.date);
+    const txDate = parseLocalDate(t.date);
     return txDate >= startOfWeek && txDate <= endOfWeek;
   });
   
@@ -1946,7 +1957,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
   const [confirming, setConfirming] = useState(false);
 
   const monthEntries = (expectedIncome || []).filter(inc => {
-    const d = new Date(inc.date);
+    const d = parseLocalDate(inc.date);
     return d.getFullYear() === year && d.getMonth() === month;
   });
   const otherMonthsCount = (expectedIncome || []).length - monthEntries.length;
@@ -2052,7 +2063,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
                     {inc.description || 'Income'}
                   </p>
                   <p style={{margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
-                    {new Date(inc.date).toLocaleDateString('en-CA')}
+                    {parseLocalDate(inc.date).toLocaleDateString('en-CA')}
                     {inc.account && ` • ${inc.account}`}
                   </p>
                 </div>
@@ -2370,7 +2381,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // Predicted income comes from what you've entered as expected for THIS month,
   // not from transactions, and not from entries you predicted for other months
   const predictedIncomeTotal = (expectedIncome||[])
-    .filter(i => { const d = new Date(i.date); return d.getFullYear()===year && d.getMonth()===month; })
+    .filter(i => { const d = parseLocalDate(i.date); return d.getFullYear()===year && d.getMonth()===month; })
     .reduce((a,i)=>a+(i.amount||0),0);
 
   // AVAILABLE MONEY = Actual Income − Money Spent This Month − Bills Paid This
@@ -2783,7 +2794,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   // Spent in the last 7 days — same "is this week tight?" question Bills asks
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
   const weekSpent = allTx
-    .filter(t => !excludedIds.has(t.category||t.cat) && new Date(t.date) >= weekAgo)
+    .filter(t => !excludedIds.has(t.category||t.cat) && parseLocalDate(t.date) >= weekAgo)
     .reduce((a,t)=>a+t.amount,0);
 
   const categoryBudgetSum = allCats
@@ -3631,17 +3642,29 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
     billsByDay[d].push(b);
   });
 
-  const incomeByDay = {};
+  // Predicted (planned ahead) and actual (already landed) income are tracked
+  // completely separately — never summed together into one figure, since
+  // they answer different questions ("what's expected" vs "what happened").
+  const predictedIncomeByDay = {};
   (expectedIncome || []).forEach(inc => {
-    const d = new Date(inc.date).getDate();
-    if (!incomeByDay[d]) incomeByDay[d] = [];
-    incomeByDay[d].push(inc);
+    const d = parseLocalDate(inc.date).getDate();
+    if (!predictedIncomeByDay[d]) predictedIncomeByDay[d] = [];
+    predictedIncomeByDay[d].push(inc);
   });
+
+  const actualIncomeByDay = {};
+  [...(txns||[]), ...(bankImports||[])]
+    .filter(t => (t.category||t.cat) === 'income')
+    .forEach(t => {
+      const d = parseLocalDate(t.date).getDate();
+      if (!actualIncomeByDay[d]) actualIncomeByDay[d] = [];
+      actualIncomeByDay[d].push(t);
+    });
 
   const depositsByDay = {};
   (goals || []).forEach(g => {
     (g.deposits || []).forEach(dep => {
-      const d = new Date(dep.date).getDate();
+      const d = parseLocalDate(dep.date).getDate();
       if (!depositsByDay[d]) depositsByDay[d] = [];
       depositsByDay[d].push({...dep, goalId: g.id, goalLabel: g.label});
     });
@@ -3675,11 +3698,12 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
         <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4}}>
           {weeks.map((week, weekIdx) => 
             week.map((day, dayIdx) => {
-              const dayIncome = day && incomeByDay[day];
+              const dayPredicted = day && predictedIncomeByDay[day];
+              const dayActual = day && actualIncomeByDay[day];
               const dayBills = day && billsByDay[day];
               const dayDeposits = day && depositsByDay[day];
               const isToday = day && today.getDate() === day && today.getMonth() === month && today.getFullYear() === year;
-              const hasAnything = dayIncome || dayBills || dayDeposits;
+              const hasAnything = dayPredicted || dayActual || dayBills || dayDeposits;
 
               return (
                 <button
@@ -3706,10 +3730,16 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
                   {day && (
                     <div style={{display: 'flex', flexDirection: 'column', gap: 2, flex: 1}}>
-                      {dayIncome && dayIncome.length > 0 && (
+                      {dayActual && dayActual.length > 0 && (
                         <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.green + '20',
                           color: C.green, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                          💰 {fmt(dayIncome.reduce((a,i)=>a+i.amount,0))}
+                          💵 {fmt(dayActual.reduce((a,i)=>a+i.amount,0))}
+                        </div>
+                      )}
+                      {dayPredicted && dayPredicted.length > 0 && (
+                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.blue + '20',
+                          color: C.blue, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
+                          💰 {fmt(dayPredicted.reduce((a,i)=>a+i.amount,0))}
                         </div>
                       )}
                       {dayBills && dayBills.length > 0 && (
@@ -3740,7 +3770,11 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
         <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8}}>
           <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
             <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.green + '40'}}/>
-            <span style={{fontSize: 11, color: C.inkSoft}}>Predicted income</span>
+            <span style={{fontSize: 11, color: C.inkSoft}}>💵 Actual income (landed)</span>
+          </div>
+          <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
+            <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.blue + '40'}}/>
+            <span style={{fontSize: 11, color: C.inkSoft}}>💰 Predicted income</span>
           </div>
           <div style={{display: 'flex', alignItems: 'center', gap: 6}}>
             <span style={{display: 'inline-block', width: 12, height: 12, borderRadius: 2, background: C.red + '40'}}/>
@@ -3759,7 +3793,8 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
           year={year}
           month={month}
           bills={billsByDay[selectedDay] || []}
-          incomeEntries={incomeByDay[selectedDay] || []}
+          incomeEntries={predictedIncomeByDay[selectedDay] || []}
+          actualEntries={actualIncomeByDay[selectedDay] || []}
           deposits={depositsByDay[selectedDay] || []}
           goals={goals || []}
           onSaveGoals={onSaveGoals}
@@ -3776,7 +3811,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 }
 
 // ─── DAY DETAIL PANEL (calendar click-through, everything editable) ──────────
-function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals, onSaveGoals,
+function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, deposits, goals, onSaveGoals,
                           expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, showToast, onClose}) {
   const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
   const dateLabel = new Date(year, month, day).toLocaleDateString('en-CA', {weekday:'long', month:'long', day:'numeric'});
@@ -3915,9 +3950,28 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
           </button>
         </div>
 
+        {/* ACTUAL INCOME — read-only here; edit/delete lives on Home's Actual
+            Income drill-down or the Spending category view, so there's one
+            place that owns each kind of edit, not two disagreeing ones */}
+        {actualEntries && actualEntries.length > 0 && (
+          <div style={{marginBottom:20}}>
+            <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.green, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
+              💵 Actual income (landed)
+            </p>
+            {actualEntries.map(tx => (
+              <div key={tx.id} style={{display:'flex', alignItems:'center', gap:8, padding:'6px 0', borderBottom:`1px solid ${C.sandMid}`}}>
+                <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                  {tx.note || tx.description || 'Deposit'}
+                </span>
+                <span style={{fontFamily:SERIF, fontSize:13, fontWeight:600, color:C.green}}>+{fmt(tx.amount)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* PREDICTED INCOME */}
         <div style={{marginBottom:20}}>
-          <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.green, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
+          <p style={{margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.blue, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em'}}>
             💰 Predicted income
           </p>
           {incomeEntries.length === 0 && !addingIncome && (
@@ -3947,13 +4001,13 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
               </div>
               <div style={{display:'flex', gap:6}}>
                 <input type="number" placeholder="Amount" value={newIncAmount} onChange={e=>setNewIncAmount(e.target.value)} style={inputStyle}/>
-                <button onClick={saveIncome} style={{border:'none', background:C.green, color:'white', borderRadius:8, padding:'0 14px', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>Save</button>
+                <button onClick={saveIncome} style={{border:'none', background:C.blue, color:'white', borderRadius:8, padding:'0 14px', fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>Save</button>
                 <button onClick={()=>setAddingIncome(false)} style={{border:`1px solid ${C.sandDark}`, background:'white', color:C.ink, borderRadius:8, padding:'0 12px', fontSize:12, cursor:'pointer', fontFamily:SANS}}>×</button>
               </div>
             </div>
           ) : (
-            <button onClick={()=>setAddingIncome(true)} style={{width:'100%', marginTop:6, padding:'8px', border:`1px dashed ${C.green}55`,
-              borderRadius:8, background:'none', color:C.green, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+            <button onClick={()=>setAddingIncome(true)} style={{width:'100%', marginTop:6, padding:'8px', border:`1px dashed ${C.blue}55`,
+              borderRadius:8, background:'none', color:C.blue, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
               + Add predicted income for this day
             </button>
           )}
@@ -6293,7 +6347,7 @@ export default function App() {
   // Computed once here so Home and Spending can never disagree about it —
   // both just receive the same number.
   const predictedIncomeTotal = (expectedIncome||[])
-    .filter(i => { const d = new Date(i.date); return d.getFullYear()===year && d.getMonth()===month; })
+    .filter(i => { const d = parseLocalDate(i.date); return d.getFullYear()===year && d.getMonth()===month; })
     .reduce((a,i)=>a+(i.amount||0),0);
 
   // ── Auth init ────────────────────────────────────────────────────────────────
