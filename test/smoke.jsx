@@ -7,12 +7,13 @@
  */
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { detectRecurring, splitRecurring } from '../src/recurring.js';
+import { detectRecurring, splitRecurring, getCarriedOverBills } from '../src/recurring.js';
+import { categorizeBudget } from '../src/categorize.js';
 import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
-  AutomationTab, AuthScreen, AddTab, AddCatModal, OtherReviewModal, ActivityPanel,
+  AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
@@ -45,7 +46,54 @@ function check(name, fn) {
 }
 
 check('detectRecurring',   () => detectRecurring(history));
+
+// Electricity is no longer its own spending category — utility charges should
+// route into 'rent' (labeled "Home" in the UI) rather than a dead category id.
+check('categorizeBudget: electricity routes into Home (rent id), not its own category', () => {
+  const cat = categorizeBudget('TORONTO HYDRO PAD');
+  if (cat !== 'rent') throw new Error(`expected 'rent' (Home), got '${cat}'`);
+});
+check('categorizeBudget: rent still routes into Home (rent id)', () => {
+  const cat = categorizeBudget('STELA RENT PAYMENT');
+  if (cat !== 'rent') throw new Error(`expected 'rent' (Home), got '${cat}'`);
+});
+
 check('splitRecurring',    () => splitRecurring(detectRecurring(history), imports));
+
+check('getCarriedOverBills: unpaid last month carries forward as overdue', () => {
+  // history already has NETFLIX.COM charged every month for Apr/May/Jun 2026.
+  // Add a July charge for something else (so we know we HAVE a July statement)
+  // but no Netflix charge in July — that's the unpaid month to detect.
+  const withJuly = [...history, mk({ month:6, date:'2026-07-11', description:'LOBLAWS 1032', amount:70 })];
+  const recurring = detectRecurring(withJuly).filter(b => b.confidence === 'high');
+  const today = new Date(2026, 7, 15); // viewing August, as of Aug 15
+  const carried = getCarriedOverBills(recurring, withJuly, [], 2026, 7, today);
+  const netflix = carried.find(c => c.label.toUpperCase().includes('NETFLIX'));
+  if (!netflix) throw new Error('expected NETFLIX to carry forward as overdue from July');
+  if (netflix.carriedFrom.month !== 6) throw new Error('expected carriedFrom month to be July (6)');
+  if (netflix.status !== 'overdue') throw new Error('expected status overdue');
+});
+
+check('getCarriedOverBills: paid last month does not carry forward', () => {
+  const withJulyPaid = [...history,
+    mk({ month:6, date:'2026-07-11', description:'LOBLAWS 1032', amount:70 }),
+    mk({ month:6, date:'2026-07-02', description:'NETFLIX.COM', amount:9.03 }),
+  ];
+  const recurring = detectRecurring(withJulyPaid).filter(b => b.confidence === 'high');
+  const today = new Date(2026, 7, 15);
+  const carried = getCarriedOverBills(recurring, withJulyPaid, [], 2026, 7, today);
+  const netflix = carried.find(c => c.label.toUpperCase().includes('NETFLIX'));
+  if (netflix) throw new Error('did not expect NETFLIX to carry forward — it was charged in July');
+});
+
+check('getCarriedOverBills: only applies when viewing the real current month', () => {
+  const withJuly = [...history, mk({ month:6, date:'2026-07-11', description:'LOBLAWS 1032', amount:70 })];
+  const recurring = detectRecurring(withJuly).filter(b => b.confidence === 'high');
+  const today = new Date(2026, 7, 15); // today is August, but we're asking about September
+  const carried = getCarriedOverBills(recurring, withJuly, [], 2026, 8, today);
+  if (carried.length !== 0) throw new Error('expected no carry-forward when not viewing the current real month');
+});
+
 check('findSharedMoments', () => findSharedMoments([...txns, ...imports]));
 check('summariseTogether', () => summariseTogether(findSharedMoments(imports).shared));
 check('validationReport',  () => buildValidationReport(imports.map(r=>({...r,_type:r.direction})), history));
@@ -82,6 +130,30 @@ const expectedIncomeMock = [
   { id: 'inc2', date: '2026-06-01', amount: 500, description: 'Old month entry', account: '', person: 'both' },
 ];
 
+// Regression guard: 'income' is no longer a row in the real category list
+// (DEFAULT_CATS), but income transactions must still be excluded from spend
+// totals via the ALWAYS_EXCLUDED_CATS safety net, not by allCats membership.
+check('HomeTab: income excluded from spend totals even when not in allCats', () => {
+  const catsWithoutIncome = allCats.filter(c => c.id !== 'income');
+  const bigPaycheck = mk({ description: 'NORR PAYROLL', amount: 5000, category: 'income', direction: 'credit' });
+  const smallGroceryRun = mk({ description: 'LOBLAWS 1032', amount: 50, category: 'groceries' });
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [bigPaycheck, smallGroceryRun], ccTarget: 0,
+    allCats: catsWithoutIncome, catTargets: {}, year: 2026, month: 6,
+    profile, view: 'combined', setView: noop, history: [], billRules: [],
+    billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop
+  }));
+  if (html.includes('5,050.00')) {
+    throw new Error('income leaked into spend total — got $5,050 instead of $50');
+  }
+  if (!html.includes('50.00')) {
+    throw new Error('expected spend total to reflect the $50 grocery run');
+  }
+});
+
 ['mine','combined'].forEach(v => {
   check('render HomeTab (' + v + ')', () => renderToString(React.createElement(HomeTab, {
     txns, bankImports: imports, ccTarget: 500,
@@ -101,7 +173,8 @@ const expectedIncomeMock = [
     view: v, setView: noop,
     onDeleteRow: noop, duplicateCount: 2, onReviewDuplicates: noop,
     setQuickAddCat: noop, setTab: noop,
-    setEditingCatTarget: noop, showToast: noop
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop
   })));
 });
 
@@ -123,12 +196,13 @@ check('render SpendingTab (no history)', () => renderToString(React.createElemen
   view: 'combined', setView: noop,
   onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
   setQuickAddCat: noop, setTab: noop,
-  setEditingCatTarget: noop, showToast: noop
+  setEditingCatTarget: noop, showToast: noop,
+  onScanReceipt: noop, onConfirmReceipt: noop
 })));
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
-  showToast: noop, billsLocal: false,
-  billPayments: [], onTogglePaid: noop, profile: { name:'Jordan' } };
+  showToast: noop, billsLocal: false, setTab: noop,
+  billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' } };
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6, ...billProps })));
@@ -168,6 +242,36 @@ check('render BillsTab (nothing charged yet)', () => renderToString(React.create
 check('render BillsTab (future month)', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2027, month: 0, ...billProps })));
 
+// Exercise the carried-over-overdue section and the "needs review" banner
+// against real today, since getCarriedOverBills only activates for the
+// month you're actually currently in.
+{
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const back = (n) => { let mm = m - n, yy = y; while (mm < 0) { mm += 12; yy--; } return { yy, mm }; };
+  const m1 = back(1), m2 = back(2), m3 = back(3);
+  const dynHistory = [
+    mk({ year:m3.yy, month:m3.mm, date:`${m3.yy}-${String(m3.mm+1).padStart(2,'0')}-02`, description:'NETFLIX.COM', amount:9.03 }),
+    mk({ year:m2.yy, month:m2.mm, date:`${m2.yy}-${String(m2.mm+1).padStart(2,'0')}-02`, description:'NETFLIX.COM', amount:9.03 }),
+    // last month: some other charge exists (so we know the statement was uploaded) but NOT Netflix — unpaid
+    mk({ year:m1.yy, month:m1.mm, date:`${m1.yy}-${String(m1.mm+1).padStart(2,'0')}-11`, description:'LOBLAWS 1032', amount:70 }),
+    // this month: proof of statement data, but still no Netflix charge — Netflix is 'due' this month
+    mk({ year:y, month:m, date:`${y}-${String(m+1).padStart(2,'0')}-11`, description:'LOBLAWS 1032', amount:70 }),
+  ];
+  // history = everything ever, for detection. bankImports (like the real app)
+  // must be scoped to ONLY the month being viewed — buildSchedule assumes that.
+  const thisMonthOnly = dynHistory.filter(t => t.year === y && t.month === m);
+  check('render BillsTab (carried-over overdue + needs review)', () => {
+    const html = renderToString(React.createElement(BillsTab, {
+      history: dynHistory, txns: [], bankImports: thisMonthOnly, allCats, year: y, month: m,
+      ...billProps
+    }));
+    if (!html.includes('Overdue from earlier months')) throw new Error('expected the carried-over section to render');
+    if (!/needs a check|need a check/.test(html)) throw new Error('expected the needs-review banner to render');
+    if (!html.toUpperCase().includes('NETFLIX')) throw new Error('expected NETFLIX to appear');
+  });
+}
+
 check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, {
   txns, bankImports: imports, allCats,
   onDeleteTxn: noop, onDeleteImport: noop, onSaveNote: noop })));
@@ -202,6 +306,9 @@ check('render AddTab', () => renderToString(React.createElement(AddTab, {
 
 check('render AddCatModal', () => renderToString(React.createElement(AddCatModal, {
   onSave: noop, onClose: noop })));
+
+check('render ReceiptScanModal (pick stage)', () => renderToString(React.createElement(ReceiptScanModal, {
+  allCats, onScan: noop, onConfirm: noop, onClose: noop })));
 
 check('render OtherReviewModal', () => renderToString(React.createElement(OtherReviewModal, {
   items: imports, allCats, onSave: noop, onClose: noop })));

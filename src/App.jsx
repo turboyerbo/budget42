@@ -17,17 +17,19 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
-         getBillPayments, setBillPaid, syncLocalBillPayments,
+         getBillPayments, setBillPaid, syncLocalBillPayments, getAllBillPayments,
          deleteManyRows, getMonthEverything,
          getCategoryTargets, upsertCategoryTargets,
-         getGoals, upsertGoals } from './supabase.js';
+         getGoals, upsertGoals,
+         uploadReceiptImage, insertReceipt, updateReceipt } from './supabase.js';
+import { analyzeReceipt } from './receipt.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
 import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
-         applyBillRules } from './recurring.js';
+         applyBillRules, getCarriedOverBills } from './recurring.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport, findExistingDuplicates } from './validate.js';
@@ -1014,6 +1016,12 @@ const MONTHS = ['January','February','March','April','May','June',
 const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // ─── Categories ───────────────────────────────────────────────────────────────
+// Categories that must never count as spending, regardless of whether they're
+// still shown as a pickable category. 'income' in particular is assigned
+// directly at import time (parse.js) and is no longer a row in the category
+// list below — this guarantees it stays excluded from spend totals even so.
+const ALWAYS_EXCLUDED_CATS = new Set(['income', 'cc_payment', 'transfer']);
+
 const DEFAULT_CATS = [
   {id:'alcohol',      label:'Alcohol & cigs',        icon:'Wine',           target:175, color:'#7c3aed'},
   {id:'banking',      label:'Banking fees & interest',icon:'Landmark',      target:400, color:'#57534e'},
@@ -1021,17 +1029,15 @@ const DEFAULT_CATS = [
   {id:'cleaning',     label:'Cleaning services',     icon:'Brush',          target:25,  color:'#0d9488'},
   {id:'clothing',     label:'Clothing',              icon:'Shirt',          target:50,  color:'#b45309'},
   {id:'cc_payment',   label:'Credit card payment',   icon:'CreditCard',     target:0,   color:'#57534e', excluded:true},
-  {id:'electricity',  label:'Electricity',           icon:'Zap',            target:150, color:'#ca8a04'},
   {id:'entertainment',label:'Entertainment',         icon:'Ticket',         target:100, color:'#065f46'},
   {id:'gifts',        label:'Gifts',                 icon:'Gift',           target:25,  color:'#db2777'},
   {id:'hobbies',      label:'Golf & hobbies',        icon:'Dumbbell',       target:130, color:'#4f46e5'},
   {id:'groceries',    label:'Groceries',             icon:'ShoppingBasket', target:500, color:'#1a7a4a'},
-  {id:'income',       label:'Income',                icon:'Leaf',           target:0,   color:'#1a7a4a', excluded:true, isIncome:true},
   {id:'legal',        label:'Legal & professional',  icon:'Scale',          target:125, color:'#78716c'},
   {id:'medical',      label:'Medical & dental',      icon:'Stethoscope',    target:600, color:'#c0392b'},
   {id:'other',        label:'Other / uncategorised', icon:'Package',        target:200, color:'#6b7280'},
   {id:'pharmacy',     label:'Pharmacy',              icon:'Pill',           target:200, color:'#be185d'},
-  {id:'rent',         label:'Rent + home',           icon:'Home',           target:1900,color:'#92400e'},
+  {id:'rent',         label:'Home',                  icon:'Home',           target:1900,color:'#92400e'},
   {id:'rental_insurance',label:'Rental insurance',   icon:'Shield',         target:67,  color:'#1d4ed8'},
   {id:'restaurant',   label:'Restaurant & takeout',  icon:'Utensils',       target:500, color:'#1d4ed8'},
   {id:'salon',        label:'Salon & spa',           icon:'Scissors',       target:50,  color:'#9d174d'},
@@ -1528,7 +1534,207 @@ export function AddCatModal({onSave,onClose}) {
 }
 
 
-// ─── OtherReviewModal ─────────────────────────────────────────────────────────
+// ─── ReceiptScanModal ───────────────────────────────────────────────────────
+// Photo → Storage → Claude reads it → user confirms → becomes a transaction.
+// Three states in one modal: pick a photo, wait while it's read, then review
+// and edit what Claude found before it becomes real spending.
+export function ReceiptScanModal({allCats, onScan, onConfirm, onClose}) {
+  const [file, setFile]       = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [stage, setStage]     = useState('pick'); // 'pick' | 'reading' | 'review' | 'error'
+  const [error, setError]     = useState('');
+  const [receiptId, setReceiptId] = useState(null);
+  const [fields, setFields]   = useState(null); // {merchant,date,amount,category,confidence,itemsSummary}
+  const [saving, setSaving]   = useState(false);
+  const inputRef = useRef(null);
+
+  async function handleFile(f) {
+    if (!f) return;
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setStage('reading');
+    setError('');
+    try {
+      const result = await onScan(f);
+      setReceiptId(result.id);
+      setFields({
+        merchant: result.merchant, date: result.date, amount: result.amount,
+        category: result.category, confidence: result.confidence,
+        itemsSummary: result.itemsSummary,
+      });
+      setStage('review');
+    } catch (err) {
+      setError(err.message || 'Something went wrong reading that receipt.');
+      setStage('error');
+    }
+  }
+
+  async function save() {
+    if (!fields || saving) return;
+    setSaving(true);
+    try {
+      await onConfirm(receiptId, fields);
+      onClose();
+    } catch {
+      setError('Could not save that transaction — try again.');
+      setStage('error');
+      setSaving(false);
+    }
+  }
+
+  const inputStyle = {
+    width:'100%', padding:'11px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+    background:C.sand, color:C.ink, fontFamily:SANS, fontSize:15, outline:'none', boxSizing:'border-box'
+  };
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:500,display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
+      <div onClick={stage==='reading'?undefined:onClose} style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.4)'}}/>
+      <div style={{position:'relative',background:C.white,borderRadius:'20px 20px 0 0',
+        padding:'24px 20px 40px',animation:'slideUp 0.25s ease',maxHeight:'88dvh',overflowY:'auto'}}>
+
+        <div style={{display:'flex',alignItems:'center',marginBottom:20}}>
+          <h2 style={{flex:1,fontFamily:SERIF,fontSize:22,fontWeight:600,color:C.ink}}>Scan a receipt</h2>
+          {stage!=='reading' && (
+            <button onClick={onClose} style={{border:'none',background:'none',padding:4,cursor:'pointer'}}>
+              <X size={20} color={C.inkSoft}/>
+            </button>
+          )}
+        </div>
+
+        {stage==='pick' && (
+          <>
+            <p style={{margin:'0 0 20px',fontSize:13,color:C.inkSoft,fontFamily:SANS,lineHeight:1.6}}>
+              Take a photo of a paper receipt, or choose one from your camera roll.
+              Claude reads the merchant, total, and date, and suggests a category —
+              you confirm before anything's added.
+            </p>
+            <input ref={inputRef} type="file" accept="image/*" capture="environment"
+              style={{display:'none'}} onChange={e=>handleFile(e.target.files?.[0])}/>
+            <button onClick={()=>inputRef.current?.click()} style={{
+              width:'100%', border:`1.5px dashed ${C.sandDark}`, borderRadius:14, padding:'28px 16px',
+              background:C.sand, cursor:'pointer', display:'flex', flexDirection:'column',
+              alignItems:'center', gap:8, fontFamily:SANS
+            }}>
+              <div style={{width:48,height:48,borderRadius:99,background:C.green+'18',
+                display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <Camera size={22} color={C.green}/>
+              </div>
+              <span style={{fontSize:14,fontWeight:600,color:C.ink}}>Take or choose a photo</span>
+              <span style={{fontSize:11,color:C.inkSoft}}>JPG, PNG, up to 15MB</span>
+            </button>
+          </>
+        )}
+
+        {stage==='reading' && (
+          <div style={{textAlign:'center', padding:'20px 0'}}>
+            {preview && (
+              <img src={preview} alt="Receipt" style={{maxWidth:'100%', maxHeight:220, borderRadius:12,
+                marginBottom:20, boxShadow:'0 4px 16px rgba(0,0,0,0.15)'}}/>
+            )}
+            <Spinner size={22}/>
+            <p style={{margin:'14px 0 0', fontSize:14, color:C.inkMid, fontFamily:SANS, fontWeight:600}}>
+              Reading your receipt...
+            </p>
+            <p style={{margin:'4px 0 0', fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
+              Uploading and analyzing — a few seconds
+            </p>
+          </div>
+        )}
+
+        {stage==='error' && (
+          <div>
+            {preview && (
+              <img src={preview} alt="Receipt" style={{maxWidth:'100%', maxHeight:180, borderRadius:12,
+                marginBottom:16, display:'block', marginLeft:'auto', marginRight:'auto'}}/>
+            )}
+            <div style={{background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:12,
+              padding:'12px 14px', marginBottom:16, display:'flex', gap:10, alignItems:'flex-start'}}>
+              <AlertCircle size={17} color={C.red} style={{flexShrink:0, marginTop:1}}/>
+              <p style={{margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.6}}>{error}</p>
+            </div>
+            <div style={{display:'flex', gap:8}}>
+              <button onClick={onClose} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
+                color:C.ink, padding:'12px', borderRadius:10, fontWeight:600, fontSize:14, fontFamily:SANS, cursor:'pointer'}}>
+                Cancel
+              </button>
+              <button onClick={()=>{setStage('pick'); setFile(null); setPreview(null); setError('');}} style={{
+                flex:1, border:'none', background:C.green, color:'white', padding:'12px', borderRadius:10,
+                fontWeight:600, fontSize:14, fontFamily:SANS, cursor:'pointer'}}>
+                Try another photo
+              </button>
+            </div>
+          </div>
+        )}
+
+        {stage==='review' && fields && (
+          <div>
+            <div style={{display:'flex', gap:12, marginBottom:16}}>
+              {preview && (
+                <img src={preview} alt="Receipt" style={{width:80, height:80, objectFit:'cover',
+                  borderRadius:10, flexShrink:0, boxShadow:'0 2px 8px rgba(0,0,0,0.12)'}}/>
+              )}
+              <div style={{flex:1, minWidth:0}}>
+                <p style={{margin:'0 0 4px', fontSize:11, color:C.inkSoft, fontFamily:SANS,
+                  textTransform:'uppercase', letterSpacing:'0.06em', fontWeight:600}}>
+                  Claude read this as{fields.confidence==='low' ? ' (low confidence — check carefully)' : ''}
+                </p>
+                {fields.itemsSummary && (
+                  <p style={{margin:0, fontSize:12, color:C.inkMid, fontFamily:SANS, fontStyle:'italic',
+                    lineHeight:1.4}}>{fields.itemsSummary}</p>
+                )}
+              </div>
+            </div>
+
+            <SL>Merchant</SL>
+            <input value={fields.merchant} onChange={e=>setFields({...fields, merchant:e.target.value})}
+              style={{...inputStyle, marginBottom:14}}/>
+
+            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:14}}>
+              <div>
+                <SL>Amount</SL>
+                <div style={{position:'relative'}}>
+                  <span style={{position:'absolute', left:12, top:'50%', transform:'translateY(-50%)',
+                    fontSize:15, color:C.inkSoft}}>$</span>
+                  <input type="number" value={fields.amount}
+                    onChange={e=>setFields({...fields, amount:parseFloat(e.target.value)||0})}
+                    style={{...inputStyle, paddingLeft:24}}/>
+                </div>
+              </div>
+              <div>
+                <SL>Date</SL>
+                <input type="date" value={fields.date}
+                  onChange={e=>setFields({...fields, date:e.target.value})}
+                  style={inputStyle}/>
+              </div>
+            </div>
+
+            <SL>Category</SL>
+            <select value={fields.category} onChange={e=>setFields({...fields, category:e.target.value})}
+              style={{...inputStyle, marginBottom:22, cursor:'pointer'}}>
+              {allCats.filter(c=>!c.excluded).map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+
+            <div style={{display:'flex', gap:8}}>
+              <button onClick={onClose} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
+                color:C.ink, padding:'13px', borderRadius:10, fontWeight:600, fontSize:14, fontFamily:SANS, cursor:'pointer'}}>
+                Discard
+              </button>
+              <button onClick={save} disabled={saving || !fields.amount} style={{
+                flex:2, border:'none', background:(saving||!fields.amount)?C.sandDark:C.green, color:'white',
+                padding:'13px', borderRadius:10, fontWeight:600, fontSize:14, fontFamily:SANS,
+                cursor:(saving||!fields.amount)?'default':'pointer'}}>
+                {saving ? 'Adding...' : `Add ${fmt(fields.amount)} to Spending`}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // Shows all transactions still in "Other" so the user can re-categorise them.
 // Each row has: description, date, amount, category dropdown, note field, AI button.
 export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow }) {
@@ -2057,7 +2263,7 @@ function GoalRow({goal, accent, onUpdate, onDeposit}) {
 }
 
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
-                  year,month,history,billRules,billPayments,expectedIncome,setExpectedIncome,
+                  year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,
                   showToast,profile,goals,onSaveGoals,depositingGoalId,setDepositingGoalId}) {
   const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
   const [editingBudget, setEditingBudget] = useState(false);
@@ -2078,20 +2284,25 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     .filter(b => b.confidence === 'high');
   const { due:dueBills, dueTotal } = splitRecurring(recurring, everythingThisMonth);
 
+  // Bills from a past month that were never paid don't just disappear — they're
+  // still owed, so they count toward what's committed this month too.
+  const carriedOver = getCarriedOverBills(recurring, history || [], allBillPayments || [], year, month);
+  const carriedOverTotal = carriedOver.reduce((a,b)=>a+b.amount,0);
+
   // Same logic for the card payment: only pledge it if it hasn't gone out yet
   const ccPaidThisMonth = everythingThisMonth
     .filter(t=>(t.category||t.cat)==='cc_payment')
     .reduce((a,t)=>a+t.amount,0);
   const ccStillDue = Math.max(0, ccTarget - ccPaidThisMonth);
 
-  const committed = dueTotal + ccStillDue;
+  const committed = dueTotal + ccStillDue + carriedOverTotal;
 
   // "Mine" shows only your own transactions. "Combined" shows the household.
   const allTx = view==='mine'
     ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
     : everything;
 
-  const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
+  const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
   // Income is no longer typed in — it is read off the statements
   const incomeRows=allTx.filter(t=>(t.category||t.cat)==='income');
@@ -2407,10 +2618,11 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  setEditingCatTarget,showToast}) {
+                  setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
+  const [showScan, setShowScan] = useState(false);
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
 
@@ -2419,7 +2631,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
     ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
     : everything;
 
-  const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
+  const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
@@ -2457,6 +2669,26 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
           </button>
         ))}
       </div>
+
+      <button onClick={()=>setShowScan(true)} style={{
+        width:'100%', border:'none', borderRadius:14, padding:'14px 16px', marginBottom:12,
+        background:C.green, cursor:'pointer', display:'flex', alignItems:'center', gap:12,
+        boxShadow:'0 2px 8px rgba(26,122,74,0.25)'
+      }}>
+        <div style={{width:36, height:36, borderRadius:10, background:'rgba(255,255,255,0.2)',
+          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0}}>
+          <Camera size={18} color="#fff"/>
+        </div>
+        <div style={{flex:1, textAlign:'left'}}>
+          <p style={{margin:0, fontSize:14, fontWeight:700, color:'#fff', fontFamily:SANS}}>
+            Scan a receipt
+          </p>
+          <p style={{margin:'1px 0 0', fontSize:11, color:'rgba(255,255,255,0.8)', fontFamily:SANS}}>
+            Snap a photo — Claude reads and categorises it for you
+          </p>
+        </div>
+        <ChevronRight size={16} color="rgba(255,255,255,0.8)"/>
+      </button>
 
       {/* Suggested targets - show inline with categories instead of big block */}
       {Object.keys(suggested||{}).length>0&&(
@@ -2551,6 +2783,19 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
           )}
         </div>
       )}
+
+      <div style={{display:'flex', alignItems:'center', gap:10, padding:'11px 14px',
+        marginBottom:12, background:C.blue+'0c', border:`1px solid ${C.blue}22`, borderRadius:12}}>
+        <CalendarDays size={16} color={C.blue} style={{flexShrink:0}}/>
+        <p style={{margin:0, fontSize:11, color:C.inkMid, fontFamily:SANS, lineHeight:1.5, flex:1}}>
+          Rent, electricity, and other recurring bills live in{' '}
+          <button onClick={()=>setTab('bills')} style={{border:'none', background:'none', padding:0,
+            color:C.blue, fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11, textDecoration:'underline'}}>
+            Bills
+          </button>
+          {' '}— once charged, they still count toward what you've spent below, under Home.
+        </p>
+      </div>
 
       <SL>Spending this month</SL>
       <Card style={{padding:'8px 0'}}>
@@ -2713,6 +2958,8 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
       </Card>
 
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
+      {showScan&&<ReceiptScanModal allCats={allCats} onScan={onScanReceipt}
+        onConfirm={onConfirmReceipt} onClose={()=>setShowScan(false)}/>}
     </div>
   );
 }
@@ -3541,7 +3788,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
-                          billPayments, onTogglePaid, profile}) {
+                          billPayments, allBillPayments, onTogglePaid, profile, setTab}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
 
   const detected = detectRecurring(history || []);
@@ -3552,6 +3799,19 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
   const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month,
                        new Date(), billPayments || []);
   const weekTotal  = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
+
+  // Bills from a past month that were never paid — these don't reset when the
+  // month changes, they stay overdue until someone closes them out.
+  const carriedOver = getCarriedOverBills(confirmed, history || [], allBillPayments || [], year, month);
+  const carriedOverTotal = carriedOver.reduce((a,e)=>a+e.amount,0);
+
+  // If a bill is still overdue from a prior month AND this month's instance
+  // has already come due too, that's worth a second look — could be a missed
+  // payment, or it could be about to double-charge.
+  const thisMonthActiveKeys = new Set(
+    sched.entries.filter(e => e.status === 'due' || e.status === 'overdue').map(e => e.key)
+  );
+  const needsReview = carriedOver.filter(e => thisMonthActiveKeys.has(e.key));
 
   async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
   async function removeRule(bill) {
@@ -3571,20 +3831,22 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
     const st   = STATUS[e.status] || STATUS.due;
     const done = e.status === 'paid';
     const lockedByData = e.seenInData;   // came from a statement, cannot be un-ticked
+    const carried = e.carriedFrom;       // {year, month} if this is an overdue bill rolled forward
 
     return (
       <div style={{ display:'flex', alignItems:'center', gap:10, padding:'12px 14px 12px 12px' }}>
-        {/* Tick it off yourself */}
+        {/* Tick it off yourself — for a carried-over bill this closes out the
+            month it was actually due in, not the one you're viewing */}
         <button
-          onClick={() => { if (!lockedByData) onTogglePaid(e, !done); }}
+          onClick={() => { if (!lockedByData) onTogglePaid(e, !done, carried?.year, carried?.month); }}
           disabled={lockedByData}
           title={lockedByData
             ? 'Already matched to a transaction in your statements'
-            : done ? 'Mark as not paid' : 'Mark as paid'}
+            : carried ? 'Mark complete' : done ? 'Mark as not paid' : 'Mark as paid'}
           style={{ border:'none', background:'none', padding:4, flexShrink:0,
             cursor: lockedByData ? 'default' : 'pointer' }}>
           <div style={{ width:22, height:22, borderRadius:6,
-            border:`1.5px solid ${done ? C.green : C.sandDark}`,
+            border:`1.5px solid ${done ? C.green : carried ? C.red : C.sandDark}`,
             background: done ? C.green : 'transparent',
             opacity: lockedByData ? 0.55 : 1,
             display:'flex', alignItems:'center', justifyContent:'center' }}>
@@ -3613,7 +3875,9 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
             </p>
             <p style={{ margin:'2px 0 0', fontSize:11, fontFamily:SANS,
               color: e.status === 'overdue' ? C.red : done ? C.green : C.inkSoft }}>
-              {e.manualOnly
+              {carried
+                ? `overdue from ${MONTHS[carried.month]} ${carried.year}`
+                : e.manualOnly
                 ? `ticked off by ${e.tickedBy || 'someone'}`
                 : e.seenInData
                 ? 'matched in your statements'
@@ -3673,7 +3937,7 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
         </p>
         <p style={{ fontFamily:SERIF, fontSize:40, fontWeight:600, color:'#fff',
           margin:'0 0 14px', letterSpacing:'-0.02em', lineHeight:1 }}>
-          {fmt(sched.outstandingTotal)}
+          {fmt(sched.outstandingTotal + carriedOverTotal)}
         </p>
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
           {[['Next 7 days', fmt(weekTotal)],
@@ -3687,6 +3951,21 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
             </div>
           ))}
         </div>
+        {carriedOverTotal > 0 && (
+          <p style={{ margin:'12px 0 0', fontSize:11, color:'rgba(255,255,255,0.75)',
+            fontFamily:SANS, borderTop:'1px solid rgba(255,255,255,0.2)', paddingTop:10 }}>
+            Includes {fmt(carriedOverTotal)} still owed from earlier months
+          </p>
+        )}
+        <p style={{ margin:'10px 0 0', fontSize:11, color:'rgba(255,255,255,0.65)', fontFamily:SANS }}>
+          Once a bill is actually charged, it shows up as regular spending too — see{' '}
+          {setTab ? (
+            <button onClick={()=>setTab('spending')} style={{border:'none', background:'none', padding:0,
+              color:'#fff', fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11, textDecoration:'underline'}}>
+              Spending
+            </button>
+          ) : 'Spending'}.
+        </p>
       </Card>
 
       {billsLocal && (
@@ -3725,6 +4004,23 @@ create policy "allow all on bill_payments" on bill_payments
         </div>
       )}
 
+      {needsReview.length > 0 && (
+        <div style={{ background:'#fffbeb', border:`1px solid ${C.amber}55`, borderRadius:14,
+          padding:'12px 16px', marginBottom:12, display:'flex', gap:10, alignItems:'flex-start' }}>
+          <AlertCircle size={17} color={C.amber} style={{ flexShrink:0, marginTop:1 }}/>
+          <div>
+            <p style={{ margin:0, fontSize:12, color:'#92400e', fontFamily:SANS, lineHeight:1.6 }}>
+              <b style={{ color:C.amber }}>
+                {needsReview.length === 1 ? 'This needs a check' : `${needsReview.length} bills need a check`}:
+              </b>{' '}
+              {needsReview.map(e => e.label).join(', ')} — there's still an unpaid bill from
+              a previous month AND a new one due this month. Make sure last month's charge
+              wasn't missed, or that this isn't about to double-charge.
+            </p>
+          </div>
+        </div>
+      )}
+
       {sched.overdue.length > 0 && (
         <div style={{ background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:14,
           padding:'12px 16px', marginBottom:12, display:'flex', gap:10, alignItems:'flex-start' }}>
@@ -3738,6 +4034,9 @@ create policy "allow all on bill_payments" on bill_payments
         </div>
       )}
 
+      <Section title="Overdue from earlier months"
+        items={carriedOver}
+        note={carriedOver.length > 0 ? "These stay here — untouched — until you mark them complete. They don't reset just because the month changed." : null}/>
       <Section title="Past the usual date"
         items={sched.entries.filter(e => e.status === 'overdue')}/>
       <Section title="Coming up"
@@ -3903,7 +4202,7 @@ export function ChartsTab({txns,bankImports,allCats,year,month,personView,profil
   const allTx=(personView==='mine'
     ? [...txns,...bankImports].filter(t=>!firstName(t.who)||firstName(t.who)===me)
     : [...txns,...bankImports]);
-  const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
+  const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
   const monthly={};
   allTx.forEach(t=>{const k=t.category||t.cat;
     if(k&&k!=='_skip'&&!excludedIds.has(k))monthly[k]=(monthly[k]||0)+t.amount;});
@@ -5665,6 +5964,7 @@ export default function App() {
   const [showDupes,  setShowDupes ]=useState(false);
   const [billsLocal, setBillsLocal]=useState(false);
   const [billPayments,setBillPayments]=useState([]);
+  const [allBillPayments,setAllBillPayments]=useState([]); // unscoped by month — for cross-month overdue carry-forward
   const [income,     setIncome    ]=useState(DEF_INCOME);
   const [expectedIncome, setExpectedIncome]=useState(() => {
     try {
@@ -5759,6 +6059,9 @@ export default function App() {
         setBillRules(await getBillRules());
         try { await syncLocalBillPayments(); } catch {}
         setBillPayments(await getBillPayments(year, month));
+        // Unscoped by month — lets an unpaid bill from a prior month carry
+        // forward as overdue instead of disappearing when the month changes
+        getAllBillPayments().then(setAllBillPayments).catch(()=>{});
         // Load category targets from Supabase (shared with partner)
         const remoteTargets = await getCategoryTargets();
         if(Object.keys(remoteTargets).length > 0) {
@@ -5832,16 +6135,25 @@ export default function App() {
     await loadAll();
   }
 
-  /** Tick a bill off, or untick it. Marks it paid for this month only. */
-  async function toggleBillPaid(bill, paid) {
+  /** Tick a bill off, or untick it. Defaults to marking it paid for the
+   *  currently viewed month, but a carried-over overdue bill from an earlier
+   *  month can pass its own year/month so the right instance gets closed out. */
+  async function toggleBillPaid(bill, paid, billYear = year, billMonth = month) {
     const me = profile?.name || 'someone';
+    const sameAsViewedMonth = billYear === year && billMonth === month;
     // Update the screen first — waiting on the network to see a tick land feels broken
-    setBillPayments(prev => paid
-      ? [...prev.filter(p => p.key !== bill.key),
-         { key:bill.key, year, month, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
-      : prev.filter(p => p.key !== bill.key));
+    if (sameAsViewedMonth) {
+      setBillPayments(prev => paid
+        ? [...prev.filter(p => p.key !== bill.key),
+           { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
+        : prev.filter(p => p.key !== bill.key));
+    }
+    setAllBillPayments(prev => paid
+      ? [...prev.filter(p => !(p.key === bill.key && p.year === billYear && p.month === billMonth)),
+         { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
+      : prev.filter(p => !(p.key === bill.key && p.year === billYear && p.month === billMonth)));
     try {
-      await setBillPaid(bill.key, year, month, paid, me, bill.label);
+      await setBillPaid(bill.key, billYear, billMonth, paid, me, bill.label);
       
       if(paid) {
         // Encouragement message when bill is paid
@@ -5859,7 +6171,8 @@ export default function App() {
       }
     } catch(e) { 
       showToast('Could not update bill status'); 
-      setBillPayments(await getBillPayments(year, month));   // put it back
+      if (sameAsViewedMonth) setBillPayments(await getBillPayments(year, month));   // put it back
+      getAllBillPayments().then(setAllBillPayments).catch(()=>{});
     }
   }
 
@@ -5917,6 +6230,7 @@ export default function App() {
 
       if(payload.table==='bill_payments'){
         getBillPayments(year,month).then(setBillPayments).catch(()=>{});
+        getAllBillPayments().then(setAllBillPayments).catch(()=>{});
       }
       if(payload.table==='bill_rules'){
         getBillRules().then(setBillRules).catch(()=>{});
@@ -5993,6 +6307,49 @@ export default function App() {
   async function addTxn(tx){await insertTxn({...tx,id:uid(),ts:Date.now(),year,month});}
   async function removeTxn(id){await deleteTxn(id);}
   async function removeImport(id){await deleteBankImport(id);setImports(p=>p.filter(t=>t.id!==id));}
+
+  /**
+   * Photo → Storage → a row in `receipts` → Claude reads it. Returns the
+   * extracted fields plus the receipt's id and image URL so the review step
+   * can show the photo next to what Claude read off it, and so confirming
+   * later can link back to this exact receipt.
+   */
+  async function scanReceipt(file) {
+    const id = uid();
+    const { url } = await uploadReceiptImage(file, id);
+    const who = profile?.name || 'unknown';
+    await insertReceipt({
+      id, image_path: url, uploaded_by: who,
+      uploaded_at: new Date().toISOString(), status: 'pending',
+    });
+    try {
+      const extracted = await analyzeReceipt(file, allCats.map(c => c.id));
+      await updateReceipt(id, {
+        status: 'analyzed', merchant: extracted.merchant, amount: extracted.amount,
+        date: extracted.date, suggested_category: extracted.category,
+        confidence: extracted.confidence, note: extracted.itemsSummary,
+      });
+      return { id, imageUrl: url, ...extracted };
+    } catch (err) {
+      await updateReceipt(id, { status: 'failed', note: String(err.message || err) });
+      throw err;
+    }
+  }
+
+  /** Turns a reviewed/edited receipt into a real transaction, and marks the
+   *  receipt row confirmed so the two stay linked. */
+  async function confirmReceiptTxn(receiptId, fields) {
+    const who = profile?.name || 'unknown';
+    const tx = {
+      cat: fields.category, amount: fields.amount, note: fields.itemsSummary || '',
+      date: fields.date, who, person: firstName(who) || 'jordan',
+      merchant: fields.merchant, source: 'receipt',
+    };
+    await addTxn(tx);
+    if (receiptId) await updateReceipt(receiptId, { status: 'confirmed' });
+    showToast(`Added ${fmt(fields.amount)} from receipt`);
+  }
+
   function addCustomCat(cat){const u=[...customCats,cat];setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));showToast(`"${cat.label}" added`);}
   function deleteCustomCat(id){const u=customCats.filter(c=>c.id!==id);setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));}
   function acceptSuggested(){
@@ -6081,7 +6438,7 @@ export default function App() {
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
           allCats={allCats} catTargets={catTargets} year={year} month={month}
           view={view} setView={setView} history={history} billRules={billRules}
-          billPayments={billPayments} profile={profile}
+          billPayments={billPayments} allBillPayments={allBillPayments} profile={profile}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
           showToast={showToast} goals={goals} onSaveGoals={saveGoals}
           depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}/>}
@@ -6097,15 +6454,16 @@ export default function App() {
           duplicateCount={findExistingDuplicates([...txns,...imports]).length}
           onReviewDuplicates={()=>setShowDupes(true)}
           setQuickAddCat={setQuickAddCat} setTab={setTab}
-          setEditingCatTarget={setEditingCatTarget} showToast={showToast}/>}
+          setEditingCatTarget={setEditingCatTarget} showToast={showToast}
+          onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}/>}
       {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
           bankImports={imports} allCats={allCats} year={year} month={month}
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
-          billPayments={billPayments} onTogglePaid={toggleBillPaid} profile={profile}
-          onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
+          billPayments={billPayments} allBillPayments={allBillPayments} onTogglePaid={toggleBillPaid} profile={profile}
+          onSaveRule={saveBillRule} onDeleteRule={removeBillRule} setTab={setTab}/>}
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}

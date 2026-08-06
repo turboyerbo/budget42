@@ -165,11 +165,12 @@ export async function getOtherImports(year, month) {
   return data || [];
 }
 
-// Full fields needed for duplicate detection
+// Full fields needed for duplicate detection AND recurring-bill detection —
+// detectRecurring() groups by (year, month), so those columns must be here.
 export async function getAllBankImportsRaw() {
   const { data, error } = await supabase
     .from('bank_imports')
-    .select('id,date,amount,description,category,source,who,direction');
+    .select('id,date,amount,description,category,source,who,direction,year,month');
   if (error) throw error;
   return data || [];
 }
@@ -396,6 +397,22 @@ export async function getBillPayments(year, month) {
   }
 }
 
+// Unscoped by month — used to check whether a PAST month's bill was ticked
+// off by hand, so an unpaid bill from a prior month can be carried forward
+// as "overdue" instead of silently disappearing when the month changes.
+export async function getAllBillPayments() {
+  try {
+    const { data, error } = await supabase.from('bill_payments').select('*');
+    if (error) throw error;
+    billPaidLocalOnly = false;
+    return data || [];
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    billPaidLocalOnly = true;
+    return readLocalPaid();
+  }
+}
+
 export async function setBillPaid(key, year, month, paid, who, label) {
   const row = {
     id: paidId(key, year, month),
@@ -495,3 +512,63 @@ export async function upsertGoals(goals, who) {
   }
 }
 
+// ── Receipt scanning (photo → Storage + a row, then Claude reads it) ───────────
+const isMissingBucket = err =>
+  err?.message && /bucket not found/i.test(err.message);
+
+/**
+ * Upload a receipt photo to the 'receipts' Storage bucket.
+ * Returns { path, url }. Throws a readable error if the bucket doesn't exist
+ * yet, so the UI can point at the migration instead of failing silently.
+ */
+export async function uploadReceiptImage(file, id) {
+  const ext = file.type === 'image/png' ? 'png'
+            : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const path = `${id}.${ext}`;
+  const { error } = await supabase.storage.from('receipts')
+    .upload(path, file, { upsert: true, contentType: file.type || 'image/jpeg' });
+  if (error) {
+    if (isMissingBucket(error)) {
+      throw new Error(
+        "The 'receipts' storage bucket hasn't been created yet. Run the receipts " +
+        "migration in Supabase (SQL Editor) once, then try again."
+      );
+    }
+    throw error;
+  }
+  const { data } = supabase.storage.from('receipts').getPublicUrl(path);
+  return { path, url: data.publicUrl };
+}
+
+export async function insertReceipt(receipt) {
+  try {
+    const { data, error } = await supabase.from('receipts')
+      .insert(receipt).select().single();
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    if (isMissingTable(err)) return receipt; // degrade gracefully — image is still uploaded
+    throw err;
+  }
+}
+
+export async function updateReceipt(id, updates) {
+  try {
+    const { error } = await supabase.from('receipts').update(updates).eq('id', id);
+    if (error) throw error;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+  }
+}
+
+export async function getReceipts(limit = 30) {
+  try {
+    const { data, error } = await supabase.from('receipts')
+      .select('*').order('uploaded_at', { ascending: false }).limit(limit);
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+}

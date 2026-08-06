@@ -171,7 +171,10 @@ export function categorize(description) {
 const BUDGET_RULES = [
   ['banking',          /finance charge|performance plan|overdraft|o\/d per item|monthly plan fee|interest charge|nsf|service charge|annual fee|foreign (currency )?(conversion|transaction)/i],
   ['phone',            /freedom mobile|rogers|telus|bell canada|fido|koodo|virgin plus|chatr/i],
-  ['electricity',      /metergy|toronto hydro|hydro one|alectra|enbridge|energy|utilit/i],
+  // Electricity/utility bills are tracked via the Bills tab (merchant-based
+  // detection), not as their own spending category — route the underlying
+  // transaction into Home so the dollars still show up somewhere sensible.
+  ['rent',             /metergy|toronto hydro|hydro one|alectra|enbridge|energy|utilit/i],
   ['rent',             /\bstela\b|\brent\b|landlord|property manage/i],
   ['rental_insurance', /td ins|td assur|insurance|assurance|intact|belair|sonnet/i],
   ['cleaning',         /cleaners|dry clean|laundr|housekeep|corktown cleaners/i],

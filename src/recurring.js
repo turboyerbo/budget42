@@ -12,7 +12,14 @@
  */
 import { merchantKey, bestLabel } from './merchant.js';
 
-const monthKey = t => `${t.year}-${t.month}`;
+// Prefer the year/month columns (set at insert time), but fall back to
+// parsing the date string itself — belt and suspenders, since a month spent
+// grouped under "undefined-undefined" silently breaks recurring detection.
+const monthKey = t => {
+  if (t.year != null && t.month != null) return `${t.year}-${t.month}`;
+  const m = /^(\d{4})-(\d{2})/.exec(String(t.date || ''));
+  return m ? `${m[1]}-${parseInt(m[2], 10) - 1}` : 'unknown';
+};
 const dayOf    = d => parseInt(String(d).slice(8, 10), 10) || 1;
 const median   = ns => {
   const s = [...ns].sort((a, b) => a - b);
@@ -256,4 +263,69 @@ export function applyBillRules(detected, rules = []) {
   });
 
   return out.sort((a, b) => b.amount - a.amount);
+}
+
+/**
+ * Bills that were due in a PAST month and never got marked paid — either by a
+ * matching transaction or a manual tick — don't just vanish when the month
+ * changes. They carry forward as overdue until someone closes them out.
+ *
+ * Only meaningful when (year, month) is the month you're actually sitting in
+ * today — browsing an old or future month doesn't need carry-forward, since
+ * that month's own schedule already tells the whole story for that month.
+ *
+ * `monthsBack` bounds how far to look, so a renamed or discontinued bill
+ * doesn't generate months of noise forever.
+ */
+export function getCarriedOverBills(confirmed, history, allPayments, year, month,
+                                     today = new Date(), monthsBack = 6) {
+  const viewingCurrentMonth = year === today.getFullYear() && month === today.getMonth();
+  if (!viewingCurrentMonth) return [];
+
+  // Every (key, year, month) combination ticked paid by hand, anywhere
+  const manualPaidSet = new Set((allPayments || []).map(p => `${p.key}|${p.year}-${p.month}`));
+
+  // Every debit transaction we have, grouped by month, so "was this bill
+  // charged in month M" can be answered without a fresh query per month
+  const txByMonth = new Map(); // "year-month" -> Set(merchantKey)
+  (history || []).forEach(t => {
+    if (t.direction === 'credit' || t._type === 'credit') return;
+    const mk = monthKey(t);
+    if (!txByMonth.has(mk)) txByMonth.set(mk, new Set());
+    txByMonth.get(mk).add(merchantKey(t.description || t.note || ''));
+  });
+
+  const out = [];
+
+  confirmed.forEach(bill => {
+    for (let i = 1; i <= monthsBack; i++) {
+      let checkMonth = month - i;
+      let checkYear  = year;
+      while (checkMonth < 0) { checkMonth += 12; checkYear -= 1; }
+      const mkKey = `${checkYear}-${checkMonth}`;
+
+      const chargedThatMonth = txByMonth.get(mkKey)?.has(bill.key);
+      const tickedThatMonth  = manualPaidSet.has(`${bill.key}|${mkKey}`);
+      // Paid (or ticked) that month — nothing owed from here further back
+      if (chargedThatMonth || tickedThatMonth) break;
+
+      // No statement data at all reaches this far back — stop, there's
+      // nothing left to check
+      if (!txByMonth.has(mkKey)) break;
+
+      const date = safeDate(checkYear, checkMonth, bill.day);
+      out.push({
+        ...bill,
+        date,
+        daysAway: Math.round((date - today) / DAY),
+        status: 'overdue',
+        carriedFrom: { year: checkYear, month: checkMonth },
+        seenInData: false,
+        manualOnly: false,
+        viewingCurrentMonth: true,
+      });
+    }
+  });
+
+  return out.sort((a, b) => a.date - b.date);
 }
