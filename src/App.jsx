@@ -26,6 +26,7 @@ import { analyzeReceipt } from './receipt.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
+import { getBudgetAdvice } from './advice.js';
 import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
 import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
@@ -1836,6 +1837,102 @@ export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow 
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
 // ─── PREDICTED INCOME EDITOR (inline, expands under the hero) ────────────────
+// ─── ADVICE BUBBLE ────────────────────────────────────────────────────────────
+// "Should we spend this, or hold off?" — on demand, not automatic, so it never
+// costs an API call or feels naggy just for loading the page.
+function AdviceBubble({snapshot}) {
+  const [state, setState] = useState('idle'); // 'idle' | 'loading' | 'shown' | 'error'
+  const [advice, setAdvice] = useState(null);
+  const [source, setSource] = useState(null);
+
+  async function ask() {
+    setState('loading');
+    try {
+      const result = await getBudgetAdvice(snapshot);
+      setAdvice(result.advice);
+      setSource(result.source);
+      setState('shown');
+    } catch {
+      setState('error');
+    }
+  }
+
+  if (state === 'idle') {
+    return (
+      <button onClick={ask} style={{
+        width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px dashed ${C.purple}55`,
+        background:C.purple+'0a', borderRadius:12, padding:'12px 14px', marginBottom:12, cursor:'pointer'
+      }}>
+        <span style={{fontSize:18, animation:'gentleBob 2.2s ease-in-out infinite'}}>💭</span>
+        <div style={{flex:1, textAlign:'left'}}>
+          <p style={{margin:0, fontSize:12, fontWeight:700, color:C.purple, fontFamily:SANS}}>
+            Spend it, save it, or hold off?
+          </p>
+          <p style={{margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+            Get a quick read on what to do with what's available
+          </p>
+        </div>
+      </button>
+    );
+  }
+
+  if (state === 'loading') {
+    return (
+      <div style={{width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px solid ${C.purple}33`,
+        background:C.purple+'0a', borderRadius:12, padding:'12px 14px', marginBottom:12}}>
+        <Spinner size={16}/>
+        <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS}}>Thinking it through...</p>
+      </div>
+    );
+  }
+
+  if (state === 'error') {
+    return (
+      <div style={{width:'100%', border:`1px solid ${C.red}33`, background:C.redLight, borderRadius:12,
+        padding:'12px 14px', marginBottom:12}}>
+        <p style={{margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS}}>
+          Couldn't get advice right now.{' '}
+          <button onClick={ask} style={{border:'none', background:'none', padding:0, color:C.red,
+            fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:12, textDecoration:'underline'}}>
+            Try again
+          </button>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      width:'100%', border:`1px solid ${C.purple}44`, background:C.purple+'0d', borderRadius:14,
+      padding:'14px 16px', marginBottom:12, animation:'popIn 0.35s cubic-bezier(0.34,1.56,0.64,1)'
+    }}>
+      <div style={{display:'flex', alignItems:'flex-start', gap:10}}>
+        <span style={{fontSize:18, flexShrink:0}}>💭</span>
+        <div style={{flex:1}}>
+          <p style={{margin:0, fontSize:13, color:C.ink, fontFamily:SANS, lineHeight:1.5}}>
+            {advice}
+          </p>
+          <div style={{display:'flex', alignItems:'center', gap:10, marginTop:8}}>
+            <button onClick={ask} style={{border:'none', background:'none', padding:0, color:C.purple,
+              fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11}}>
+              Ask again
+            </button>
+            <button onClick={()=>setState('idle')} style={{border:'none', background:'none', padding:0, color:C.inkSoft,
+              cursor:'pointer', fontFamily:SANS, fontSize:11}}>
+              Dismiss
+            </button>
+            {source === 'rules' && (
+              <span style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, marginLeft:'auto'}}>
+                (offline estimate)
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, showToast, onAddTxn, profile, C, SERIF, SANS}) {
   const [editingId, setEditingId] = useState(null); // id of entry being edited, or 'new'
   const [fDate, setFDate] = useState(defaultDateForMonth(year, month));
@@ -2282,6 +2379,18 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // counting, just presented as the two lines you actually asked to see.
   const availableMoney = totalIncome - discretionarySpent - billsPaidThisMonth;
 
+  // A lightweight budget figure just for the advice snapshot below — the
+  // editable override with its own UI lives on the Spending tab now.
+  const adviceCategoryBudget = allCats
+    .filter(c=>!excludedIds.has(c.id))
+    .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
+  const goalsMonthlyTotal = (goals||[]).reduce((a,g)=>a+(g.monthlyContribution||0),0);
+  const adviceSnapshot = {
+    availableMoney, actualIncome: totalIncome, predictedIncomeTotal,
+    spentSoFar: totalSpent, billsNotChargedYet: dueTotal + carriedOverTotal,
+    budgetedForSpending: adviceCategoryBudget, goalsMonthlyTotal,
+  };
+
   // Every edit here writes straight to state + localStorage + Supabase in one
   // shot — no separate "batch edit then save" step, so nothing can be lost
   // in between, and it's backed up server-side so it survives a cleared
@@ -2355,6 +2464,8 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
           </p>
         )}
       </Card>
+
+      <AdviceBubble snapshot={adviceSnapshot}/>
 
       {/* Actual income this month — same visual weight as Predicted Income in the
           hero above, so the two are easy to compare at a glance */}
@@ -2639,7 +2750,8 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave}) {
+                  setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave,
+                  predictedIncomeTotal}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
@@ -2757,6 +2869,13 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             fontSize:10,color:'rgba(255,255,255,0.65)',textDecoration:'underline',fontFamily:SANS}}>
             Reset budget to category totals ({fmt(categoryBudgetSum)})
           </button>
+        )}
+        {predictedIncomeTotal > 0 && budgetedForSpending > predictedIncomeTotal && (
+          <p style={{margin:'12px 0 0', fontSize:11, color:'rgba(255,255,255,0.85)',
+            fontFamily:SANS, borderTop:'1px solid rgba(255,255,255,0.2)', paddingTop:10, lineHeight:1.5}}>
+            ⚠️ Budgeted ({fmt(budgetedForSpending)}) is more than the {fmt(predictedIncomeTotal)} predicted to
+            come in this month — worth trimming a category, or checking more income is really on the way.
+          </p>
         )}
       </Card>
 
@@ -6171,6 +6290,12 @@ export default function App() {
     return best ? best[0].split(/\s+/)[0] : 'Partner';
   })();
 
+  // Computed once here so Home and Spending can never disagree about it —
+  // both just receive the same number.
+  const predictedIncomeTotal = (expectedIncome||[])
+    .filter(i => { const d = new Date(i.date); return d.getFullYear()===year && d.getMonth()===month; })
+    .reduce((a,i)=>a+(i.amount||0),0);
+
   // ── Auth init ────────────────────────────────────────────────────────────────
   useEffect(()=>{
     // Load local prefs immediately (don't block on auth)
@@ -6625,7 +6750,7 @@ export default function App() {
   return (
     <div style={{maxWidth:560,margin:'0 auto',minHeight:'100dvh',background:C.sand,
       paddingBottom:'calc(60px + env(safe-area-inset-bottom, 0px))'}}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}@keyframes popIn{0%{opacity:0;transform:scale(0.85) translateY(8px)}70%{opacity:1;transform:scale(1.02) translateY(-1px)}100%{opacity:1;transform:scale(1) translateY(0)}}@keyframes gentleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}`}</style>
 
       {/* Header — Month Navigation + Notifications Only */}
       <div style={{background:C.white,borderBottom:`1px solid ${C.sandMid}`,
@@ -6684,7 +6809,7 @@ export default function App() {
           setQuickAddCat={setQuickAddCat} setTab={setTab}
           setEditingCatTarget={setEditingCatTarget} showToast={showToast}
           onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}
-          onEditTxnSave={handleEditTxnSave}/>}
+          onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal}/>}
       {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           profile={profile} partnerName={partnerName}

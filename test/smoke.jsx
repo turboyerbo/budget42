@@ -8,6 +8,7 @@
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { detectRecurring, splitRecurring, getCarriedOverBills } from '../src/recurring.js';
+import { getBudgetAdvice } from '../src/advice.js';
 import { categorizeBudget } from '../src/categorize.js';
 import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
@@ -40,9 +41,20 @@ const imports = [
 ];
 
 const results = [];
+const pending = [];
 function check(name, fn) {
-  try { fn(); results.push(['ok  ', name]); }
-  catch (e) { results.push(['FAIL', name + '  →  ' + e.message]); }
+  try {
+    const ret = fn();
+    if (ret && typeof ret.then === 'function') {
+      // Async check — don't let it report "ok" before it's actually resolved.
+      pending.push(ret.then(
+        () => results.push(['ok  ', name]),
+        e  => results.push(['FAIL', name + '  →  ' + e.message])
+      ));
+    } else {
+      results.push(['ok  ', name]);
+    }
+  } catch (e) { results.push(['FAIL', name + '  →  ' + e.message]); }
 }
 
 check('detectRecurring',   () => detectRecurring(history));
@@ -92,6 +104,39 @@ check('getCarriedOverBills: only applies when viewing the real current month', (
   const today = new Date(2026, 7, 15); // today is August, but we're asking about September
   const carried = getCarriedOverBills(recurring, withJuly, [], 2026, 8, today);
   if (carried.length !== 0) throw new Error('expected no carry-forward when not viewing the current real month');
+});
+
+// getBudgetAdvice calls out to /api/claude, which has no meaning in this Node
+// test environment — fetch to a relative URL throws immediately, so these
+// exercise the graceful rule-based fallback path deterministically, without
+// needing network mocking.
+check('getBudgetAdvice: falls back to a rules-based tip when AI is unreachable', async () => {
+  const result = await getBudgetAdvice({
+    availableMoney: 500, actualIncome: 3000, predictedIncomeTotal: 3000,
+    spentSoFar: 200, billsNotChargedYet: 100, budgetedForSpending: 1000, goalsMonthlyTotal: 0,
+  });
+  if (result.source !== 'rules') throw new Error('expected the rules fallback in a Node test environment');
+  if (!result.advice || typeof result.advice !== 'string') throw new Error('expected a non-empty advice string');
+});
+
+check('getBudgetAdvice: warns when bills outstanding exceed available money', async () => {
+  const result = await getBudgetAdvice({
+    availableMoney: 200, actualIncome: 3000, predictedIncomeTotal: 3000,
+    spentSoFar: 200, billsNotChargedYet: 3000, budgetedForSpending: 1000, goalsMonthlyTotal: 0,
+  });
+  if (!/hasn't been charged|hold off/i.test(result.advice)) {
+    throw new Error('expected advice to mention holding off given large outstanding bills, got: ' + result.advice);
+  }
+});
+
+check('getBudgetAdvice: warns when budget exceeds predicted income', async () => {
+  const result = await getBudgetAdvice({
+    availableMoney: 500, actualIncome: 1000, predictedIncomeTotal: 2000,
+    spentSoFar: 100, billsNotChargedYet: 0, budgetedForSpending: 5000, goalsMonthlyTotal: 0,
+  });
+  if (!/predicted to come in|budget/i.test(result.advice)) {
+    throw new Error('expected advice to mention the budget/predicted-income mismatch, got: ' + result.advice);
+  }
 });
 
 check('findSharedMoments', () => findSharedMoments([...txns, ...imports]));
@@ -492,7 +537,9 @@ check('render OtherReviewModal with delete', () => renderToString(React.createEl
 check('render ResetModal', () => renderToString(React.createElement(ResetModal, {
   year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop })));
 
-results.forEach(([s, n]) => console.log(s + '  ' + n));
-const failed = results.filter(r => r[0] === 'FAIL').length;
-console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'All smoke tests passed'));
-process.exit(failed ? 1 : 0);
+Promise.all(pending).then(() => {
+  results.forEach(([s, n]) => console.log(s + '  ' + n));
+  const failed = results.filter(r => r[0] === 'FAIL').length;
+  console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'All smoke tests passed'));
+  process.exit(failed ? 1 : 0);
+});
