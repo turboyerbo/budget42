@@ -7,8 +7,8 @@
  * Personal data  (shared=false) → localStorage with "hb_local_" prefix
  * Household data (shared=true)  → localStorage with "hb_shared_" prefix
  *
- * Because localStorage is device-local, syncing between Jordan's phone and
- * Ness's phone requires the manual Export / Import flow in the Sync tab.
+ * Because localStorage is device-local, syncing between one partner's phone
+ * and the other's requires the manual Export / Import flow in the Sync tab.
  * See App.jsx → SyncTab for the UI.
  */
 

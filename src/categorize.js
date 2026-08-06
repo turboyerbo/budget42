@@ -1,6 +1,6 @@
 /**
  * Rule-based transaction categoriser.
- * Built from 7+ months of Jordan & Ness's actual spending.
+ * Built from real Canadian household spending patterns.
  * Covers ~90% of Canadian household merchants automatically.
  * Unknown merchants get 'other' → optionally upgraded by Claude API.
  */

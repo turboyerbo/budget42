@@ -44,6 +44,7 @@ const GOALS_KEY = 'b42_goals';
 const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
 const today = () => new Date().toISOString().slice(0,10);
 const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const capitalize = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 // Today's date if it falls within the given month, otherwise the 1st of that month —
 // used so "add income/expense for this month" forms default sensibly when you're
 // looking at a month other than the current one.
@@ -54,14 +55,29 @@ function defaultDateForMonth(year, month) {
 }
 
 // Goals are organized into three groups of three: each person's own goals,
-// plus goals the couple is saving toward together.
+// plus goals the couple is saving toward together. The 'jordan'/'mariel' ids
+// are just stable internal keys (kept for backward compatibility with
+// already-saved data) — they are never shown to anyone. Displayed labels are
+// always computed from the real names on screen; see personGroupLabel().
 const GOAL_GROUPS = [
-  { person: 'jordan', label: "Jordan's Goals" },
-  { person: 'mariel', label: "Mariel's Goals" },
-  { person: 'couple', label: "Couple's Goals" },
+  { person: 'jordan' },
+  { person: 'mariel' },
+  { person: 'couple' },
 ];
 // Consistent accent colors so each person's goals are visually distinct at a glance
 const GOAL_GROUP_COLOR = { jordan: '#1d4ed8', mariel: '#be185d', couple: '#7c3aed' };
+
+// Turns an internal group key into a real display label, e.g. "Alex's Goals".
+// The two individual keys are assigned to whichever of the two real names
+// sorts first alphabetically — deterministic, so both partners see the same
+// group under the same name regardless of who's logged in when it renders.
+function personGroupLabel(personKey, myName, partnerNameVal) {
+  if (personKey === 'couple') return "Couple's Goals";
+  const names = [myName, partnerNameVal].filter(Boolean).sort((a,b)=>a.localeCompare(b));
+  const name = personKey === 'jordan' ? names[0] : names[1];
+  return `${capitalize(firstName(name)) || 'Their'}'s Goals`;
+}
+
 function blankGoal(id, person, label) {
   return { id, person, label, target: 0, monthlyContribution: 0, description: '', currentBalance: 0, deposits: [] };
 }
@@ -86,7 +102,7 @@ function ensureGoalGroups(saved) {
     person: g.person === 'shared' || !g.person ? 'couple' : g.person,
     deposits: g.deposits || [],
   })) : [];
-  GOAL_GROUPS.forEach(({person, label}) => {
+  GOAL_GROUPS.forEach(({person}) => {
     const inGroup = list.filter(g => g.person === person);
     for (let i = inGroup.length; i < 3; i++) {
       const kind = i === 0 ? 'Short-term Goal' : i === 1 ? 'Medium-term Goal' : 'Long-term Goal';
@@ -399,263 +415,6 @@ function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS, defaultDa
             {saving ? 'Saving...' : 'Add'}
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── GOALS EDIT MODAL ───────────────────────────────────────────────────────
-function GoalsEditModal({goals, onSave, onClose, C, SERIF, SANS}) {
-  const [editedGoals, setEditedGoals] = React.useState(goals.map(g => ({...g})));
-  const [saving, setSaving] = React.useState(false);
-
-  function updateGoal(id, field, value) {
-    setEditedGoals(prev => prev.map(g => g.id === id ? {...g, [field]: value} : g));
-  }
-
-  async function save() {
-    setSaving(true);
-    await onSave(editedGoals);
-    setSaving(false);
-    onClose();
-  }
-
-  return (
-    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', alignItems:'center', justifyContent:'center'}}>
-      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
-      <div style={{position:'relative', background:C.white, borderRadius:16, padding:'28px 24px', 
-        maxWidth:420, maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.3)', animation:'slideUp 0.25s ease'}}>
-        
-        <h2 style={{margin:'0 0 20px', fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink}}>
-          Edit Financial Goals
-        </h2>
-
-        {GOAL_GROUPS.map(({person, label: groupLabel}) => {
-          const groupGoals = editedGoals.filter(g => g.person === person);
-          return (
-            <div key={person} style={{marginBottom:24}}>
-              <p style={{margin:'0 0 12px', fontSize:13, fontWeight:700, color:C.green, fontFamily:SANS,
-                textTransform:'uppercase', letterSpacing:'0.05em'}}>
-                {groupLabel}
-              </p>
-              {groupGoals.map((goal, idx) => (
-                <div key={goal.id} style={{marginBottom:16, paddingBottom:16,
-                  borderBottom: idx < groupGoals.length - 1 ? `1px solid ${C.sandMid}` : 'none'}}>
-                  <input type="text" value={goal.label}
-                    onChange={e => updateGoal(goal.id, 'label', e.target.value)}
-                    style={{width:'100%', fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS,
-                      border:'none', borderBottom:`1px solid ${C.sandMid}`, background:'none',
-                      padding:'0 0 6px', marginBottom:10, outline:'none', boxSizing:'border-box'}}
-                    placeholder="Goal name"/>
-
-                  <input type="text" value={goal.description} onChange={e => updateGoal(goal.id, 'description', e.target.value)}
-                    style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
-                      background:C.sand, color:C.ink, fontFamily:SANS, fontSize:12, outline:'none', marginBottom:8, boxSizing:'border-box'}}
-                    placeholder="What's this goal for? (e.g. Emergency fund)"/>
-
-                  <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6}}>
-                    <div>
-                      <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
-                        Monthly $
-                      </label>
-                      <input type="number" value={goal.monthlyContribution}
-                        onChange={e => updateGoal(goal.id, 'monthlyContribution', parseFloat(e.target.value) || 0)}
-                        style={{width:'100%', padding:'7px 8px', border:`1px solid ${C.sandDark}`, borderRadius:7,
-                          background:C.white, color:C.ink, fontFamily:SERIF, fontSize:12, outline:'none', boxSizing:'border-box'}}
-                        placeholder="0"/>
-                    </div>
-                    <div>
-                      <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
-                        Current $
-                      </label>
-                      <input type="number" value={goal.currentBalance || 0}
-                        onChange={e => updateGoal(goal.id, 'currentBalance', parseFloat(e.target.value) || 0)}
-                        style={{width:'100%', padding:'7px 8px', border:`1px solid ${C.sandDark}`, borderRadius:7,
-                          background:C.white, color:C.ink, fontFamily:SERIF, fontSize:12, outline:'none', boxSizing:'border-box'}}
-                        placeholder="0"/>
-                    </div>
-                    <div>
-                      <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
-                        Target $
-                      </label>
-                      <input type="number" value={goal.target || 0}
-                        onChange={e => updateGoal(goal.id, 'target', parseFloat(e.target.value) || 0)}
-                        style={{width:'100%', padding:'7px 8px', border:`1px solid ${C.sandDark}`, borderRadius:7,
-                          background:C.white, color:C.ink, fontFamily:SERIF, fontSize:12, outline:'none', boxSizing:'border-box'}}
-                        placeholder="auto"/>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-        })}
-
-        <div style={{display:'flex', gap:8, marginTop:8, position:'sticky', bottom:0, background:C.white, paddingTop:8}}>
-          <button onClick={onClose} style={{
-            flex:1, border:`1px solid ${C.sandDark}`, background:'white', color:C.ink,
-            padding:'12px 20px', borderRadius:10, fontWeight:600, fontSize:13, fontFamily:SANS,
-            cursor:'pointer'
-          }}>
-            Cancel
-          </button>
-          <button onClick={save} disabled={saving} style={{
-            flex:1, border:'none', background:C.green, color:'white',
-            padding:'12px 20px', borderRadius:10, fontWeight:600, fontSize:13, fontFamily:SANS,
-            cursor:saving ? 'default' : 'pointer', opacity:saving ? 0.6 : 1
-          }}>
-            {saving ? 'Saving...' : 'Save Goals'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── INCOME MODAL ─────────────────────────────────────────────────────────────
-function IncomeModal({onClose, onAdd, SERIF, SANS, C, MONTHS, editingIncome}) {
-  const [person, setPerson] = React.useState(editingIncome?.person || 'jordan');
-  const [amount, setAmount] = React.useState(editingIncome?.amount?.toString() || '');
-  const [date, setDate] = React.useState(editingIncome?.date || '');
-  const [recurring, setRecurring] = React.useState(editingIncome?.recurring || false);
-  const [frequency, setFrequency] = React.useState(editingIncome?.frequency || 'monthly');
-  const [description, setDescription] = React.useState(editingIncome?.description || '');
-  const [actual, setActual] = React.useState(editingIncome?.actual?.toString() || '');
-  const [busy, setBusy] = React.useState(false);
-
-  // Show actual amount field if date is in past (income should have been received)
-  const dateObj = new Date(date);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const showActualField = dateObj <= today;
-
-  async function save() {
-    if (!person || !amount || !date) return;
-    setBusy(true);
-    await onAdd({
-      person: person,
-      amount: parseFloat(amount),
-      date: date,
-      recurring: recurring,
-      frequency: frequency,
-      description: description.trim(),
-      actual: actual ? parseFloat(actual) : null,
-      id: editingIncome?.id || ('income-' + Date.now()),
-    });
-    setBusy(false);
-    onClose();
-  }
-
-  return (
-    <div style={{position:'fixed', inset:0, zIndex:800, display:'flex', flexDirection:'column', justifyContent:'flex-end'}}>
-      <div onClick={onClose} style={{position:'absolute', inset:0, background:'rgba(26,26,24,0.55)'}}/>
-      <div style={{position:'relative', background:C.white, borderRadius:'20px 20px 0 0', padding:'22px 20px 34px', animation:'slideUp 0.25s ease', maxHeight:'88dvh', overflowY:'auto'}}>
-        
-        <div style={{display:'flex', alignItems:'center', marginBottom:16}}>
-          <h2 style={{flex:1, margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink}}>
-            Expected Income
-          </h2>
-          <button onClick={onClose} style={{border:'none', background:'none', padding:6, cursor:'pointer'}}>
-            <X size={20} color={C.inkSoft}/>
-          </button>
-        </div>
-
-        <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:14}}>
-          <div>
-            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-              Who
-            </label>
-            <select value={person} onChange={e => setPerson(e.target.value)} style={{
-              width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-              background:C.white, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', boxSizing:'border-box'
-            }}>
-              <option value="jordan">Jordan</option>
-              <option value="ness">Ness</option>
-              <option value="both">Both</option>
-            </select>
-          </div>
-
-          <div>
-            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-              Amount ($)
-            </label>
-            <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="3500"
-              style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-                background:C.sand, color:C.ink, fontFamily:SERIF, fontSize:14, outline:'none', boxSizing:'border-box'}}/>
-          </div>
-        </div>
-
-        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-          Date (when is money coming in?)
-        </label>
-        <input type="date" value={date} onChange={e => setDate(e.target.value)} 
-          style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-            background:C.sand, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
-
-        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-          Description
-        </label>
-        <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Paycheck, bonus, gift, etc"
-          style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-            background:C.sand, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
-
-        <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:8}}>
-          Is this recurring?
-        </label>
-        <div style={{display:'flex', gap:10, marginBottom:14}}>
-          <button onClick={() => setRecurring(false)} style={{
-            flex:1, padding:'10px 14px', border:`1.5px solid ${!recurring ? '#1a7a4a' : C.sandDark}`,
-            background: !recurring ? '#1a7a4a' : 'white', color: !recurring ? 'white' : C.ink,
-            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:13, fontFamily:SANS, transition:'all 0.12s'
-          }}>One-time</button>
-          <button onClick={() => setRecurring(true)} style={{
-            flex:1, padding:'10px 14px', border:`1.5px solid ${recurring ? '#1a7a4a' : C.sandDark}`,
-            background: recurring ? '#1a7a4a' : 'white', color: recurring ? 'white' : C.ink,
-            borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:13, fontFamily:SANS, transition:'all 0.12s'
-          }}>Recurring</button>
-        </div>
-
-        {recurring && (
-          <>
-            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-              Frequency
-            </label>
-            <select value={frequency} onChange={e => setFrequency(e.target.value)} style={{
-              width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-              background:C.white, color:C.ink, fontFamily:SANS, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'
-            }}>
-              <option value="weekly">Weekly</option>
-              <option value="bi-weekly">Bi-weekly</option>
-              <option value="monthly">Monthly</option>
-              <option value="yearly">Yearly</option>
-            </select>
-          </>
-        )}
-
-        {showActualField && (
-          <>
-            <label style={{fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS, display:'block', marginBottom:4}}>
-              Actual Amount Received ($)
-            </label>
-            <input type="number" value={actual} onChange={e => setActual(e.target.value)} placeholder="Leave blank if not received yet"
-              style={{width:'100%', padding:'10px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
-                background:C.sand, color:C.ink, fontFamily:SERIF, fontSize:14, outline:'none', marginBottom:14, boxSizing:'border-box'}}/>
-            {actual && parseFloat(actual) !== parseFloat(amount) && (
-              <p style={{margin:'0 0 14px 0', fontSize:12, color:parseFloat(actual) > parseFloat(amount) ? C.green : C.red, fontFamily:SANS}}>
-                {parseFloat(actual) > parseFloat(amount) ? '✓ Received more than expected!' : '⚠ Received less than expected'}
-              </p>
-            )}
-          </>
-        )}
-
-        <button onClick={save} disabled={busy || !person || !amount || !date} style={{
-          width:'100%', border:'none', background:C.green, color:'#fff',
-          padding:'14px 20px', borderRadius:12, fontSize:14, fontWeight:600,
-          cursor:busy ? 'default' : 'pointer', opacity:busy ? 0.6 : 1,
-          fontFamily:SANS, transition:'all 0.2s'
-        }}>
-          {busy ? 'Saving...' : editingIncome ? 'Update Income' : 'Add Expected Income'}
-        </button>
       </div>
     </div>
   );
@@ -1061,12 +820,10 @@ const PICKABLE_ICONS = Object.keys(ICON_MAP);
 const fmt   = n => '$' + Math.abs(n).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtK  = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : fmt(n);
 
-// Derive avatar color from name
+// Derive avatar color from name — a stable hash, not a hardcoded name list,
+// so this works for any household's actual names, not just specific people.
 function nameColor(name) {
   const n = (name||'').toLowerCase();
-  if (n.includes('jordan')) return '#1d4ed8';
-  if (n.includes('ness'))   return '#be185d';
-  if (n.includes('mariel')) return '#be185d';
   const h = [...n].reduce((a,c)=>a*31+c.charCodeAt(0),0);
   return COLOR_SWATCHES[Math.abs(h) % COLOR_SWATCHES.length];
 }
@@ -1376,7 +1133,7 @@ export function AuthScreen({onAuth}) {
       <h1 style={{fontFamily:SERIF,fontSize:32,fontWeight:600,letterSpacing:'-0.02em',
         margin:'14px 0 4px',color:C.ink}}>Budget For Two</h1>
       <p style={{fontSize:12,color:C.green,fontWeight:600,margin:'0 0 28px',
-        letterSpacing:'0.1em',textTransform:'uppercase'}}>Jordan &amp; Ness</p>
+        letterSpacing:'0.1em',textTransform:'uppercase'}}>Shared budgeting, made simple</p>
 
       {/* Mode tabs */}
       <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
@@ -1401,7 +1158,7 @@ export function AuthScreen({onAuth}) {
               Takes 2 minutes. Once both of you are set up,<br/>your budget runs itself.
             </p>
             <input value={name} onChange={e=>setName(e.target.value)}
-              placeholder="Your name (e.g. Jordan)"
+              placeholder="Your name"
               style={{width:'100%',border:`1px solid ${C.sandDark}`,borderRadius:10,
                 padding:'13px 14px',fontSize:15,color:C.ink,background:C.white,
                 marginBottom:10,outline:'none',fontFamily:SANS,boxSizing:'border-box'}}/>
@@ -1993,12 +1750,17 @@ export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow 
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
 // ─── PREDICTED INCOME EDITOR (inline, expands under the hero) ────────────────
-function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, showToast, C, SERIF, SANS}) {
+function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, showToast, onAddTxn, profile, C, SERIF, SANS}) {
   const [editingId, setEditingId] = useState(null); // id of entry being edited, or 'new'
   const [fDate, setFDate] = useState(defaultDateForMonth(year, month));
   const [fAmount, setFAmount] = useState('');
   const [fSource, setFSource] = useState('');
   const [fAccount, setFAccount] = useState('');
+
+  const [confirmingId, setConfirmingId] = useState(null); // entry being marked received
+  const [cAmount, setCAmount] = useState('');
+  const [cDate, setCDate] = useState(today());
+  const [confirming, setConfirming] = useState(false);
 
   const monthEntries = (expectedIncome || []).filter(inc => {
     const d = new Date(inc.date);
@@ -2018,6 +1780,35 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
     setFAccount(entry.account || '');
   }
   function cancel() { setEditingId(null); }
+
+  function startConfirm(entry) {
+    setConfirmingId(entry.id);
+    setCAmount(entry.amount != null ? String(entry.amount) : '');
+    setCDate(today());
+  }
+  function cancelConfirm() { setConfirmingId(null); }
+
+  async function confirmReceived(entry) {
+    const amt = parseFloat(cAmount);
+    if (isNaN(amt) || amt <= 0) { showToast('Enter the amount that actually arrived'); return; }
+    setConfirming(true);
+    try {
+      await onAddTxn({
+        cat: 'income', amount: amt, date: cDate,
+        note: entry.description || 'Income', merchant: entry.description || '',
+        who: profile?.name || 'unknown', person: firstName(profile?.name) || 'jordan',
+      });
+      const updated = (expectedIncome || []).filter(e => e.id !== entry.id);
+      setExpectedIncome(updated);
+      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+      showToast(`Confirmed ${fmt(amt)} received — added to Actual Income`);
+      setConfirmingId(null);
+    } catch {
+      showToast('Could not confirm that income — try again');
+    } finally {
+      setConfirming(false);
+    }
+  }
 
   function save() {
     const amt = parseFloat(fAmount);
@@ -2068,30 +1859,72 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
       {monthEntries.length > 0 && (
         <div style={{marginBottom:10}}>
           {monthEntries.map(inc => (
-            <div key={inc.id} style={{
-              display:'flex', alignItems:'center', gap:8, padding:'8px 0',
-              borderBottom:`1px solid ${C.blue}18`, fontSize:12}}>
-              <div style={{flex:1, minWidth:0}}>
-                <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS,
-                  overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
-                  {inc.description || 'Income'}
+            <div key={inc.id}>
+              <div style={{
+                display:'flex', alignItems:'center', gap:8, padding:'8px 0',
+                borderBottom: confirmingId===inc.id ? 'none' : `1px solid ${C.blue}18`, fontSize:12}}>
+                <div style={{flex:1, minWidth:0}}>
+                  <p style={{margin:0, fontWeight:600, color:C.ink, fontFamily:SANS,
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                    {inc.description || 'Income'}
+                  </p>
+                  <p style={{margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
+                    {new Date(inc.date).toLocaleDateString('en-CA')}
+                    {inc.account && ` • ${inc.account}`}
+                  </p>
+                </div>
+                <p style={{margin:0, fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
+                  +{fmt(inc.amount)}
                 </p>
-                <p style={{margin:0, fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
-                  {new Date(inc.date).toLocaleDateString('en-CA')}
-                  {inc.account && ` • ${inc.account}`}
-                </p>
+                <button onClick={()=>{setEditingId(null); startConfirm(inc);}}
+                  title="Confirm received — arrived today"
+                  style={{padding:'5px 8px', border:'none',
+                  background:C.green+'20', color:C.green, borderRadius:6, cursor:'pointer', fontSize:11}}>
+                  ✓
+                </button>
+                <button onClick={()=>startEdit(inc)} style={{padding:'5px 8px', border:'none',
+                  background:C.sand, color:C.ink, borderRadius:6, cursor:'pointer', fontSize:11}}>
+                  ✏️
+                </button>
+                <button onClick={()=>remove(inc.id)} style={{padding:'5px 8px', border:'none',
+                  background:C.red+'20', color:C.red, borderRadius:6, cursor:'pointer', fontSize:11}}>
+                  🗑️
+                </button>
               </div>
-              <p style={{margin:0, fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
-                +{fmt(inc.amount)}
-              </p>
-              <button onClick={()=>startEdit(inc)} style={{padding:'5px 8px', border:'none',
-                background:C.sand, color:C.ink, borderRadius:6, cursor:'pointer', fontSize:11}}>
-                ✏️
-              </button>
-              <button onClick={()=>remove(inc.id)} style={{padding:'5px 8px', border:'none',
-                background:C.red+'20', color:C.red, borderRadius:6, cursor:'pointer', fontSize:11}}>
-                🗑️
-              </button>
+
+              {confirmingId === inc.id && (
+                <div style={{background:C.green+'0d', border:`1px solid ${C.green}33`, borderRadius:10,
+                  padding:10, marginBottom:8}}>
+                  <p style={{margin:'0 0 8px', fontSize:11, color:C.ink, fontFamily:SANS, fontWeight:600}}>
+                    Confirm {inc.description || 'this income'} arrived
+                  </p>
+                  <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8}}>
+                    <div>
+                      <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                        Amount received
+                      </label>
+                      <input type="number" value={cAmount} onChange={e=>setCAmount(e.target.value)} style={inputStyle}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                        Date arrived
+                      </label>
+                      <input type="date" value={cDate} onChange={e=>setCDate(e.target.value)} style={inputStyle}/>
+                    </div>
+                  </div>
+                  <div style={{display:'flex', gap:8}}>
+                    <button onClick={cancelConfirm} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
+                      color:C.ink, padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer'}}>
+                      Cancel
+                    </button>
+                    <button onClick={()=>confirmReceived(inc)} disabled={confirming} style={{flex:1, border:'none', background:C.green,
+                      color:'white', padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS,
+                      cursor:confirming?'default':'pointer', opacity:confirming?0.6:1}}>
+                      {confirming ? 'Confirming...' : '✓ Confirm received'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -2263,11 +2096,17 @@ function GoalRow({goal, accent, onUpdate, onDeposit}) {
 }
 
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
-                  year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,
-                  showToast,profile,goals,onSaveGoals,depositingGoalId,setDepositingGoalId}) {
+                  year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,onAddTxn,
+                  showToast,profile,partnerName,goals,onSaveGoals,depositingGoalId,setDepositingGoalId}) {
+  const myName = profile?.name || 'You';
   const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
   const [editingBudget, setEditingBudget] = useState(false);
   const [expandedGroup, setExpandedGroup] = useState(null); // 'jordan' | 'mariel' | 'couple' | null
+  const [showAddActualIncome, setShowAddActualIncome] = useState(false);
+  const [aiAmount, setAiAmount] = useState('');
+  const [aiDate, setAiDate] = useState(() => today());
+  const [aiSource, setAiSource] = useState('');
+  const [savingActualIncome, setSavingActualIncome] = useState(false);
   const [budgetOverride, setBudgetOverride] = useState(() => {
     try {
       const v = localStorage.getItem(BUDGET_OVERRIDE_KEY);
@@ -2276,6 +2115,25 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   });
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
+
+  async function saveActualIncome() {
+    const amt = parseFloat(aiAmount);
+    if (isNaN(amt) || amt <= 0) { showToast('Enter an amount'); return; }
+    setSavingActualIncome(true);
+    try {
+      await onAddTxn({
+        cat: 'income', amount: amt, date: aiDate,
+        note: aiSource.trim() || 'Income', merchant: aiSource.trim(),
+        who: profile?.name || 'unknown', person: me || 'jordan',
+      });
+      showToast(`Added ${fmt(amt)} to Actual Income`);
+      setShowAddActualIncome(false);
+    } catch {
+      showToast('Could not add that income — try again');
+    } finally {
+      setSavingActualIncome(false);
+    }
+  }
   const everythingThisMonth=everything;   // both people, before the view filter
 
   // Recurring charges are worked out from your own history rather than kept in
@@ -2426,24 +2284,20 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         </div>
       </Card>
 
-      {/* Predicted income editor — expands under the hero */}
-      {showPredictedIncomePanel && (
-        <PredictedIncomeEditor
-          expectedIncome={expectedIncome}
-          setExpectedIncome={setExpectedIncome}
-          year={year} month={month}
-          showToast={showToast}
-          C={C} SERIF={SERIF} SANS={SANS}
-        />
-      )}
-
-      {/* Actual income this month — moved here from Spending, since it's income not spending */}
-      <Card style={{padding:'14px 16px', marginTop:showPredictedIncomePanel?0:12, marginBottom:12}}>
-        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: Object.keys(incomeByPerson).length ? 10 : 0}}>
-          <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS, textTransform:'uppercase', fontWeight:600, letterSpacing:'0.06em'}}>
-            Actual income this month
-          </p>
-          <p style={{margin:0, fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.green}}>
+      {/* Actual income this month — same visual weight as Predicted Income in the
+          hero above, so the two are easy to compare at a glance */}
+      <Card style={{padding:'16px 16px', marginTop:12, marginBottom:12,
+        background:C.green+'0d', border:`1px solid ${C.green}33`}}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: Object.keys(incomeByPerson).length ? 12 : 0}}>
+          <div>
+            <p style={{margin:0, fontSize:11, color:C.green, fontFamily:SANS, textTransform:'uppercase', fontWeight:700, letterSpacing:'0.08em'}}>
+              💰 Actual Income This Month
+            </p>
+            <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+              What's actually landed, read off your statements
+            </p>
+          </div>
+          <p style={{margin:0, fontFamily:SERIF, fontSize:26, fontWeight:600, color:C.green, whiteSpace:'nowrap'}}>
             {fmt(totalIncome)}
           </p>
         </div>
@@ -2452,15 +2306,79 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
             No deposits recorded yet this month — income is read straight off your statements.
           </p>
         ) : (
-          Object.entries(incomeByPerson).sort((a,b)=>b[1]-a[1]).map(([person,amt],i)=>(
-            <div key={person} style={{display:'flex', alignItems:'center', gap:10, padding:i>0?'8px 0 0':0}}>
-              <UserAvatar name={person} size={24}/>
-              <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, textTransform:'capitalize'}}>{person}</span>
-              <span style={{fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.ink}}>{fmt(amt)}</span>
+          <div style={{display:'flex', flexDirection:'column', gap:8, paddingTop:10, borderTop:`1px solid ${C.green}22`, marginBottom:12}}>
+            {Object.entries(incomeByPerson).sort((a,b)=>b[1]-a[1]).map(([person,amt])=>(
+              <div key={person} style={{display:'flex', alignItems:'center', gap:10}}>
+                <UserAvatar name={person} size={26}/>
+                <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, textTransform:'capitalize', fontWeight:600}}>{capitalize(person)}</span>
+                <span style={{fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.ink}}>{fmt(amt)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showAddActualIncome ? (
+          <div style={{background:C.white, borderRadius:10, padding:12, marginTop: Object.keys(incomeByPerson).length ? 0 : 12}}>
+            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8}}>
+              <div>
+                <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                  Amount received
+                </label>
+                <input type="number" value={aiAmount} onChange={e=>setAiAmount(e.target.value)}
+                  placeholder="0.00"
+                  style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+                    background:C.sand, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                  Date received
+                </label>
+                <input type="date" value={aiDate} onChange={e=>setAiDate(e.target.value)}
+                  style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+                    background:C.sand, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'}}/>
+              </div>
             </div>
-          ))
+            <div style={{marginBottom:10}}>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
+                Source (optional)
+              </label>
+              <input type="text" value={aiSource} onChange={e=>setAiSource(e.target.value)}
+                placeholder="e.g. NORR paycheck"
+                style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
+                  background:C.sand, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'}}/>
+            </div>
+            <div style={{display:'flex', gap:8}}>
+              <button onClick={()=>setShowAddActualIncome(false)} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
+                color:C.ink, padding:'9px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer'}}>
+                Cancel
+              </button>
+              <button onClick={saveActualIncome} disabled={savingActualIncome} style={{flex:1, border:'none', background:C.green,
+                color:'white', padding:'9px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS,
+                cursor:savingActualIncome?'default':'pointer', opacity:savingActualIncome?0.6:1}}>
+                {savingActualIncome ? 'Adding...' : 'Add income'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={()=>{setShowAddActualIncome(true); setAiAmount(''); setAiDate(today()); setAiSource('');}} style={{
+            width:'100%', padding:'10px', border:`1px dashed ${C.green}55`, borderRadius:8,
+            background:'none', color:C.green, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
+            + Add actual income manually
+          </button>
         )}
       </Card>
+
+      {/* Predicted income editor — expands under the hero */}
+      {showPredictedIncomePanel && (
+        <PredictedIncomeEditor
+          expectedIncome={expectedIncome}
+          setExpectedIncome={setExpectedIncome}
+          year={year} month={month}
+          showToast={showToast}
+          onAddTxn={onAddTxn} profile={profile}
+          C={C} SERIF={SERIF} SANS={SANS}
+        />
+      )}
 
       {/* Spending summary below hero */}
       <Card style={{padding:'14px 16px', marginTop:0, marginBottom:20, background:C.sand}}>
@@ -2526,7 +2444,8 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         🎯 Financial Goals
       </h3>
 
-      {GOAL_GROUPS.map(({person, label: groupLabel}) => {
+      {GOAL_GROUPS.map(({person}) => {
+        const groupLabel = personGroupLabel(person, myName, partnerName);
         const groupGoals = goals.filter(g => g.person === person);
         if (groupGoals.length === 0) return null;
         const totalBalance = groupGoals.reduce((a,g)=>a+(g.currentBalance||0),0);
@@ -2965,12 +2884,14 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 }
 
 // ─── ADD TAB ──────────────────────────────────────────────────────────────────
-export function AddTab({profile,allCats,onAdd,quickCat}) {
+export function AddTab({profile,partnerName,allCats,onAdd,quickCat}) {
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
   const [cat,   setCat]   = useState(quickCat || null);
   const [amount,setAmount]= useState('');
   const [note,  setNote]  = useState('');
   const [date,  setDate]  = useState(today());
-  const [person,setPerson]= useState('jordan'); // Who spent: jordan or ness
+  const [person,setPerson]= useState(myFirst); // Who spent: defaults to you
   const [merchant,setMerchant]= useState(''); // Store, venue, etc.
   const [saving,setSaving]= useState(false);
   const ref=useRef(null);
@@ -2982,7 +2903,7 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
     if(!can||saving)return;
     setSaving(true);
     await onAdd({cat,amount:parseFloat(amount),note:note.trim(),date,who:profile?.name||'unknown',person,merchant:merchant.trim()});
-    setCat(null);setAmount('');setNote('');setDate(today());setPerson('jordan');setMerchant('');
+    setCat(null);setAmount('');setNote('');setDate(today());setPerson(myFirst);setMerchant('');
     setSaving(false);ref.current?.focus();
   }
   return (
@@ -3036,18 +2957,18 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
           <p style={{margin:'0 0 6px',fontSize:11,color:C.inkSoft,textTransform:'uppercase',
             letterSpacing:'0.08em',fontFamily:SANS}}>Who spent this?</p>
           <div style={{display:'flex',gap:8}}>
-            <button onClick={()=>setPerson('jordan')} style={{
-              flex:1,padding:'8px 12px',border:`1.5px solid ${person==='jordan'?C.blue:C.sandDark}`,
-              borderRadius:10,background:person==='jordan'?C.blue+'15':'white',
-              color:person==='jordan'?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
+            <button onClick={()=>setPerson(myFirst)} style={{
+              flex:1,padding:'8px 12px',border:`1.5px solid ${person===myFirst?C.blue:C.sandDark}`,
+              borderRadius:10,background:person===myFirst?C.blue+'15':'white',
+              color:person===myFirst?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
               cursor:'pointer',transition:'all 0.12s'
-            }}>Jordan</button>
-            <button onClick={()=>setPerson('ness')} style={{
-              flex:1,padding:'8px 12px',border:`1.5px solid ${person==='ness'?C.blue:C.sandDark}`,
-              borderRadius:10,background:person==='ness'?C.blue+'15':'white',
-              color:person==='ness'?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
+            }}>{capitalize(myFirst)}</button>
+            <button onClick={()=>setPerson(partnerFirst)} style={{
+              flex:1,padding:'8px 12px',border:`1.5px solid ${person===partnerFirst?C.blue:C.sandDark}`,
+              borderRadius:10,background:person===partnerFirst?C.blue+'15':'white',
+              color:person===partnerFirst?C.blue:C.ink,fontSize:12,fontWeight:600,fontFamily:SANS,
               cursor:'pointer',transition:'all 0.12s'
-            }}>Ness</button>
+            }}>{capitalize(partnerFirst)}</button>
           </div>
         </div>
         <Divider/>
@@ -3080,11 +3001,13 @@ export function AddTab({profile,allCats,onAdd,quickCat}) {
 }
 
 // ─── HISTORY TAB ──────────────────────────────────────────────────────────────
-export function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,onSaveNote}) {
+export function HistoryTab({txns,bankImports,allCats,profile,partnerName,onDeleteTxn,onDeleteImport,onSaveNote}) {
   const { shared:sharedMoments } = findSharedMoments([...txns,...bankImports]);
   const [filter,   setFilter]   = useState('all');
   const [srcFil,   setSrcFil]   = useState('all');
   const [editNote, setEditNote] = useState(null); // { id, type, value }
+  const myFirst = firstName(profile?.name);
+  const partnerFirst = firstName(partnerName);
   const all=[
     ...txns.map(t=>({...t,_type:'manual'})),
     ...bankImports.map(t=>({...t,_type:'import'})),
@@ -3102,7 +3025,7 @@ export function HistoryTab({txns,bankImports,allCats,onDeleteTxn,onDeleteImport,
   return (
     <div style={{padding:'16px 16px 0'}}>
       <div style={{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap'}}>
-        {[['all','Everyone'],['jordan','Jordan'],['ness','Ness']].map(([k,l])=>(
+        {[['all','Everyone'],[myFirst,capitalize(myFirst)||'Me'],[partnerFirst,capitalize(partnerFirst)||'Partner']].map(([k,l])=>(
           <button key={k} onClick={()=>setFilter(k)} style={{border:'none',padding:'6px 14px',
             borderRadius:99,fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:SANS,
             background:filter===k?C.ink:'transparent',color:filter===k?'#fff':C.inkSoft,
@@ -3605,7 +3528,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
 
   async function removeBill(bill) {
     await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
-    showToast(bill.manual ? 'Bill deleted' : 'Hidden from bills');
+    showToast(`Hidden — find "${bill.label}" under Hidden bills on the Bills tab to bring it back`);
   }
 
   function saveDeposit() {
@@ -3813,11 +3736,24 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
   );
   const needsReview = carriedOver.filter(e => thisMonthActiveKeys.has(e.key));
 
+  // Bills that were hidden — kept visible in their own section so "hide"
+  // isn't a one-way trip into the void. Reads straight off billRules since
+  // hiding never deletes the row, it just flips status.
+  const hiddenRules = (billRules || []).filter(r => r.status === 'hidden');
+
   async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
   async function removeRule(bill) {
     await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
     setEditing(undefined);
-    showToast(bill.manual ? 'Bill deleted' : 'Hidden from bills');
+    showToast(`Hidden — find "${bill.label}" under Hidden bills at the bottom to bring it back`);
+  }
+  async function unhideRule(rule) {
+    await onSaveRule({
+      key: rule.key,
+      label: rule.label,
+      status: rule.key.startsWith('manual:') ? 'manual' : 'confirmed',
+    });
+    showToast(`"${rule.label}" is back`);
   }
 
   const STATUS = {
@@ -4107,6 +4043,34 @@ create policy "allow all on bill_payments" on bill_payments
         </>
       )}
 
+      {hiddenRules.length > 0 && (
+        <>
+          <SL>Hidden bills</SL>
+          <p style={{ margin:'-4px 2px 8px', fontSize:11, color:C.inkSoft,
+            fontFamily:SANS, lineHeight:1.6 }}>
+            Hidden, not deleted — bring any of these back whenever you want.
+          </p>
+          <Card style={{ padding:'4px 0', marginBottom:20 }}>
+            {hiddenRules.map((r, i) => (
+              <div key={r.key}>{i > 0 && <Divider/>}
+                <div style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 18px' }}>
+                  <p style={{ flex:1, minWidth:0, margin:0, fontSize:13, color:C.inkMid, fontFamily:SANS,
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                    {r.label}
+                  </p>
+                  <button onClick={() => unhideRule(r)}
+                    style={{ border:'none', borderRadius:8, padding:'6px 12px',
+                      background:C.green+'18', color:C.green, fontSize:11, fontWeight:700,
+                      cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
+                    Restore
+                  </button>
+                </div>
+              </div>
+            ))}
+          </Card>
+        </>
+      )}
+
       <p style={{ fontSize:11, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6,
         padding:'0 4px', marginBottom:20 }}>
         Bills are found in your statements, then whatever you change here wins.
@@ -4316,8 +4280,10 @@ export function ChartsTab({txns,bankImports,allCats,year,month,personView,profil
 // One button. No bank picker — the AI reads the statement and works out which
 // institution it came from, including documents containing several accounts.
 // Pipeline: pick → [processing] → identify (only if unsure) → validate → review → done
-export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
-  const [who,       setWho]      = useState('jordan');
+export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag, profile, partnerName}) {
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
+  const [who,       setWho]      = useState(myFirst);
   const [step,      setStep]     = useState('pick');
   const [fileType,  setFileType] = useState(null);
   const [parsed,    setParsed]   = useState([]);
@@ -4820,21 +4786,24 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
 
       <SL>Whose spending is this?</SL>
       <div style={{ display:'flex', gap:8, marginBottom:22 }}>
-        {[['jordan','Jordan','#1d4ed8','#eff6ff'],['ness','Ness','#be185d','#fdf2f8']].map(([k,l,col,bg]) => (
+        {[[myFirst, capitalize(myFirst)], [partnerFirst, capitalize(partnerFirst)]].map(([k,l]) => {
+          const col = nameColor(k);
+          return (
           <button key={k} onClick={() => setWho(k)} style={{ flex:1,
             border:'1.5px solid ' + (who===k ? col : C.sandDark),
             borderRadius:12, padding:'11px',
-            background: who===k ? bg : C.white, cursor:'pointer',
+            background: who===k ? col+'15' : C.white, cursor:'pointer',
             display:'flex', alignItems:'center', justifyContent:'center', gap:8 }}>
             <div style={{ width:24, height:24, borderRadius:'50%', background:col, color:'#fff',
               display:'flex', alignItems:'center', justifyContent:'center',
               fontSize:9, fontWeight:700 }}>
-              {k==='jordan'?'JY':'NMK'}
+              {nameInitials(l)}
             </div>
             <span style={{ fontSize:13, fontWeight:600,
               color: who===k ? col : C.inkMid, fontFamily:SANS }}>{l}</span>
           </button>
-        ))}
+          );
+        })}
       </div>
 
       <label style={{ display:'block', width:'100%', padding:'20px', borderRadius:14,
@@ -5363,7 +5332,7 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag}) {
 }
 
 // ─── AUTOMATION TAB (Charts + Upload combined) ────────────────────────────────
-export function AutomationTab({txns,bankImports,allCats,year,month,personView,profile,
+export function AutomationTab({txns,bankImports,allCats,year,month,personView,profile,partnerName,
                                 showToast,onImported,aiOn,aiDiag}) {
   const [section, setSection] = useState('charts'); // 'charts' | 'upload'
 
@@ -5387,7 +5356,7 @@ export function AutomationTab({txns,bankImports,allCats,year,month,personView,pr
         ? <ChartsTab txns={txns} bankImports={bankImports} allCats={allCats}
             year={year} month={month} personView={personView} profile={profile}/>
         : <UploadTab showToast={showToast} onImported={onImported} allCats={allCats}
-            aiOn={aiOn} aiDiag={aiDiag}/>}
+            aiOn={aiOn} aiDiag={aiDiag} profile={profile} partnerName={partnerName}/>}
     </div>
   );
 }
@@ -5395,7 +5364,7 @@ export function AutomationTab({txns,bankImports,allCats,year,month,personView,pr
 
 // ─── Partner activity ─────────────────────────────────────────────────────────
 // Describes a realtime change in plain language, e.g.
-//   "Ness added $42.10 to Groceries"
+//   "Sam added $42.10 to Groceries"
 function describeChange(payload, allCats) {
   const row  = payload.new || payload.old || {};
   const evt  = payload.eventType || payload.type;
@@ -5972,12 +5941,9 @@ export default function App() {
       return saved ? JSON.parse(saved) : [];
     } catch { return []; }
   });
-  const [showAddIncome,setShowAddIncome]=useState(false);
   const [unreviewed, setUnreviewed]=useState([]); // Partner transactions not yet reviewed
   const [showActivityHelper, setShowActivityHelper]=useState(false); // Show helper on login
   const [editingCatTarget, setEditingCatTarget]=useState(null); // { catId, newAmount }
-  const [editingIncome, setEditingIncome]=useState(null); // Income entry being edited
-  const [showIncomeList, setShowIncomeList]=useState(false); // Show income list for editing
   const [goals, setGoals] = useState(() => {
     try {
       const saved = localStorage.getItem(GOALS_KEY);
@@ -5985,7 +5951,6 @@ export default function App() {
     } catch {}
     return defaultGoals();
   });
-  const [showGoalsModal, setShowGoalsModal] = useState(false);
   const [depositingGoalId, setDepositingGoalId] = useState(null);
 
   // Single place every goal edit flows through: updates state, caches to
@@ -6001,6 +5966,24 @@ export default function App() {
   // including custom ones added later.
   const allCats=[...DEFAULT_CATS,...customCats]
     .sort((a,b)=>a.label.localeCompare(b.label,'en',{sensitivity:'base'}));
+
+  // The other household member's display name — read from their own
+  // transactions (whoever isn't you), not hardcoded. Falls back to a plain
+  // "Partner" until they've added anything of their own.
+  const myName = profile?.name || 'You';
+  const partnerName = (() => {
+    const me = firstName(myName);
+    const counts = {};
+    [...txns, ...imports, ...history].forEach(t => {
+      const w = (t.who || '').trim();
+      if (!w) return;
+      const fn = firstName(w);
+      if (!fn || fn === me) return;
+      counts[w] = (counts[w] || 0) + 1;
+    });
+    const best = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0];
+    return best ? best[0].split(/\s+/)[0] : 'Partner';
+  })();
 
   // ── Auth init ────────────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -6154,7 +6137,31 @@ export default function App() {
       : prev.filter(p => !(p.key === bill.key && p.year === billYear && p.month === billMonth)));
     try {
       await setBillPaid(bill.key, billYear, billMonth, paid, me, bill.label);
-      
+
+      // A bill only counts as spending once a real transaction exists for it.
+      // If it's already matched to something in your statements (seenInData),
+      // that transaction already exists — don't double it up. But a bill
+      // ticked off by hand, ahead of the statement arriving, needs its own
+      // transaction created here, or the money never shows up as spent.
+      const marker = '__bill:' + bill.key;
+      if (paid && !bill.seenInData) {
+        const billDate = bill.date ? new Date(bill.date).toISOString().slice(0,10)
+                        : `${billYear}-${String(billMonth+1).padStart(2,'0')}-${String(bill.day||1).padStart(2,'0')}`;
+        await addTxn({
+          cat: bill.category || 'other', amount: bill.amount, date: billDate,
+          note: marker, merchant: bill.label, who: me, person: firstName(me) || 'jordan',
+          source: 'bill-manual',
+        });
+      } else if (!paid) {
+        // Un-ticking: remove the transaction we created for this bill, if any
+        // (never touches a transaction that came from an actual statement).
+        try {
+          const monthTxns = sameAsViewedMonth ? txns : await getTxns(billYear, billMonth);
+          const linked = monthTxns.find(t => t.note === marker && t.source === 'bill-manual');
+          if (linked) await deleteTxn(linked.id);
+        } catch {}
+      }
+
       if(paid) {
         // Encouragement message when bill is paid
         const messages = [
@@ -6438,8 +6445,8 @@ export default function App() {
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
           allCats={allCats} catTargets={catTargets} year={year} month={month}
           view={view} setView={setView} history={history} billRules={billRules}
-          billPayments={billPayments} allBillPayments={allBillPayments} profile={profile}
-          expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
+          billPayments={billPayments} allBillPayments={allBillPayments} profile={profile} partnerName={partnerName}
+          expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome} onAddTxn={addTxn}
           showToast={showToast} goals={goals} onSaveGoals={saveGoals}
           depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}/>}
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
@@ -6456,8 +6463,9 @@ export default function App() {
           setQuickAddCat={setQuickAddCat} setTab={setTab}
           setEditingCatTarget={setEditingCatTarget} showToast={showToast}
           onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}/>}
-      {tab==='add'     && <AddTab profile={profile} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
+      {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
+          profile={profile} partnerName={partnerName}
           onDeleteTxn={removeTxn} onDeleteImport={removeImport} onSaveNote={handleSaveNote}/>}
       {tab==='bills'   && <BillsTab history={history} txns={txns}
           bankImports={imports} allCats={allCats} year={year} month={month}
@@ -6470,7 +6478,7 @@ export default function App() {
           goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCats}
-          year={year} month={month} personView={view} profile={profile}
+          year={year} month={month} personView={view} profile={profile} partnerName={partnerName}
           showToast={showToast} onImported={loadAll} aiOn={aiOn} aiDiag={aiDiag}/>}
 
       {showReset && (
@@ -6565,49 +6573,6 @@ export default function App() {
           C={C}
           SERIF={SERIF}
           SANS={SANS}
-        />
-      )}
-
-      {/* Goals Edit Modal - in HomeTab but rendered in App for zIndex */}
-      {tab === 'home' && showGoalsModal && (
-        <GoalsEditModal
-          goals={goals}
-          onSave={async (updatedGoals) => {
-            setGoals(updatedGoals);
-            localStorage.setItem(GOALS_KEY, JSON.stringify(updatedGoals));
-            showToast('Goals updated!');
-          }}
-          onClose={() => setShowGoalsModal(false)}
-          C={C}
-          SERIF={SERIF}
-          SANS={SANS}
-        />
-      )}
-
-      {/* Income modal */}
-      {showAddIncome && (
-        <IncomeModal 
-          onClose={() => {setShowAddIncome(false); setEditingIncome(null);}}
-          onAdd={async (incomeEntry) => {
-            if (editingIncome) {
-              // Update existing
-              const updated = expectedIncome.map(e => e.id === editingIncome.id ? incomeEntry : e);
-              setExpectedIncome(updated);
-              localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
-              showToast(`Income updated: $${incomeEntry.amount.toFixed(2)}`);
-            } else {
-              // Add new
-              setExpectedIncome([...(expectedIncome || []), incomeEntry]);
-              localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify([...(expectedIncome || []), incomeEntry]));
-              showToast(`Expected income added: $${incomeEntry.amount.toFixed(2)}`);
-            }
-            setEditingIncome(null);
-          }}
-          editingIncome={editingIncome}
-          SERIF={SERIF}
-          SANS={SANS}
-          C={C}
-          MONTHS={MONTHS}
         />
       )}
 

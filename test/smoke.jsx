@@ -154,13 +154,35 @@ check('HomeTab: income excluded from spend totals even when not in allCats', () 
   }
 });
 
+check('HomeTab: Actual Income section is visible and shows the real total', () => {
+  const paycheck = mk({ description: 'NORR PAYROLL', amount: 3200, category: 'income', direction: 'credit', who: 'jordan' });
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [paycheck], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop, history: [], billRules: [],
+    billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop
+  }));
+  if (!html.includes('Actual Income This Month')) {
+    throw new Error('expected an "Actual Income This Month" section to render');
+  }
+  if (!html.includes('3,200.00')) {
+    throw new Error('expected the actual income total ($3,200) to appear');
+  }
+  if (!html.includes('Add actual income manually')) {
+    throw new Error('expected a way to manually add actual income');
+  }
+});
+
 ['mine','combined'].forEach(v => {
   check('render HomeTab (' + v + ')', () => renderToString(React.createElement(HomeTab, {
     txns, bankImports: imports, ccTarget: 500,
     allCats, catTargets: {}, year: 2026, month: 6,
-    profile, view: v, setView: noop, history, billRules: [],
+    profile, partnerName: 'Mariel', view: v, setView: noop, history, billRules: [],
     billPayments: [],
-    expectedIncome: expectedIncomeMock, setExpectedIncome: noop,
+    expectedIncome: expectedIncomeMock, setExpectedIncome: noop, onAddTxn: noop,
     showToast: noop, goals, onSaveGoals: noop,
     depositingGoalId: null, setDepositingGoalId: noop
   })));
@@ -181,9 +203,9 @@ check('HomeTab: income excluded from spend totals even when not in allCats', () 
 check('render HomeTab (no history)', () => renderToString(React.createElement(HomeTab, {
   txns: [], bankImports: [], ccTarget: 0,
   allCats, catTargets: {}, year: 2026, month: 6,
-  profile, view: 'combined', setView: noop, history: [], billRules: [],
+  profile, partnerName: 'Mariel', view: 'combined', setView: noop, history: [], billRules: [],
   billPayments: [],
-  expectedIncome: [], setExpectedIncome: noop,
+  expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
   showToast: noop, goals: [], onSaveGoals: noop,
   depositingGoalId: null, setDepositingGoalId: noop
 })));
@@ -222,9 +244,21 @@ check('render BillsTab (with user rules)', () => renderToString(React.createElem
   history, txns, bankImports: imports, allCats, year: 2026, month: 6,
   ...billProps, billRules: [
     { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
-    { key:'netflix',    status:'hidden' },
+    { key:'netflix',    label:'Netflix', status:'hidden' },
     { key:'manual:gym', label:'Gym', amount:59.99, day:5, status:'manual', category:'other' },
   ] })));
+
+check('BillsTab: hidden bills are shown with a way to restore them', () => {
+  const html = renderToString(React.createElement(BillsTab, {
+    history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+    ...billProps, billRules: [
+      { key:'netflix', label:'Netflix', status:'hidden' },
+    ]
+  }));
+  if (!html.includes('Hidden bills')) throw new Error('expected a "Hidden bills" section to render');
+  if (!html.includes('Netflix')) throw new Error('expected the hidden bill\'s name (Netflix) to still be visible');
+  if (!html.includes('Restore')) throw new Error('expected a way to restore a hidden bill');
+});
 
 check('render BillEditModal (existing)', () => renderToString(React.createElement(BillEditModal, {
   bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
@@ -273,7 +307,7 @@ check('render BillsTab (future month)', () => renderToString(React.createElement
 }
 
 check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, {
-  txns, bankImports: imports, allCats,
+  txns, bankImports: imports, allCats, profile, partnerName: 'Mariel',
   onDeleteTxn: noop, onDeleteImport: noop, onSaveNote: noop })));
 
 check('render CalendarTab', () => renderToString(React.createElement(CalendarTab, {
@@ -286,23 +320,64 @@ check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {
   personView: 'combined', profile })));
 
 check('render UploadTab', () => renderToString(React.createElement(UploadTab, {
-  showToast: noop, onImported: noop, allCats, aiOn: true, aiDiag: null })));
+  showToast: noop, onImported: noop, allCats, aiOn: true, aiDiag: null,
+  profile, partnerName: 'Mariel' })));
 
 check('render UploadTab (no AI)', () => renderToString(React.createElement(UploadTab, {
   showToast: noop, onImported: noop, allCats, aiOn: false,
+  profile, partnerName: 'Mariel',
   aiDiag: { present:true, reason:'rejected', length:20, startsWith:'sk-ant-abc…',
             endsWith:'…1234', looksValid:true } })));
 
 check('render AutomationTab', () => renderToString(React.createElement(AutomationTab, {
   txns, bankImports: imports, allCats, year: 2026, month: 6,
-  personView: 'combined', profile, showToast: noop, onImported: noop,
+  personView: 'combined', profile, partnerName: 'Mariel', showToast: noop, onImported: noop,
   aiOn: true, aiDiag: null })));
 
 // Screens reached only through interaction — still worth rendering once
 check('render AuthScreen', () => renderToString(React.createElement(AuthScreen, { onAuth: noop })));
 
 check('render AddTab', () => renderToString(React.createElement(AddTab, {
-  profile, allCats, onAdd: noop })));
+  profile, partnerName: 'Mariel', allCats, onAdd: noop })));
+
+// Regression guard: the app must work for ANY couple's names, not just
+// Jordan & Mariel — this is the whole point of this feature. Render key
+// screens with a totally different pair of names and confirm neither
+// "Jordan" nor "Ness" (nor the test's own placeholder names) leak in from
+// some forgotten hardcoded string.
+check('AddTab: works for any names, no hardcoded Jordan/Ness leak in', () => {
+  const altProfile = { name: 'Alex Rivera', goal: 'Save for a house' };
+  const html = renderToString(React.createElement(AddTab, {
+    profile: altProfile, partnerName: 'Sam Okafor', allCats, onAdd: noop
+  }));
+  if (/jordan/i.test(html)) throw new Error('found hardcoded "Jordan" in AddTab output');
+  if (/\bness\b/i.test(html)) throw new Error('found hardcoded "Ness" in AddTab output');
+  if (!html.includes('Alex') || !html.includes('Sam')) {
+    throw new Error('expected the real names Alex and Sam to appear');
+  }
+});
+
+check('HomeTab: goal group labels use real names, not Jordan/Mariel', () => {
+  const altProfile = { name: 'Alex Rivera', goal: '' };
+  const altGoals = [
+    { id:'g1', person:'jordan', label:'Short-term Goal', target:0, monthlyContribution:0, description:'', currentBalance:0, deposits:[] },
+    { id:'g2', person:'mariel', label:'Short-term Goal', target:0, monthlyContribution:0, description:'', currentBalance:0, deposits:[] },
+    { id:'g3', person:'couple', label:'Short-term Goal', target:0, monthlyContribution:0, description:'', currentBalance:0, deposits:[] },
+  ];
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile: altProfile, partnerName: 'Sam Okafor', view: 'combined', setView: noop,
+    history: [], billRules: [], billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop,
+    showToast: noop, goals: altGoals, onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop
+  }));
+  if (/jordan/i.test(html)) throw new Error('found hardcoded "Jordan" in goal group labels');
+  if (/mariel/i.test(html)) throw new Error('found hardcoded "Mariel" in goal group labels');
+  if (!html.includes("Alex&#x27;s Goals")) throw new Error("expected \"Alex's Goals\" (alphabetically first)");
+  if (!html.includes("Sam&#x27;s Goals")) throw new Error("expected \"Sam's Goals\"");
+});
 
 check('render AddCatModal', () => renderToString(React.createElement(AddCatModal, {
   onSave: noop, onClose: noop })));
