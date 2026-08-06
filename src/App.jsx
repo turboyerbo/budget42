@@ -1233,6 +1233,92 @@ export function AuthScreen({onAuth}) {
 }
 
 // ─── Add Category Modal ───────────────────────────────────────────────────────
+// ─── EDIT TRANSACTION MODAL ───────────────────────────────────────────────────
+// The one place a transaction's date, amount, and category can all be changed
+// together. Changing the date moves it to a different month's view — Bills
+// tab can't do this (it edits a recurring pattern, not one transaction), so
+// this is the actual fix for "this charge is filed under the wrong month."
+export function EditTransactionModal({tx, allCats, onSave, onClose}) {
+  const [date, setDate] = useState(tx.date || today());
+  const [amount, setAmount] = useState(tx.amount != null ? String(tx.amount) : '');
+  const [category, setCategory] = useState(tx.category || tx.cat || 'other');
+  const [note, setNote] = useState(tx.note || tx.description || '');
+  const [saving, setSaving] = useState(false);
+
+  // Income is never reachable here on purpose — it's only ever set by the
+  // statement importer's credit-detection, or the dedicated income-confirm
+  // flows on Home. Recategorising a spending transaction can never turn it
+  // into income by accident.
+  const pickableCats = allCats.filter(c => !ALWAYS_EXCLUDED_CATS.has(c.id) || c.id === 'cc_payment' || c.id === 'transfer');
+
+  const inputStyle = {
+    width:'100%', padding:'11px 12px', border:`1px solid ${C.sandDark}`, borderRadius:10,
+    background:C.sand, color:C.ink, fontFamily:SANS, fontSize:15, outline:'none', boxSizing:'border-box'
+  };
+
+  async function save() {
+    const amt = parseFloat(amount);
+    if (!date || isNaN(amt) || amt <= 0) return;
+    setSaving(true);
+    const d = new Date(date + 'T00:00:00');
+    await onSave({
+      date, amount: amt, category, note: note.trim(),
+      year: d.getFullYear(), month: d.getMonth(),
+    });
+    setSaving(false);
+    onClose();
+  }
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:520,display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.4)'}}/>
+      <div style={{position:'relative',background:C.white,borderRadius:'20px 20px 0 0',
+        padding:'24px 20px 40px',animation:'slideUp 0.25s ease',maxHeight:'85dvh',overflowY:'auto'}}>
+        <div style={{display:'flex',alignItems:'center',marginBottom:20}}>
+          <h2 style={{flex:1,fontFamily:SERIF,fontSize:22,fontWeight:600,color:C.ink}}>Edit transaction</h2>
+          <button onClick={onClose} style={{border:'none',background:'none',padding:4,cursor:'pointer'}}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        <p style={{margin:'0 0 16px', fontSize:12, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6}}>
+          Changing the date moves this to that month's view — this is the way to fix
+          a charge that's sitting under the wrong month.
+        </p>
+
+        <SL>Date</SL>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+          style={{...inputStyle, marginBottom:16}}/>
+
+        <SL>Amount</SL>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16}}>
+          <span style={{fontSize:18,color:C.inkSoft}}>$</span>
+          <input type="number" value={amount} onChange={e=>setAmount(e.target.value)}
+            style={{...inputStyle, flex:1}}/>
+        </div>
+
+        <SL>Category</SL>
+        <select value={category} onChange={e=>setCategory(e.target.value)}
+          style={{...inputStyle, marginBottom:16, cursor:'pointer'}}>
+          {pickableCats.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+
+        <SL>Note</SL>
+        <input type="text" value={note} onChange={e=>setNote(e.target.value)}
+          placeholder="What was this for?"
+          style={{...inputStyle, marginBottom:24}}/>
+
+        <button onClick={save} disabled={saving || !amount}
+          style={{border:'none',width:'100%',padding:'15px',borderRadius:12,
+            background:(saving||!amount)?C.sandDark:C.green,color:'#fff',
+            fontSize:16,fontWeight:600,cursor:(saving||!amount)?'default':'pointer',fontFamily:SANS}}>
+          {saving ? 'Saving...' : 'Save changes'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AddCatModal({onSave,onClose}) {
   const [label, setLabel] = useState('');
   const [target,setTarget]= useState(100);
@@ -2537,11 +2623,12 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
-                  setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt}) {
+                  setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
   const [showScan, setShowScan] = useState(false);
+  const [editingTxn, setEditingTxn] = useState(null); // the transaction being date/amount/category-edited
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
 
@@ -2826,7 +2913,12 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                         color:C.ink,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
                       {busyId===tx.id
                         ? <Spinner size={13}/>
-                        : (
+                        : (<>
+                          <button onClick={()=>setEditingTxn(tx)} title="Edit date, amount, or category"
+                            style={{border:'none',background:C.sandMid,color:C.inkSoft,borderRadius:6,
+                              padding:'4px 6px',cursor:'pointer',fontSize:11,flexShrink:0}}>
+                            ✏️
+                          </button>
                           <select
                             value={cat.id}
                             onChange={e=>{
@@ -2840,7 +2932,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                             <option disabled>──────────</option>
                             <option value="__delete">Delete — duplicate</option>
                           </select>
-                        )}
+                        </>)}
                     </div>
                   ))}
                   {rows.length>0&&(
@@ -2879,6 +2971,13 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
       {showScan&&<ReceiptScanModal allCats={allCats} onScan={onScanReceipt}
         onConfirm={onConfirmReceipt} onClose={()=>setShowScan(false)}/>}
+      {editingTxn&&<EditTransactionModal tx={editingTxn} allCats={allCats}
+        onSave={async updates=>{
+          setBusyId(editingTxn.id);
+          await onEditTxnSave(editingTxn, updates);
+          setBusyId(null);
+        }}
+        onClose={()=>setEditingTxn(null)}/>}
     </div>
   );
 }
@@ -3208,7 +3307,7 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
         </div>
 
         <SL>Is this recurring?</SL>
-        <div style={{ display:'flex', gap:10, marginBottom:14 }}>
+        <div style={{ display:'flex', gap:10, marginBottom:8 }}>
           <button onClick={() => setRecurring(true)} style={{
             flex:1, padding:'10px 14px', border:`1.5px solid ${recurring ? '#1a7a4a' : C.sandDark}`,
             background: recurring ? '#1a7a4a' : 'white', color: recurring ? 'white' : C.ink,
@@ -3220,6 +3319,12 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
             borderRadius:10, cursor:'pointer', fontWeight:600, fontSize:14, fontFamily:SANS, transition:'all 0.12s'
           }}>No, one-time</button>
         </div>
+        <p style={{ margin:'0 0 14px', fontSize:11, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
+          This only changes how this bill schedules going forward — it can't move any
+          specific charge to a different month. To fix a transaction that's filed under
+          the wrong month, edit it directly from the Spending tab instead (tap the ✏️
+          next to it).
+        </p>
 
         <SL>Type of payment</SL>
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
@@ -6096,6 +6201,40 @@ export default function App() {
     }
   }
 
+  /** Edits date, amount, category, and note together. Changing the date can
+   *  move a transaction into a different month — since txns/imports state is
+   *  scoped to the month currently being viewed, a transaction that moves
+   *  away just drops out of the local list rather than staying visible in
+   *  the wrong month. */
+  async function handleEditTxnSave(tx, updates) {
+    const isImport = tx.description !== undefined || tx.source !== undefined;
+    const movedAway = updates.year !== year || updates.month !== month;
+    try {
+      if (isImport) {
+        await updateBankImport(tx.id, {
+          date: updates.date, amount: updates.amount, category: updates.category,
+          note: updates.note, year: updates.year, month: updates.month,
+        });
+        setImports(prev => movedAway
+          ? prev.filter(t => t.id !== tx.id)
+          : prev.map(t => t.id === tx.id ? { ...t, ...updates } : t));
+      } else {
+        await updateTransaction(tx.id, {
+          date: updates.date, amount: updates.amount, cat: updates.category,
+          note: updates.note, year: updates.year, month: updates.month,
+        });
+        setTxns(prev => movedAway
+          ? prev.filter(t => t.id !== tx.id)
+          : prev.map(t => t.id === tx.id ? { ...t, ...updates, cat: updates.category } : t));
+      }
+      showToast(movedAway
+        ? `Moved to ${MONTHS[updates.month]} ${updates.year}`
+        : 'Transaction updated');
+    } catch (e) {
+      showToast('Could not save that change');
+    }
+  }
+
   // One row deleted from wherever it lives
   async function deleteRow(tx) {
     const isImport = tx._table === 'bank_imports' || tx.description !== undefined;
@@ -6462,7 +6601,8 @@ export default function App() {
           onReviewDuplicates={()=>setShowDupes(true)}
           setQuickAddCat={setQuickAddCat} setTab={setTab}
           setEditingCatTarget={setEditingCatTarget} showToast={showToast}
-          onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}/>}
+          onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}
+          onEditTxnSave={handleEditTxnSave}/>}
       {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           profile={profile} partnerName={partnerName}

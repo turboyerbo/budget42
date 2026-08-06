@@ -13,7 +13,7 @@ import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
-  AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, OtherReviewModal, ActivityPanel,
+  AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
@@ -196,7 +196,7 @@ check('HomeTab: Actual Income section is visible and shows the real total', () =
     onDeleteRow: noop, duplicateCount: 2, onReviewDuplicates: noop,
     setQuickAddCat: noop, setTab: noop,
     setEditingCatTarget: noop, showToast: noop,
-    onScanReceipt: noop, onConfirmReceipt: noop
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
   })));
 });
 
@@ -219,7 +219,7 @@ check('render SpendingTab (no history)', () => renderToString(React.createElemen
   onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
   setQuickAddCat: noop, setTab: noop,
   setEditingCatTarget: noop, showToast: noop,
-  onScanReceipt: noop, onConfirmReceipt: noop
+  onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
 })));
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
@@ -384,6 +384,20 @@ check('render AddCatModal', () => renderToString(React.createElement(AddCatModal
 
 check('render ReceiptScanModal (pick stage)', () => renderToString(React.createElement(ReceiptScanModal, {
   allCats, onScan: noop, onConfirm: noop, onClose: noop })));
+
+check('render EditTransactionModal', () => renderToString(React.createElement(EditTransactionModal, {
+  tx: { id:'t1', date:'2026-07-12', amount:84.2, category:'groceries', note:'Loblaws' },
+  allCats, onSave: noop, onClose: noop })));
+
+check('EditTransactionModal: income is never a selectable category', () => {
+  const html = renderToString(React.createElement(EditTransactionModal, {
+    tx: { id:'t1', date:'2026-07-12', amount:84.2, category:'groceries', note:'Loblaws' },
+    allCats, onSave: noop, onClose: noop
+  }));
+  if (/<option[^>]*>Income<\/option>/i.test(html)) {
+    throw new Error('found a selectable "Income" option — this must never be reachable from the transaction editor');
+  }
+});
 
 check('render OtherReviewModal', () => renderToString(React.createElement(OtherReviewModal, {
   items: imports, allCats, onSave: noop, onClose: noop })));
