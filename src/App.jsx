@@ -19,7 +19,8 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
          getBillPayments, setBillPaid, syncLocalBillPayments,
          deleteManyRows, getMonthEverything,
-         getCategoryTargets, upsertCategoryTargets } from './supabase.js';
+         getCategoryTargets, upsertCategoryTargets,
+         getGoals, upsertGoals } from './supabase.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
@@ -41,6 +42,14 @@ const GOALS_KEY = 'b42_goals';
 const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
 const today = () => new Date().toISOString().slice(0,10);
 const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+// Today's date if it falls within the given month, otherwise the 1st of that month —
+// used so "add income/expense for this month" forms default sensibly when you're
+// looking at a month other than the current one.
+function defaultDateForMonth(year, month) {
+  const now = new Date();
+  if (now.getFullYear() === year && now.getMonth() === month) return today();
+  return `${year}-${String(month+1).padStart(2,'0')}-01`;
+}
 
 // Goals are organized into three groups of three: each person's own goals,
 // plus goals the couple is saving toward together.
@@ -49,6 +58,8 @@ const GOAL_GROUPS = [
   { person: 'mariel', label: "Mariel's Goals" },
   { person: 'couple', label: "Couple's Goals" },
 ];
+// Consistent accent colors so each person's goals are visually distinct at a glance
+const GOAL_GROUP_COLOR = { jordan: '#1d4ed8', mariel: '#be185d', couple: '#7c3aed' };
 function blankGoal(id, person, label) {
   return { id, person, label, target: 0, monthlyContribution: 0, description: '', currentBalance: 0, deposits: [] };
 }
@@ -1049,6 +1060,7 @@ function nameColor(name) {
   const n = (name||'').toLowerCase();
   if (n.includes('jordan')) return '#1d4ed8';
   if (n.includes('ness'))   return '#be185d';
+  if (n.includes('mariel')) return '#be185d';
   const h = [...n].reduce((a,c)=>a*31+c.charCodeAt(0),0);
   return COLOR_SWATCHES[Math.abs(h) % COLOR_SWATCHES.length];
 }
@@ -1775,20 +1787,26 @@ export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow 
 
 // ─── HOME TAB ─────────────────────────────────────────────────────────────────
 // ─── PREDICTED INCOME EDITOR (inline, expands under the hero) ────────────────
-function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C, SERIF, SANS}) {
+function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, showToast, C, SERIF, SANS}) {
   const [editingId, setEditingId] = useState(null); // id of entry being edited, or 'new'
-  const [fDate, setFDate] = useState(today());
+  const [fDate, setFDate] = useState(defaultDateForMonth(year, month));
   const [fAmount, setFAmount] = useState('');
   const [fSource, setFSource] = useState('');
   const [fAccount, setFAccount] = useState('');
 
+  const monthEntries = (expectedIncome || []).filter(inc => {
+    const d = new Date(inc.date);
+    return d.getFullYear() === year && d.getMonth() === month;
+  });
+  const otherMonthsCount = (expectedIncome || []).length - monthEntries.length;
+
   function startNew() {
     setEditingId('new');
-    setFDate(today()); setFAmount(''); setFSource(''); setFAccount('');
+    setFDate(defaultDateForMonth(year, month)); setFAmount(''); setFSource(''); setFAccount('');
   }
   function startEdit(entry) {
     setEditingId(entry.id);
-    setFDate(entry.date || today());
+    setFDate(entry.date || defaultDateForMonth(year, month));
     setFAmount(entry.amount != null ? String(entry.amount) : '');
     setFSource(entry.description || '');
     setFAccount(entry.account || '');
@@ -1824,7 +1842,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C,
     showToast('Income entry deleted');
   }
 
-  const sum = (expectedIncome || []).reduce((a,i)=>a+(i.amount||0),0);
+  const sum = monthEntries.reduce((a,i)=>a+(i.amount||0),0);
   const inputStyle = {
     width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
     background:C.white, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'
@@ -1834,16 +1852,16 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C,
     <Card style={{padding:'14px 16px', marginTop:8, marginBottom:12, background:C.blue+'08', border:`1px solid ${C.blue}22`}}>
       <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10}}>
         <p style={{margin:0, fontSize:12, fontWeight:600, color:C.ink, fontFamily:SANS}}>
-          Predicted income sources
+          Predicted income sources — this month
         </p>
         <p style={{margin:0, fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.blue}}>
           {fmt(sum)}
         </p>
       </div>
 
-      {(expectedIncome || []).length > 0 && (
+      {monthEntries.length > 0 && (
         <div style={{marginBottom:10}}>
-          {expectedIncome.map(inc => (
+          {monthEntries.map(inc => (
             <div key={inc.id} style={{
               display:'flex', alignItems:'center', gap:8, padding:'8px 0',
               borderBottom:`1px solid ${C.blue}18`, fontSize:12}}>
@@ -1921,12 +1939,18 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, showToast, C,
           + Add expected income
         </button>
       )}
+
+      {otherMonthsCount > 0 && (
+        <p style={{margin:'10px 0 0', fontSize:10, color:C.inkSoft, fontFamily:SANS, textAlign:'center'}}>
+          {otherMonthsCount} more entr{otherMonthsCount===1?'y':'ies'} in other months
+        </p>
+      )}
     </Card>
   );
 }
 
 // ─── GOAL ROW (inline-editable, used inside the accordion) ───────────────────
-function GoalRow({goal, onUpdate, onDeposit}) {
+function GoalRow({goal, accent, onUpdate, onDeposit}) {
   const [label, setLabel] = useState(goal.label);
   const [description, setDescription] = useState(goal.description || '');
   const [monthly, setMonthly] = useState(goal.monthlyContribution ? String(goal.monthlyContribution) : '');
@@ -1941,75 +1965,91 @@ function GoalRow({goal, onUpdate, onDeposit}) {
 
   const currentBalance = goal.currentBalance || 0;
   const goalMonthly = goal.monthlyContribution || 0;
-  const effectiveTarget = goal.target || goalMonthly * 12;
+  const autoTarget = goalMonthly * 12;
+  const effectiveTarget = goal.target || autoTarget;
   const progress = effectiveTarget > 0 ? (currentBalance / effectiveTarget) * 100 : 0;
   const isComplete = currentBalance >= effectiveTarget && effectiveTarget > 0;
+  const barColor = progress >= 100 ? C.green : accent;
 
   const fieldStyle = {
-    width:'100%', padding:'7px 8px', border:`1px solid ${C.sandDark}`, borderRadius:7,
+    width:'100%', padding:'8px 9px', border:`1px solid ${C.sandDark}`, borderRadius:8,
     background:C.white, color:C.ink, fontFamily:SERIF, fontSize:13, outline:'none', boxSizing:'border-box'
   };
 
   return (
-    <div style={{padding:'14px 0', borderTop:`1px solid ${C.sandMid}`}}>
-      <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:6}}>
+    <div style={{
+      margin: '12px 0 0', padding: '14px', borderRadius: 12,
+      background: isComplete ? C.green+'0d' : C.sand,
+      border: `1px solid ${isComplete ? C.green+'33' : 'transparent'}`
+    }}>
+      <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:8}}>
+        <span style={{width:6, height:6, borderRadius:99, background:accent, flexShrink:0}}/>
         <input value={label} onChange={e=>setLabel(e.target.value)}
           onBlur={()=>{ if(label.trim() && label.trim()!==goal.label) onUpdate('label', label.trim()); else setLabel(goal.label); }}
-          style={{flex:1, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS,
-            border:'none', borderBottom:`1px solid ${C.sandMid}`, background:'none',
-            padding:'2px 0 6px', outline:'none'}}/>
-        {isComplete && <span style={{fontSize:14}}>✓</span>}
+          style={{flex:1, fontSize:14, fontWeight:700, color:C.ink, fontFamily:SANS,
+            border:'none', borderBottom:'1px solid transparent', background:'none',
+            padding:'2px 0 4px', outline:'none'}}
+          onFocus={e=>{e.target.style.borderBottomColor=C.sandDark;}}
+          onBlurCapture={e=>{e.target.style.borderBottomColor='transparent';}}/>
+        {isComplete && <span style={{fontSize:15}}>✓</span>}
       </div>
 
       <input value={description} onChange={e=>setDescription(e.target.value)}
         onBlur={()=>{ if(description.trim()!==(goal.description||'')) onUpdate('description', description.trim()); }}
         placeholder="What's this goal for? (optional)"
-        style={{width:'100%', fontSize:11, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic',
-          border:'none', background:'none', padding:'0 0 10px', outline:'none', boxSizing:'border-box'}}/>
+        style={{width:'100%', fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic',
+          border:'none', background:'none', padding:'0 0 12px', outline:'none', boxSizing:'border-box'}}/>
 
-      <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:10}}>
-        <div>
-          <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
-            Monthly contribution $
-          </label>
-          <input type="number" value={monthly} onChange={e=>setMonthly(e.target.value)}
-            onBlur={()=>{ const v=parseFloat(monthly)||0; if(v!==goalMonthly) onUpdate('monthlyContribution', v); }}
-            placeholder="0" style={fieldStyle}/>
-        </div>
-        <div>
-          <label style={{fontSize:9, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:2}}>
-            Target $ (optional)
-          </label>
-          <input type="number" value={target} onChange={e=>setTarget(e.target.value)}
-            onBlur={()=>{ const v=parseFloat(target)||0; if(v!==(goal.target||0)) onUpdate('target', v); }}
-            placeholder="auto" style={fieldStyle}/>
-        </div>
-      </div>
-
-      <div style={{display:'flex', alignItems:'baseline', gap:4, marginBottom:6}}>
-        <p style={{margin:0, fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.green}}>
+      <div style={{display:'flex', alignItems:'baseline', gap:5, marginBottom:6}}>
+        <p style={{margin:0, fontFamily:SERIF, fontSize:20, fontWeight:600, color:barColor}}>
           ${currentBalance.toFixed(0)}
         </p>
         {effectiveTarget > 0 && (
-          <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
-            / ${effectiveTarget.toFixed(0)} saved
+          <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
+            of ${effectiveTarget.toFixed(0)}
           </p>
         )}
       </div>
 
       {effectiveTarget > 0 && (
-        <div style={{width:'100%', height:6, background:C.sandDark+'33', borderRadius:3, overflow:'hidden', marginBottom:10}}>
+        <div style={{width:'100%', height:7, background:C.white, borderRadius:4, overflow:'hidden', marginBottom:12,
+          boxShadow:'inset 0 0 0 1px rgba(0,0,0,0.04)'}}>
           <div style={{width:`${Math.min(progress,100)}%`, height:'100%',
-            background: progress>=100 ? C.green : C.blue, transition:'width 0.3s ease'}}/>
+            background: barColor, transition:'width 0.3s ease'}}/>
         </div>
       )}
 
+      <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:12}}>
+        <div>
+          <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:3}}>
+            Monthly contribution
+          </label>
+          <div style={{position:'relative'}}>
+            <span style={{position:'absolute', left:9, top:'50%', transform:'translateY(-50%)', fontSize:13, color:C.inkSoft, fontFamily:SERIF}}>$</span>
+            <input type="number" value={monthly} onChange={e=>setMonthly(e.target.value)}
+              onBlur={()=>{ const v=parseFloat(monthly)||0; if(v!==goalMonthly) onUpdate('monthlyContribution', v); }}
+              placeholder="0" style={{...fieldStyle, paddingLeft:18}}/>
+          </div>
+        </div>
+        <div>
+          <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:3}}>
+            Target {autoTarget > 0 && !goal.target ? `(auto: $${autoTarget.toFixed(0)})` : '(optional)'}
+          </label>
+          <div style={{position:'relative'}}>
+            <span style={{position:'absolute', left:9, top:'50%', transform:'translateY(-50%)', fontSize:13, color:C.inkSoft, fontFamily:SERIF}}>$</span>
+            <input type="number" value={target} onChange={e=>setTarget(e.target.value)}
+              onBlur={()=>{ const v=parseFloat(target)||0; if(v!==(goal.target||0)) onUpdate('target', v); }}
+              placeholder="auto" style={{...fieldStyle, paddingLeft:18}}/>
+          </div>
+        </div>
+      </div>
+
       <button onClick={onDeposit} style={{
-        width:'100%', padding:'8px 12px', border:'none', background:C.green+'20', color:C.green,
-        borderRadius:8, cursor:'pointer', fontSize:12, fontWeight:600, fontFamily:SANS, transition:'all 0.12s'
+        width:'100%', padding:'9px 12px', border:'none', background:accent+'18', color:accent,
+        borderRadius:9, cursor:'pointer', fontSize:12, fontWeight:700, fontFamily:SANS, transition:'all 0.12s'
       }}
-        onMouseEnter={e=>{e.target.style.background=C.green+'30';}}
-        onMouseLeave={e=>{e.target.style.background=C.green+'20';}}>
+        onMouseEnter={e=>{e.target.style.background=accent+'28';}}
+        onMouseLeave={e=>{e.target.style.background=accent+'18';}}>
         + Add Deposit
       </button>
     </div>
@@ -2017,8 +2057,8 @@ function GoalRow({goal, onUpdate, onDeposit}) {
 }
 
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
-                  history,billRules,billPayments,expectedIncome,setExpectedIncome,
-                  showToast,profile,goals,setGoals,depositingGoalId,setDepositingGoalId}) {
+                  year,month,history,billRules,billPayments,expectedIncome,setExpectedIncome,
+                  showToast,profile,goals,onSaveGoals,depositingGoalId,setDepositingGoalId}) {
   const [showPredictedIncomePanel, setShowPredictedIncomePanel] = useState(false);
   const [editingBudget, setEditingBudget] = useState(false);
   const [expandedGroup, setExpandedGroup] = useState(null); // 'jordan' | 'mariel' | 'couple' | null
@@ -2057,6 +2097,13 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   const incomeRows=allTx.filter(t=>(t.category||t.cat)==='income');
   const totalIncome=incomeRows.reduce((a,t)=>a+t.amount,0);
 
+  // Who contributed what, derived rather than declared
+  const incomeByPerson={};
+  incomeRows.forEach(t=>{
+    const k=firstName(t.who)||'unattributed';
+    incomeByPerson[k]=(incomeByPerson[k]||0)+t.amount;
+  });
+
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
   // Money moved between accounts is tracked but never counted as spending
@@ -2064,8 +2111,11 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     .filter(([k])=>!excludedIds.has(k))
     .reduce((a,[,v])=>a+v,0);
 
-  // Predicted income comes from what you've entered as expected, not from transactions
-  const predictedIncomeTotal = (expectedIncome||[]).reduce((a,i)=>a+(i.amount||0),0);
+  // Predicted income comes from what you've entered as expected for THIS month,
+  // not from transactions, and not from entries you predicted for other months
+  const predictedIncomeTotal = (expectedIncome||[])
+    .filter(i => { const d = new Date(i.date); return d.getFullYear()===year && d.getMonth()===month; })
+    .reduce((a,i)=>a+(i.amount||0),0);
 
   // What's actually landed in accounts this month, minus what's gone out
   const actuallyAvailableNow = totalIncome - totalSpent;
@@ -2079,12 +2129,13 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
   const surplus=totalIncome-committed-totalSpent;
 
-  // Every edit here writes straight to state + localStorage in one shot — no
-  // separate "batch edit then save" step, so nothing can be lost in between.
+  // Every edit here writes straight to state + localStorage + Supabase in one
+  // shot — no separate "batch edit then save" step, so nothing can be lost
+  // in between, and it's backed up server-side so it survives a cleared
+  // browser or a different device.
   function updateGoalField(goalId, field, value) {
     const updated = goals.map(g => g.id === goalId ? {...g, [field]: value} : g);
-    setGoals(updated);
-    try { localStorage.setItem(GOALS_KEY, JSON.stringify(updated)); } catch {}
+    onSaveGoals(updated);
     showToast('Goal updated');
   }
 
@@ -2142,7 +2193,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Actually Available Now</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Available This Month</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
               color:'rgba(255,255,255,0.95)'}}>{fmt(actuallyAvailableNow)}</p>
             <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.55)',fontFamily:SANS}}>
@@ -2169,13 +2220,39 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         <PredictedIncomeEditor
           expectedIncome={expectedIncome}
           setExpectedIncome={setExpectedIncome}
+          year={year} month={month}
           showToast={showToast}
           C={C} SERIF={SERIF} SANS={SANS}
         />
       )}
 
+      {/* Actual income this month — moved here from Spending, since it's income not spending */}
+      <Card style={{padding:'14px 16px', marginTop:showPredictedIncomePanel?0:12, marginBottom:12}}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: Object.keys(incomeByPerson).length ? 10 : 0}}>
+          <p style={{margin:0, fontSize:11, color:C.inkSoft, fontFamily:SANS, textTransform:'uppercase', fontWeight:600, letterSpacing:'0.06em'}}>
+            Actual income this month
+          </p>
+          <p style={{margin:0, fontFamily:SERIF, fontSize:16, fontWeight:600, color:C.green}}>
+            {fmt(totalIncome)}
+          </p>
+        </div>
+        {Object.keys(incomeByPerson).length === 0 ? (
+          <p style={{margin:0, fontSize:12, color:C.inkSoft, fontFamily:SANS, fontStyle:'italic'}}>
+            No deposits recorded yet this month — income is read straight off your statements.
+          </p>
+        ) : (
+          Object.entries(incomeByPerson).sort((a,b)=>b[1]-a[1]).map(([person,amt],i)=>(
+            <div key={person} style={{display:'flex', alignItems:'center', gap:10, padding:i>0?'8px 0 0':0}}>
+              <UserAvatar name={person} size={24}/>
+              <span style={{flex:1, fontSize:13, color:C.ink, fontFamily:SANS, textTransform:'capitalize'}}>{person}</span>
+              <span style={{fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.ink}}>{fmt(amt)}</span>
+            </div>
+          ))
+        )}
+      </Card>
+
       {/* Spending summary below hero */}
-      <Card style={{padding:'14px 16px', marginTop:12, marginBottom:20, background:C.sand}}>
+      <Card style={{padding:'14px 16px', marginTop:0, marginBottom:20, background:C.sand}}>
         <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>
           <div>
             <p style={{margin:'0 0 4px', fontSize: 11, color: C.inkSoft, fontFamily: SANS, textTransform: 'uppercase', fontWeight: 600}}>
@@ -2243,32 +2320,51 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         if (groupGoals.length === 0) return null;
         const totalBalance = groupGoals.reduce((a,g)=>a+(g.currentBalance||0),0);
         const totalMonthly = groupGoals.reduce((a,g)=>a+(g.monthlyContribution||0),0);
+        const totalTarget = groupGoals.reduce((a,g)=>a+(g.target || (g.monthlyContribution||0)*12),0);
+        const groupProgress = totalTarget > 0 ? Math.min((totalBalance/totalTarget)*100, 100) : 0;
         const isOpen = expandedGroup === person;
+        const accent = GOAL_GROUP_COLOR[person] || C.blue;
+        const icon = person === 'couple' ? '💑' : '👤';
 
         return (
-          <Card key={person} style={{marginBottom: 10, padding: 0, overflow: 'hidden'}}>
+          <Card key={person} style={{marginBottom: 10, padding: 0, overflow: 'hidden',
+            border: `1px solid ${isOpen ? accent+'55' : C.sandMid}`}}>
             <button onClick={()=>setExpandedGroup(isOpen ? null : person)} style={{
-              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              width: '100%', display: 'flex', alignItems: 'center', gap: 12,
               padding: '14px 16px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left'
             }}>
-              <div>
+              <div style={{
+                width: 36, height: 36, borderRadius: 10, background: accent+'18',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 16
+              }}>
+                {icon}
+              </div>
+              <div style={{flex: 1, minWidth: 0}}>
                 <p style={{margin: 0, fontSize: 14, fontWeight: 700, color: C.ink, fontFamily: SANS}}>
                   {groupLabel}
                 </p>
                 <p style={{margin: '2px 0 0', fontSize: 11, color: C.inkSoft, fontFamily: SANS}}>
-                  {fmt(totalBalance)} saved · {fmt(totalMonthly)}/month across {groupGoals.length} goal{groupGoals.length===1?'':'s'}
+                  {fmt(totalBalance)} saved · {fmt(totalMonthly)}/month
                 </p>
+                {totalTarget > 0 && (
+                  <div style={{width: '100%', height: 4, background: C.sandDark+'33', borderRadius: 2,
+                    overflow: 'hidden', marginTop: 6, maxWidth: 200}}>
+                    <div style={{width: `${groupProgress}%`, height: '100%',
+                      background: groupProgress >= 100 ? C.green : accent, transition: 'width 0.3s ease'}}/>
+                  </div>
+                )}
               </div>
               <ChevronRight size={16} color={C.inkSoft}
                 style={{transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', flexShrink: 0}}/>
             </button>
 
             {isOpen && (
-              <div style={{padding: '0 16px 12px'}}>
+              <div style={{padding: '0 16px 14px', borderTop: `1px solid ${C.sandMid}`}}>
                 {groupGoals.map(goal => (
                   <GoalRow
                     key={goal.id}
                     goal={goal}
+                    accent={accent}
                     onUpdate={(field, value) => updateGoalField(goal.id, field, value)}
                     onDeposit={() => setDepositingGoalId(goal.id)}
                   />
@@ -2292,8 +2388,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
                   }
                 : g
             );
-            setGoals(updated);
-            localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+            await onSaveGoals(updated);
             showToast(`Added $${amount.toFixed(2)} to ${goals.find(g => g.id === depositingGoalId)?.label}`);
           }}
           onClose={() => setDepositingGoalId(null)}
@@ -2326,15 +2421,6 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
   const excludedIds=new Set(allCats.filter(c=>c.excluded).map(c=>c.id));
 
-  // Income is no longer typed in — it is read off the statements
-  const incomeRows=allTx.filter(t=>(t.category||t.cat)==='income');
-
-  // Who contributed what, derived rather than declared
-  const incomeByPerson={};
-  incomeRows.forEach(t=>{
-    const k=firstName(t.who)||'unattributed';
-    incomeByPerson[k]=(incomeByPerson[k]||0)+t.amount;
-  });
   const txByCat={};
   allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
 
@@ -2624,92 +2710,6 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
           </div>
           <span style={{fontSize:14,color:C.inkSoft,fontFamily:SANS}}>Add category</span>
         </button>
-      </Card>
-
-      <SL>Income this month</SL>
-      <Card style={{padding:'8px 0'}}>
-        {incomeRows.length===0?(
-          <div style={{padding:'16px 18px'}}>
-            <p style={{margin:'0 0 4px',fontSize:13,color:C.inkMid,fontFamily:SANS}}>
-              No income recorded yet this month.
-            </p>
-            <p style={{margin:0,fontSize:12,color:C.inkSoft,fontFamily:SANS,lineHeight:1.6}}>
-              Income is read straight off your statements. Upload a statement that
-              includes a deposit and it will appear here automatically — no need to
-              type in what anyone contributed.
-            </p>
-          </div>
-        ):(
-          <>
-            {Object.entries(incomeByPerson)
-              .sort((a,b)=>b[1]-a[1])
-              .map(([person,amt],i)=>(
-              <div key={person}>
-                {i>0&&<Divider/>}
-                <div style={{display:'flex',alignItems:'center',gap:12,padding:'11px 18px'}}>
-                  <UserAvatar name={person} size={30}/>
-                  <div style={{flex:1,minWidth:0}}>
-                    <p style={{margin:0,fontSize:14,color:C.ink,fontFamily:SANS,
-                      textTransform:'capitalize'}}>{person}</p>
-                    <p style={{margin:'1px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS}}>
-                      {incomeRows.filter(t=>(firstName(t.who)||'unattributed')===person).length}{' '}
-                      deposit{incomeRows.filter(t=>(firstName(t.who)||'unattributed')===person).length===1?'':'s'}
-                    </p>
-                  </div>
-                  <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.green}}>
-                    {fmt(amt)}
-                  </p>
-                </div>
-              </div>
-            ))}
-            <Divider/>
-            <button onClick={()=>setOpenCat(openCat==='income'?null:'income')}
-              style={{display:'flex',alignItems:'center',gap:8,padding:'10px 18px',
-                width:'100%',border:'none',background:'none',cursor:'pointer'}}>
-              <span style={{flex:1,textAlign:'left',fontSize:12,color:C.inkSoft,fontFamily:SANS}}>
-                {openCat==='income'?'Hide deposits':'Show every deposit'}
-              </span>
-              <ChevronRight size={14} color={C.sandDark}
-                style={{transform:openCat==='income'?'rotate(90deg)':'none',
-                  transition:'transform 0.15s'}}/>
-            </button>
-            {openCat==='income'&&(
-              <div style={{background:C.sand,padding:'2px 0 8px'}}>
-                {rowsFor('income').map(tx=>(
-                  <div key={tx.id} style={{display:'flex',alignItems:'center',gap:8,
-                    padding:'8px 18px 8px 30px',opacity:busyId===tx.id?0.45:1}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{margin:0,fontSize:12,color:C.ink,fontFamily:SANS,
-                        overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                        {tx.note||tx.description||'Deposit'}
-                      </p>
-                      <p style={{margin:'1px 0 0',fontSize:10,color:C.inkSoft,fontFamily:SANS}}>
-                        {tx.date}{tx.source?' · '+instLabel(tx.source):''}
-                        {tx.who?' · '+tx.who:''}
-                      </p>
-                    </div>
-                    <p style={{margin:0,fontFamily:SERIF,fontSize:14,fontWeight:600,
-                      color:C.green,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
-                    {busyId===tx.id?<Spinner size={13}/>:(
-                      <select value="income"
-                        onChange={e=>{if(e.target.value!=='income')reassign(tx,e.target.value);}}
-                        style={{border:`1px solid ${C.sandDark}`,borderRadius:7,
-                          padding:'3px 5px',fontSize:10,fontWeight:600,color:C.inkMid,
-                          background:C.white,cursor:'pointer',fontFamily:SANS,maxWidth:104}}>
-                        {allCats.map(x=><option key={x.id} value={x.id}>{x.label}</option>)}
-                      </select>
-                    )}
-                  </div>
-                ))}
-                <p style={{margin:'6px 18px 0 30px',fontSize:10,color:C.inkSoft,
-                  fontFamily:SANS,lineHeight:1.5}}>
-                  Something in here that isn't really income? Change its category and it
-                  moves out.
-                </p>
-              </div>
-            )}
-          </>
-        )}
       </Card>
 
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
@@ -3114,7 +3114,7 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
 }
 
 // ─── CALENDAR TAB ────────────────────────────────────────────────────────────
-export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, setExpectedIncome, goals, setGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
   const [selectedDay, setSelectedDay] = useState(null);
   const today = new Date();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -3262,7 +3262,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
           incomeEntries={incomeByDay[selectedDay] || []}
           deposits={depositsByDay[selectedDay] || []}
           goals={goals || []}
-          setGoals={setGoals}
+          onSaveGoals={onSaveGoals}
           expectedIncome={expectedIncome || []}
           setExpectedIncome={setExpectedIncome}
           onSaveRule={onSaveRule}
@@ -3276,7 +3276,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 }
 
 // ─── DAY DETAIL PANEL (calendar click-through, everything editable) ──────────
-function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals, setGoals,
+function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals, onSaveGoals,
                           expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, showToast, onClose}) {
   const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
   const dateLabel = new Date(year, month, day).toLocaleDateString('en-CA', {weekday:'long', month:'long', day:'numeric'});
@@ -3367,8 +3367,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
     const updated = goals.map(g => g.id === depositGoalId
       ? {...g, currentBalance: (g.currentBalance||0) + amt, deposits: [...(g.deposits||[]), {id:'dep-'+Date.now(), date:dateStr, amount:amt}]}
       : g);
-    setGoals(updated);
-    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+    onSaveGoals(updated);
     showToast('Deposit added to ' + (goals.find(g=>g.id===depositGoalId)?.label || 'goal'));
     setAddingDeposit(false); setNewDepositAmount('');
   }
@@ -3382,8 +3381,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
       const newDeposits = (g.deposits||[]).map(d => d.id===depId ? {...d, amount:amt} : d);
       return {...g, deposits:newDeposits, currentBalance: (g.currentBalance||0) - oldAmt + amt};
     });
-    setGoals(updated);
-    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+    onSaveGoals(updated);
   }
 
   function deleteDeposit(goalId, depId) {
@@ -3393,8 +3391,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, deposits, goals
       const oldAmt = oldDep ? oldDep.amount : 0;
       return {...g, deposits:(g.deposits||[]).filter(d=>d.id!==depId), currentBalance: Math.max(0,(g.currentBalance||0) - oldAmt)};
     });
-    setGoals(updated);
-    localStorage.setItem(GOALS_KEY, JSON.stringify(updated));
+    onSaveGoals(updated);
     showToast('Deposit removed');
   }
 
@@ -5132,6 +5129,10 @@ function describeChange(payload, allCats) {
     return { who: name, text: `${name} updated budget targets for categories` };
   }
 
+  if (payload.table === 'goals') {
+    return { who: name, text: `${name} updated a financial goal` };
+  }
+
   if (payload.table === 'budget_settings') {
     return { who: name, text: `${name} updated the income or credit-card targets` };
   }
@@ -5665,7 +5666,12 @@ export default function App() {
   const [billsLocal, setBillsLocal]=useState(false);
   const [billPayments,setBillPayments]=useState([]);
   const [income,     setIncome    ]=useState(DEF_INCOME);
-  const [expectedIncome, setExpectedIncome]=useState([]);
+  const [expectedIncome, setExpectedIncome]=useState(() => {
+    try {
+      const saved = localStorage.getItem(EXPECTED_INCOME_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [showAddIncome,setShowAddIncome]=useState(false);
   const [unreviewed, setUnreviewed]=useState([]); // Partner transactions not yet reviewed
   const [showActivityHelper, setShowActivityHelper]=useState(false); // Show helper on login
@@ -5682,6 +5688,15 @@ export default function App() {
   const [showGoalsModal, setShowGoalsModal] = useState(false);
   const [depositingGoalId, setDepositingGoalId] = useState(null);
 
+  // Single place every goal edit flows through: updates state, caches to
+  // localStorage immediately, and pushes to Supabase so goals survive even if
+  // one partner's browser storage gets cleared or they're on a different device.
+  async function saveGoals(updatedGoals) {
+    setGoals(updatedGoals);
+    try { localStorage.setItem(GOALS_KEY, JSON.stringify(updatedGoals)); } catch {}
+    try { await upsertGoals(updatedGoals, profile?.name || 'unknown'); } catch {}
+  }
+
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
   const allCats=[...DEFAULT_CATS,...customCats]
@@ -5694,7 +5709,6 @@ export default function App() {
       const cc=localStorage.getItem(CUSTOM_CATS_KEY); if(cc)setCustomCats(JSON.parse(cc));
       const ct=localStorage.getItem(CAT_TARGETS_KEY); if(ct)setCatTargets(JSON.parse(ct));
       const nf=localStorage.getItem(NOTIFS_KEY);      if(nf)setNotifs(JSON.parse(nf));
-      const ei=localStorage.getItem(EXPECTED_INCOME_KEY); if(ei)setExpectedIncome(JSON.parse(ei));
     } catch {}
 
     if(!SUPABASE_READY){setAuthState('auth');return;}
@@ -5750,6 +5764,14 @@ export default function App() {
         if(Object.keys(remoteTargets).length > 0) {
           setCatTargets(remoteTargets);
           localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(remoteTargets));
+        }
+        // Load goals from Supabase too — this is the source of truth across
+        // devices/browsers; localStorage is just a fast local cache
+        const remoteGoals = await getGoals();
+        if(remoteGoals) {
+          const merged = ensureGoalGroups(remoteGoals);
+          setGoals(merged);
+          localStorage.setItem(GOALS_KEY, JSON.stringify(merged));
         }
         const mod = await import('./supabase.js');
         setBillsLocal(!!mod.billRulesLocalOnly || !!mod.billPaidLocalOnly);
@@ -5890,8 +5912,8 @@ export default function App() {
       const actor=(row.who||row.paid_by||row.updated_by||'').toLowerCase();
       // Ignore our own writes — only surface the partner's changes
       if(actor && me && (actor.includes(me)||me.includes(actor)))return;
-      // budget_settings and category_targets rows carry no 'who'; skip rather than misattribute
-      if(!actor && (payload.table==='budget_settings'||payload.table==='category_targets'))return;
+      // budget_settings, category_targets, and goals rows carry no 'who'; skip rather than misattribute
+      if(!actor && (payload.table==='budget_settings'||payload.table==='category_targets'||payload.table==='goals'))return;
 
       if(payload.table==='bill_payments'){
         getBillPayments(year,month).then(setBillPayments).catch(()=>{});
@@ -5904,6 +5926,15 @@ export default function App() {
           if(Object.keys(targets).length > 0) {
             setCatTargets(targets);
             localStorage.setItem(CAT_TARGETS_KEY,JSON.stringify(targets));
+          }
+        }).catch(()=>{});
+      }
+      if(payload.table==='goals'){
+        getGoals().then(remote=>{
+          if(remote){
+            const merged=ensureGoalGroups(remote);
+            setGoals(merged);
+            localStorage.setItem(GOALS_KEY,JSON.stringify(merged));
           }
         }).catch(()=>{});
       }
@@ -5949,11 +5980,12 @@ export default function App() {
     .then(ok=>{ setAiOn(ok); setAiDiag(aiDiagnostics()); })
     .catch(()=>setAiOn(false)); },[]);
 
-  // Save expected income to localStorage whenever it changes
+  // Keep localStorage in sync with expected income as a backup — the editor
+  // and calendar already write on every change, but this covers any other
+  // path that updates the list, including clearing it back to empty.
   useEffect(()=>{
-    if(typeof window !== 'undefined' && expectedIncome && expectedIncome.length > 0){
-      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(expectedIncome));
-    }
+    if(typeof window === 'undefined') return;
+    try { localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(expectedIncome || [])); } catch {}
   }, [expectedIncome]);
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(null),2600);}
@@ -6047,11 +6079,11 @@ export default function App() {
 
       {/* Content */}
       {tab==='home'    && <HomeTab txns={txns} bankImports={imports} ccTarget={ccTarget}
-          allCats={allCats} catTargets={catTargets}
+          allCats={allCats} catTargets={catTargets} year={year} month={month}
           view={view} setView={setView} history={history} billRules={billRules}
           billPayments={billPayments} profile={profile}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
-          showToast={showToast} goals={goals} setGoals={setGoals}
+          showToast={showToast} goals={goals} onSaveGoals={saveGoals}
           depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}/>}
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
           allCats={allCats} catTargets={catTargets}
@@ -6077,7 +6109,7 @@ export default function App() {
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
-          goals={goals} setGoals={setGoals} allCats={allCats} history={history}
+          goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
       {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCats}
           year={year} month={month} personView={view} profile={profile}

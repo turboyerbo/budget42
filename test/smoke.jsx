@@ -77,14 +77,19 @@ const goals = [
   { id: 'g9', person: 'couple', label: 'Long-term Goal', target: 15000, monthlyContribution: 750, description: '', currentBalance: 13000, deposits: [] },
 ];
 
+const expectedIncomeMock = [
+  { id: 'inc1', date: '2026-07-14', amount: 2012, description: 'NORR', account: 'Joint chequing', person: 'both' },
+  { id: 'inc2', date: '2026-06-01', amount: 500, description: 'Old month entry', account: '', person: 'both' },
+];
+
 ['mine','combined'].forEach(v => {
   check('render HomeTab (' + v + ')', () => renderToString(React.createElement(HomeTab, {
     txns, bankImports: imports, ccTarget: 500,
-    allCats, catTargets: {},
+    allCats, catTargets: {}, year: 2026, month: 6,
     profile, view: v, setView: noop, history, billRules: [],
     billPayments: [],
-    expectedIncome: [], setExpectedIncome: noop,
-    showToast: noop, goals, setGoals: noop,
+    expectedIncome: expectedIncomeMock, setExpectedIncome: noop,
+    showToast: noop, goals, onSaveGoals: noop,
     depositingGoalId: null, setDepositingGoalId: noop
   })));
 
@@ -102,11 +107,11 @@ const goals = [
 
 check('render HomeTab (no history)', () => renderToString(React.createElement(HomeTab, {
   txns: [], bankImports: [], ccTarget: 0,
-  allCats, catTargets: {},
+  allCats, catTargets: {}, year: 2026, month: 6,
   profile, view: 'combined', setView: noop, history: [], billRules: [],
   billPayments: [],
   expectedIncome: [], setExpectedIncome: noop,
-  showToast: noop, goals: [], setGoals: noop,
+  showToast: noop, goals: [], onSaveGoals: noop,
   depositingGoalId: null, setDepositingGoalId: noop
 })));
 
@@ -169,7 +174,7 @@ check('render HistoryTab', () => renderToString(React.createElement(HistoryTab, 
 
 check('render CalendarTab', () => renderToString(React.createElement(CalendarTab, {
   year: 2026, month: 6, txns, bankImports: imports, billRules: [], billPayments: [],
-  expectedIncome: [], setExpectedIncome: noop, goals: [], setGoals: noop, allCats,
+  expectedIncome: [], setExpectedIncome: noop, goals: [], onSaveGoals: noop, allCats,
   history, showToast: noop, onSaveRule: noop, onDeleteRule: noop })));
 
 check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {

@@ -128,6 +128,8 @@ export function subscribeToPartnerActivity(onChange) {
       p => onChange({ ...p, table:'bill_rules' }))
     .on('postgres_changes',{event:'*',schema:'public',table:'category_targets'},
       p => onChange({ ...p, table:'category_targets' }))
+    .on('postgres_changes',{event:'*',schema:'public',table:'goals'},
+      p => onChange({ ...p, table:'goals' }))
     .subscribe();
   return () => supabase.removeChannel(ch);
 }
@@ -461,3 +463,35 @@ export async function upsertCategoryTargets(targets, who) {
     throw err;
   }
 }
+
+// ── Goals (shared across partners, backs up localStorage so goals survive
+// even if one partner's browser storage gets cleared or they're on a new device) ──
+export async function getGoals() {
+  try {
+    const { data, error } = await supabase.from('goals')
+      .select('*').maybeSingle();
+    if (error) throw error;
+    return data?.goals || null;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    return null;
+  }
+}
+
+export async function upsertGoals(goals, who) {
+  try {
+    const { error } = await supabase.from('goals')
+      .upsert(
+        { id: 'shared', goals, updated_by: who, updated_at: new Date().toISOString() },
+        { onConflict: 'id' }
+      );
+    if (error) throw error;
+  } catch (err) {
+    if (isMissingTable(err)) {
+      // Table doesn't exist yet, silently fail — user can still use app locally
+      return;
+    }
+    throw err;
+  }
+}
+
