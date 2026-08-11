@@ -388,7 +388,7 @@ check('render SpendingTab (no history)', () => renderToString(React.createElemen
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
   showToast: noop, billsLocal: false, setTab: noop,
   billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' },
-  billActiveKeys: new Set(), billConfiguredMonths: new Set(),
+  billActiveKeys: new Map(), billConfiguredMonths: new Set(),
   onDeleteBillForMonth: noop, onConfigureMonth: noop };
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
@@ -433,7 +433,7 @@ check('applyBillRules: deleting a bill for one month leaves other months untouch
   const rules = [{ key:'netflix', status:'confirmed', label:'Netflix' }];
 
   // August (month 7) is configured with Netflix explicitly removed
-  const activeKeys = new Set(); // Netflix NOT included for August — it was deleted
+  const activeKeys = new Map(); // Netflix NOT included for August — it was deleted
   const configuredMonths = new Set(['2026|7']);
 
   const august = applyBillRules(detected, rules, activeKeys, configuredMonths, 2026, 7);
@@ -460,7 +460,7 @@ check('applyBillRules: an unconfigured month falls back to showing everything (n
   const rules = [{ key:'netflix', status:'confirmed', label:'Netflix' }];
   // No active keys and no configured months at all — this month has simply
   // never been touched by the new system
-  const result = applyBillRules(detected, rules, new Set(), new Set(), 2026, 6);
+  const result = applyBillRules(detected, rules, new Map(), new Set(), 2026, 6);
   if (!result.some(b => b.key === 'netflix')) {
     throw new Error('an untouched month should still show existing confirmed bills via the legacy fallback');
   }
@@ -469,10 +469,49 @@ check('applyBillRules: an unconfigured month falls back to showing everything (n
 check('applyBillRules: status "hidden" still means gone from every month (the rare permanent case)', () => {
   const detected = [{ key:'netflix', label:'Netflix', amount:9.03, day:2, monthsSeen:3, confidence:'high', varies:false }];
   const rules = [{ key:'netflix', status:'hidden', label:'Netflix' }];
-  const july = applyBillRules(detected, rules, new Set(), new Set(['2026|6']), 2026, 6);
-  const august = applyBillRules(detected, rules, new Set(), new Set(['2026|7']), 2026, 7);
+  const july = applyBillRules(detected, rules, new Map(), new Set(['2026|6']), 2026, 6);
+  const august = applyBillRules(detected, rules, new Map(), new Set(['2026|7']), 2026, 7);
   if (july.some(b => b.key === 'netflix') || august.some(b => b.key === 'netflix')) {
     throw new Error('a globally-hidden bill should not appear in any month');
+  }
+});
+
+// This is the second half of the bug report: even after bills became
+// month-scoped for existence (v62), amount/label/day/category were still
+// stored on a single shared bill_rules row — editing a bill's amount in ANY
+// month rewrote it in EVERY month, because there was no per-month value at
+// all, only a per-month on/off switch. Bill amounts genuinely change month
+// to month (utilities, variable subscriptions); an edit must only affect
+// the month it was made in.
+check('applyBillRules: editing a bill\'s amount for one month leaves other months\' amounts untouched', () => {
+  const detected = [{ key:'hydro', label:'Toronto Hydro', amount:120, day:15, monthsSeen:4, confidence:'high', varies:true }];
+  const rules = [{ key:'hydro', status:'confirmed', label:'Toronto Hydro' }]; // no amount on the shared rule
+  const configuredMonths = new Set(['2026|7']); // only August has been touched
+
+  // August's hydro bill was corrected to $180 for this month specifically
+  const activeOverrides = new Map([
+    ['hydro|2026|7', { amount: 180, label: 'Toronto Hydro', day: 15, category: 'rent' }],
+  ]);
+
+  const august = applyBillRules(detected, rules, activeOverrides, configuredMonths, 2026, 7);
+  const augustBill = august.find(b => b.key === 'hydro');
+  if (!augustBill || augustBill.amount !== 180) {
+    throw new Error(`expected August's hydro bill to be $180, got ${augustBill?.amount}`);
+  }
+
+  // July was never touched — must still show the original detected amount
+  // ($120), completely unaffected by August's correction
+  const july = applyBillRules(detected, rules, activeOverrides, configuredMonths, 2026, 6);
+  const julyBill = july.find(b => b.key === 'hydro');
+  if (!julyBill || julyBill.amount !== 120) {
+    throw new Error(`editing August's hydro amount also changed July's — expected $120 (the original), got ${julyBill?.amount}`);
+  }
+
+  // September, also never touched, must likewise show the original amount
+  const september = applyBillRules(detected, rules, activeOverrides, configuredMonths, 2026, 8);
+  const septBill = september.find(b => b.key === 'hydro');
+  if (!septBill || septBill.amount !== 120) {
+    throw new Error(`editing August's hydro amount also changed September's — expected $120 (the original), got ${septBill?.amount}`);
   }
 });
 
@@ -584,7 +623,7 @@ check('BillsTab: shows the copy-or-start-fresh banner for an unconfigured month 
     ...billProps, billRules: [
       { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
     ],
-    billActiveKeys: new Set(), billConfiguredMonths: new Set(), // unconfigured
+    billActiveKeys: new Map(), billConfiguredMonths: new Set(), // unconfigured
   }));
   if (!html.includes('keep these') && !html.includes('start fresh')) {
     throw new Error('expected the new-month copy-or-start-fresh banner to render for an unconfigured month with bills');
@@ -597,7 +636,7 @@ check('BillsTab: does not show the copy-or-start-fresh banner once a month is co
     ...billProps, billRules: [
       { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
     ],
-    billActiveKeys: new Set(['stela rent|2026|6']), billConfiguredMonths: new Set(['2026|6']),
+    billActiveKeys: new Map([['stela rent|2026|6', {amount:1900,label:'Rent',day:30,category:'other'}]]), billConfiguredMonths: new Set(['2026|6']),
   }));
   if (html.includes('start fresh') || html.includes('Keep these bills')) {
     throw new Error('the one-time banner should not reappear once a month has been configured');

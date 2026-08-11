@@ -17,7 +17,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
-         getBillMonthActive, getBillMonthConfigured, setBillActiveForMonth, markMonthConfigured,
+         getBillMonthActive, getBillMonthConfigured, setBillActiveForMonth, markMonthConfigured, setBillOverrideForMonth,
          getBillPayments, setBillPaid, syncLocalBillPayments, getAllBillPayments,
          deleteManyRows, getMonthEverything,
          getCategoryTargets, upsertCategoryTargets,
@@ -2373,7 +2373,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // Recurring charges are worked out from your own history rather than kept in
   // a hardcoded list. Uses the exact same buildSchedule the Bills tab uses, so
   // the two tabs never disagree about what's due, paid, or overdue.
-  const recurring = applyBillRules(detectRecurring(history || []), billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month)
+  const recurring = applyBillRules(detectRecurring(history || []), billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Set(), year, month)
     .filter(b => b.confidence === 'high');
   const sched = buildSchedule(recurring, everythingThisMonth, year, month, new Date(), billPayments || []);
   const dueTotal = sched.outstandingTotal;
@@ -3646,7 +3646,7 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onDeleteEverywh
 }
 
 // ─── CALENDAR TAB ────────────────────────────────────────────────────────────
-export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onUpdateBillForMonth, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
   const [selectedDay, setSelectedDay] = useState(null);
   const today = new Date();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -3654,7 +3654,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
   // Merged bills (detected + manual overrides), same source of truth as the Bills tab
   const detected = detectRecurring(history || []);
-  const mergedBills = applyBillRules(detected, billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month).filter(b => b.confidence === 'high');
+  const mergedBills = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Set(), year, month).filter(b => b.confidence === 'high');
 
   const billsByDay = {};
   mergedBills.forEach(b => {
@@ -3824,7 +3824,8 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
           onSaveRule={onSaveRule}
           onDeleteRule={onDeleteRule}
           onDeleteBillForMonth={onDeleteBillForMonth}
-          allMonthBillKeys={mergedBills.map(b=>b.key)}
+          onUpdateBillForMonth={onUpdateBillForMonth}
+          allMonthBills={mergedBills}
           showToast={showToast}
           onClose={() => setSelectedDay(null)}
         />
@@ -3836,7 +3837,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 // ─── DAY DETAIL PANEL (calendar click-through, everything editable) ──────────
 function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, deposits, goals, onSaveGoals,
                           expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, onDeleteBillForMonth,
-                          allMonthBillKeys, showToast, onClose}) {
+                          onUpdateBillForMonth, allMonthBills, showToast, onClose}) {
   const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
   const dateLabel = new Date(year, month, day).toLocaleDateString('en-CA', {weekday:'long', month:'long', day:'numeric'});
 
@@ -3882,35 +3883,32 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
     showToast('Income entry deleted');
   }
 
+  /** Editing a bill's amount or name from the calendar only affects this
+   *  month — same fix as the Bills tab. Amounts genuinely vary month to
+   *  month; nothing here should quietly rewrite another month's numbers. */
   async function updateBill(bill, field, value) {
-    await onSaveRule({
-      key: bill.key,
-      label: field === 'label' ? value : bill.label,
+    await onUpdateBillForMonth(bill, {
       amount: field === 'amount' ? (parseFloat(value)||0) : bill.amount,
-      day: bill.day,
+      label:  field === 'label' ? value : bill.label,
+      day:    bill.day,
       category: bill.category,
-      status: bill.detected ? 'confirmed' : 'manual',
-      recurring: bill.recurring ?? true,
-      payment_type: bill.payment_type || 'other',
-      frequency: bill.recurring === false ? 'one-time' : 'monthly',
     });
-    showToast('Bill updated');
+    showToast('Saved for this month only');
   }
 
   async function saveNewBill() {
     const amt = parseFloat(newBillAmount);
     if (!newBillLabel.trim() || isNaN(amt) || amt <= 0) { showToast('Enter a name and amount'); return; }
+    const key = 'manual:' + uid();
+    const label = newBillLabel.trim();
     await onSaveRule({
-      key: 'manual:' + uid(),
-      label: newBillLabel.trim(),
-      amount: amt,
-      day: day,
-      category: 'other',
-      status: 'manual',
-      recurring: true,
-      payment_type: 'other',
-      frequency: 'monthly',
+      key, label, amount: amt, day, category: 'other', status: 'manual',
+      recurring: true, payment_type: 'other', frequency: 'monthly',
     });
+    // Also seed THIS month's own copy — otherwise, if this month has
+    // already been explicitly configured, the new bill would silently not
+    // show up here at all (the legacy fallback only covers untouched months).
+    await onUpdateBillForMonth({ key }, { amount: amt, label, day, category: 'other' });
     showToast('Bill added');
     setAddingBill(false); setNewBillLabel(''); setNewBillAmount('');
   }
@@ -3918,7 +3916,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
   /** Removes this bill from just the current month, same as the Bills tab —
    *  every other month keeps it as it was. */
   async function removeBill(bill) {
-    await onDeleteBillForMonth(bill, allMonthBillKeys || []);
+    await onDeleteBillForMonth(bill, allMonthBills || []);
   }
 
   function saveDeposit() {
@@ -4121,7 +4119,8 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
                           billPayments, allBillPayments, onTogglePaid, profile, setTab,
-                          billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onConfigureMonth}) {
+                          billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onConfigureMonth,
+                          onUpdateBillForMonth, onConfirmSuggestedBill}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
 
   const detected = detectRecurring(history || []);
@@ -4133,7 +4132,7 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 
   // What's actually on for THIS month specifically.
   const thisMonthIsConfigured = (billConfiguredMonths || new Set()).has(`${year}|${month}`);
-  const bills = applyBillRules(detected, billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month);
+  const bills = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Set(), year, month);
   const confirmed = bills.filter(b => b.confidence === 'high');
   const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month,
                        new Date(), billPayments || []);
@@ -4152,13 +4151,33 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
   );
   const needsReview = carriedOver.filter(e => thisMonthActiveKeys.has(e.key));
 
-  async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
+  /** Saving a bill's details (amount, label, day, category) only ever
+   *  affects the month you're looking at — amounts genuinely change month
+   *  to month, so nothing here should quietly rewrite another month's
+   *  numbers. Adding a brand-new manual bill is the one exception: it also
+   *  needs a starting default recorded globally, since a manual bill has no
+   *  detection pattern to fall back on for months no one has touched yet. */
+  async function saveRule(rule) {
+    if (editing === null) {
+      // Brand new manual bill
+      await onSaveRule({ key: rule.key, label: rule.label, amount: rule.amount,
+        day: rule.day, category: rule.category, status: 'manual',
+        recurring: true, payment_type: 'other', frequency: 'monthly' });
+      await onUpdateBillForMonth(rule, { amount: rule.amount, label: rule.label, day: rule.day, category: rule.category });
+    } else {
+      await onUpdateBillForMonth(editing, { amount: rule.amount, label: rule.label, day: rule.day, category: rule.category });
+      if (rule.label !== editing.label) {
+        await onSaveRule({ key: rule.key, label: rule.label, status: editing.manual ? 'manual' : 'confirmed' });
+      }
+    }
+    setEditing(undefined);
+  }
 
   /** The default "delete" — removes this bill from THIS month only. Every
    *  other month, past or future, keeps it exactly as it was. This is what
    *  fixes deleting a bill wiping it out everywhere. */
   async function removeRule(bill) {
-    await onDeleteBillForMonth(bill, confirmed.map(b => b.key));
+    await onDeleteBillForMonth(bill, confirmed);
     setEditing(undefined);
   }
 
@@ -4341,7 +4360,7 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
               padding:'10px', borderRadius:10, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer' }}>
               Start {MONTHS[month]} empty
             </button>
-            <button onClick={()=>onConfigureMonth('copy', confirmed.map(b=>b.key))} style={{
+            <button onClick={()=>onConfigureMonth('copy', confirmed)} style={{
               flex:1, border:'none', background:C.blue, color:'white',
               padding:'10px', borderRadius:10, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer' }}>
               Keep these bills
@@ -4469,8 +4488,7 @@ create policy "allow all on bill_payments" on bill_payments
                   <span style={{ fontFamily:SERIF, fontSize:15, fontWeight:600, color:C.inkMid }}>
                     {fmt(b.amount)}
                   </span>
-                  <button onClick={() => saveRule({ key:b.key, label:b.label, amount:b.amount,
-                      day:b.day, category:b.category, status:'confirmed' })}
+                  <button onClick={() => onConfirmSuggestedBill(b)}
                     style={{ border:'none', borderRadius:8, padding:'6px 11px',
                       background:C.green, color:'#fff', fontSize:11, fontWeight:700,
                       cursor:'pointer', fontFamily:SANS, flexShrink:0 }}>
@@ -6387,9 +6405,12 @@ export default function App() {
   const allCats=[...DEFAULT_CATS,...customCats]
     .sort((a,b)=>a.label.localeCompare(b.label,'en',{sensitivity:'base'}));
 
-  // Fast lookups for "which bills are on for the month being viewed" — see
-  // applyBillRules() in recurring.js for how these get used.
-  const billActiveKeys = new Set(billMonthActive.map(r => `${r.key}|${r.year}|${r.month}`));
+  // Fast lookups for "which bills are on for the month being viewed, and
+  // with what amount/label/day/category" — see applyBillRules() in
+  // recurring.js for how these get used. A Map, not just a Set, because an
+  // active row can carry its own values that only apply to that one month.
+  const billActiveKeys = new Map(billMonthActive.map(r => [`${r.key}|${r.year}|${r.month}`,
+    { amount: r.amount, label: r.label, day: r.day, category: r.category }]));
   const billConfiguredMonths = new Set(billMonthConfigured.map(r => `${r.year}|${r.month}`));
   const thisMonthIsConfigured = billConfiguredMonths.has(`${year}|${month}`);
 
@@ -6674,17 +6695,17 @@ export default function App() {
    *  bill from THIS month only — every other month, past or future, is
    *  untouched. If this month hasn't been explicitly configured yet, this
    *  is also the moment it becomes explicit: everything else currently
-   *  showing gets carried over as-is, and only the one bill being deleted
-   *  drops out. */
-  async function deleteBillForMonth(bill, visibleKeysThisMonth) {
+   *  showing gets carried over as its own snapshot (own amount, own
+   *  everything), and only the one bill being deleted drops out. */
+  async function deleteBillForMonth(bill, visibleBillsThisMonth) {
     const monthTag = `${year}|${month}`;
     const alreadyConfigured = billMonthConfigured.some(r => `${r.year}|${r.month}` === monthTag);
     try {
       if (!alreadyConfigured) {
-        const keep = visibleKeysThisMonth.filter(k => k !== bill.key);
+        const keep = visibleBillsThisMonth.filter(b => b.key !== bill.key);
         await markMonthConfigured(year, month, keep);
         setBillMonthConfiguredState(prev => [...prev, { year, month }]);
-        setBillMonthActiveState(prev => [...prev, ...keep.map(k => ({ key: k, year, month }))]);
+        setBillMonthActiveState(prev => [...prev, ...keep.map(b => ({ key:b.key, year, month, amount:b.amount, label:b.label, day:b.day, category:b.category }))]);
       } else {
         await setBillActiveForMonth(bill.key, year, month, false);
         setBillMonthActiveState(prev => prev.filter(r => !(r.key === bill.key && r.year === year && r.month === month)));
@@ -6694,15 +6715,44 @@ export default function App() {
   }
 
   /** The one-time "copy last month's bills, or start fresh?" prompt. Either
-   *  choice marks the month configured, so the prompt never asks twice. */
-  async function configureThisMonth(choice, visibleKeysThisMonth) {
+   *  choice marks the month configured, so the prompt never asks twice.
+   *  Copying takes a snapshot of each bill's current amount/day/category —
+   *  a starting point you can then adjust for this month specifically,
+   *  not a live link back to wherever those values came from. */
+  async function configureThisMonth(choice, visibleBillsThisMonth) {
     try {
-      const seed = choice === 'copy' ? visibleKeysThisMonth : [];
+      const seed = choice === 'copy' ? visibleBillsThisMonth : [];
       await markMonthConfigured(year, month, seed);
       setBillMonthConfiguredState(prev => [...prev, { year, month }]);
-      setBillMonthActiveState(prev => [...prev, ...seed.map(k => ({ key: k, year, month }))]);
-      showToast(choice === 'copy' ? `Copied ${seed.length} bill${seed.length===1?'':'s'} into ${MONTHS[month]}` : `${MONTHS[month]} starts with no bills — add them as you go`);
+      setBillMonthActiveState(prev => [...prev, ...seed.map(b => ({ key:b.key, year, month, amount:b.amount, label:b.label, day:b.day, category:b.category }))]);
+      showToast(choice === 'copy' ? `Copied ${seed.length} bill${seed.length===1?'':'s'} into ${MONTHS[month]} — amounts here are independent from here on` : `${MONTHS[month]} starts with no bills — add them as you go`);
     } catch (e) { showToast('Could not set up this month — ' + e.message); }
+  }
+
+  /** Edits a bill's amount/label/day/category for THIS month only — the
+   *  actual fix for "amounts change month to month." Never touches the
+   *  shared bill_rules row, so nothing about another month changes. */
+  async function updateBillForMonth(bill, updates) {
+    try {
+      await setBillOverrideForMonth(bill.key, year, month, updates);
+      setBillMonthActiveState(prev => [
+        ...prev.filter(r => !(r.key === bill.key && r.year === year && r.month === month)),
+        { key: bill.key, year, month, ...updates },
+      ]);
+      showToast(`Saved for ${MONTHS[month]} only`);
+    } catch (e) { showToast('Could not save — ' + e.message); }
+  }
+
+  /** Confirming a suggested bill establishes the recognized pattern (so
+   *  "Might be bills" stops asking) without pinning its amount globally —
+   *  the amount only gets set for the month you're actually confirming it
+   *  for, exactly like any other edit. */
+  async function confirmSuggestedBill(b) {
+    try {
+      await saveBillRule({ key: b.key, label: b.label, status: 'confirmed' });
+      await updateBillForMonth(b, { amount: b.amount, label: b.label, day: b.day, category: b.category });
+      showToast(`"${b.label}" confirmed as a bill for ${MONTHS[month]}`);
+    } catch (e) { showToast('Could not confirm that bill — ' + e.message); }
   }
 
   async function handleSaveNote(id, type, note) {
@@ -6981,11 +7031,12 @@ export default function App() {
           billPayments={billPayments} allBillPayments={allBillPayments} onTogglePaid={toggleBillPaid} profile={profile}
           billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
           onDeleteBillForMonth={deleteBillForMonth} onConfigureMonth={configureThisMonth}
+          onUpdateBillForMonth={updateBillForMonth} onConfirmSuggestedBill={confirmSuggestedBill}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule} setTab={setTab}/>}
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
           billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
-          onDeleteBillForMonth={deleteBillForMonth}
+          onDeleteBillForMonth={deleteBillForMonth} onUpdateBillForMonth={updateBillForMonth}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
           goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}

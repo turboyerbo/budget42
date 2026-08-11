@@ -227,28 +227,34 @@ export function relativeDay(daysAway) {
  */
 /**
  * Merges auto-detected bills with the couple's own edits, then decides which
- * ones actually apply to the (year, month) being viewed.
+ * ones actually apply to the (year, month) being viewed — and with what
+ * amount, since bill amounts genuinely change month to month (utilities,
+ * variable subscriptions) and shouldn't silently rewrite history or the
+ * future just because one month's charge was different.
  *
  * Whether a bill "exists" used to be entirely global: hiding it removed it
- * from every month at once, past and future, because there was no concept
- * of month membership at all. Now each month can be EXPLICITLY configured
- * (activeKeys / configuredMonths) — but a month that's never been touched
- * falls back to the old always-show behavior, so nothing changes for
- * existing bills until someone actually acts on a specific month. The
- * moment a month is configured (via the copy/start-fresh prompt, or simply
- * by deleting one bill from it), only its explicit active list applies.
+ * from every month at once, and its amount/label/day/category lived on a
+ * single shared row, so editing a bill in ANY month changed it in EVERY
+ * month. Now each month can be EXPLICITLY configured (activeOverrides /
+ * configuredKeys) with its own amount, separate from every other month — but
+ * a month that's never been touched falls back to the old always-show
+ * behavior using the shared rule's values, so nothing changes for existing
+ * bills until someone actually acts on a specific month.
  *
- * @param activeKeys     Set of "key|year|month" strings — explicit "on" list
- * @param configuredKeys Set of "year|month" strings — months set up at all
+ * @param activeOverrides Map of "key|year|month" -> {amount,label,day,category}
+ *                        (any field can be omitted to fall back to the rule's
+ *                        value) — presence of the key means "active this month"
+ * @param configuredKeys  Set of "year|month" strings — months set up at all
  */
-export function applyBillRules(detected, rules = [], activeKeys = new Set(), configuredKeys = new Set(), year = null, month = null) {
+export function applyBillRules(detected, rules = [], activeOverrides = new Map(), configuredKeys = new Set(), year = null, month = null) {
   const byKey = new Map(rules.map(r => [r.key, r]));
   const out = [];
   const monthTag = (year != null && month != null) ? `${year}|${month}` : null;
   const monthIsConfigured = monthTag != null && configuredKeys.has(monthTag);
+  const overrideFor = key => monthTag ? activeOverrides.get(`${key}|${monthTag}`) : undefined;
   const isActiveThisMonth = key => {
     if (!monthTag) return true; // no month context given — behave as before (used by suggestion lists etc.)
-    if (monthIsConfigured) return activeKeys.has(`${key}|${monthTag}`);
+    if (monthIsConfigured) return activeOverrides.has(`${key}|${monthTag}`);
     return true; // month never configured — legacy fallback, show everything not globally hidden
   };
 
@@ -256,15 +262,16 @@ export function applyBillRules(detected, rules = [], activeKeys = new Set(), con
     const rule = byKey.get(bill.key);
     if (rule?.status === 'hidden') return; // deleted everywhere, for good — the rare, explicit case
     if (!isActiveThisMonth(bill.key)) return;
+    const ov = overrideFor(bill.key);
 
     out.push({
       ...bill,
-      label:      rule?.label  ?? bill.label,
-      amount:     rule?.amount != null ? Number(rule.amount) : bill.amount,
-      day:        rule?.day    != null ? Number(rule.day)    : bill.day,
-      category:   rule?.category ?? bill.category,
+      label:      ov?.label ?? rule?.label ?? bill.label,
+      amount:     ov?.amount != null ? Number(ov.amount) : (rule?.amount != null ? Number(rule.amount) : bill.amount),
+      day:        ov?.day != null ? Number(ov.day) : (rule?.day != null ? Number(rule.day) : bill.day),
+      category:   ov?.category ?? rule?.category ?? bill.category,
       confidence: rule?.status === 'confirmed' ? 'high' : bill.confidence,
-      edited:     !!rule && rule.status !== 'auto',
+      edited:     !!ov || (!!rule && rule.status !== 'auto'),
       detected:   true,
     });
   });
@@ -272,12 +279,13 @@ export function applyBillRules(detected, rules = [], activeKeys = new Set(), con
   // Bills the user added by hand
   rules.filter(r => r.status === 'manual').forEach(r => {
     if (!isActiveThisMonth(r.key)) return;
+    const ov = overrideFor(r.key);
     out.push({
       key:        r.key,
-      label:      r.label || 'Untitled bill',
-      amount:     Number(r.amount) || 0,
-      day:        Number(r.day) || 1,
-      category:   r.category || 'other',
+      label:      ov?.label ?? (r.label || 'Untitled bill'),
+      amount:     ov?.amount != null ? Number(ov.amount) : (Number(r.amount) || 0),
+      day:        ov?.day != null ? Number(ov.day) : (Number(r.day) || 1),
+      category:   ov?.category ?? (r.category || 'other'),
       monthsSeen: 0,
       confidence: 'high',
       varies:     false,

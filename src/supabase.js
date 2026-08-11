@@ -356,7 +356,7 @@ export async function getBillMonthConfigured() {
 }
 
 /** Sets whether a bill is active for one specific month, without touching
- *  any other month. This is what "delete" actually calls now. */
+ *  any other month. This is what "delete" actually calls now (active=false). */
 export async function setBillActiveForMonth(key, year, month, active) {
   try {
     if (active) {
@@ -376,15 +376,36 @@ export async function setBillActiveForMonth(key, year, month, active) {
   }
 }
 
+/** Sets this month's own amount/label/day/category for a bill — editing a
+ *  bill from within a specific month writes here, not to the shared
+ *  bill_rules row, so a changed amount only ever affects the month it was
+ *  changed in. Income sources and bill amounts genuinely vary month to
+ *  month; nothing should silently rewrite the past or the future. */
+export async function setBillOverrideForMonth(key, year, month, overrides) {
+  const row = { key, year, month, ...overrides };
+  try {
+    const { error } = await supabase.from('bill_month_active')
+      .upsert(row, { onConflict: 'key,year,month' });
+    if (error) throw error;
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    const rows = readLocalActive().filter(r => !(r.key === key && r.year === year && r.month === month));
+    rows.push(row);
+    writeLocalActive(rows);
+  }
+}
+
 /** Marks a month as explicitly set up, optionally seeding it with a starting
- *  set of active bill keys (e.g. everything copied from last month). */
-export async function markMonthConfigured(year, month, activeKeys = []) {
+ *  snapshot of bills copied from wherever they were showing before (each
+ *  entry can include its own amount/label/day/category) — a one-time copy,
+ *  not a live link. Editing any of them afterward only affects this month. */
+export async function markMonthConfigured(year, month, seedBills = []) {
   try {
     const { error } = await supabase.from('bill_month_configured')
       .upsert({ year, month }, { onConflict: 'year,month' });
     if (error) throw error;
-    if (activeKeys.length) {
-      const rows = activeKeys.map(key => ({ key, year, month }));
+    if (seedBills.length) {
+      const rows = seedBills.map(b => ({ key: b.key, year, month, amount: b.amount, label: b.label, day: b.day, category: b.category }));
       const { error: e2 } = await supabase.from('bill_month_active').upsert(rows, { onConflict: 'key,year,month' });
       if (e2) throw e2;
     }
@@ -393,9 +414,10 @@ export async function markMonthConfigured(year, month, activeKeys = []) {
     const configured = readLocalConfigured().filter(r => !(r.year === year && r.month === month));
     configured.push({ year, month });
     writeLocalConfigured(configured);
-    if (activeKeys.length) {
-      const rows = readLocalActive().filter(r => !(r.year === year && r.month === month && activeKeys.includes(r.key)));
-      activeKeys.forEach(key => rows.push({ key, year, month }));
+    if (seedBills.length) {
+      const keepKeys = new Set(seedBills.map(b => b.key));
+      const rows = readLocalActive().filter(r => !(r.year === year && r.month === month && keepKeys.has(r.key)));
+      seedBills.forEach(b => rows.push({ key: b.key, year, month, amount: b.amount, label: b.label, day: b.day, category: b.category }));
       writeLocalActive(rows);
     }
   }
