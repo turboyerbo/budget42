@@ -225,13 +225,37 @@ export function relativeDay(daysAway) {
  * correct its amount or day, confirm a suggestion, hide something that is not a
  * bill, or add one that never appears in a statement at all.
  */
-export function applyBillRules(detected, rules = []) {
+/**
+ * Merges auto-detected bills with the couple's own edits, then decides which
+ * ones actually apply to the (year, month) being viewed.
+ *
+ * Whether a bill "exists" used to be entirely global: hiding it removed it
+ * from every month at once, past and future, because there was no concept
+ * of month membership at all. Now each month can be EXPLICITLY configured
+ * (activeKeys / configuredMonths) — but a month that's never been touched
+ * falls back to the old always-show behavior, so nothing changes for
+ * existing bills until someone actually acts on a specific month. The
+ * moment a month is configured (via the copy/start-fresh prompt, or simply
+ * by deleting one bill from it), only its explicit active list applies.
+ *
+ * @param activeKeys     Set of "key|year|month" strings — explicit "on" list
+ * @param configuredKeys Set of "year|month" strings — months set up at all
+ */
+export function applyBillRules(detected, rules = [], activeKeys = new Set(), configuredKeys = new Set(), year = null, month = null) {
   const byKey = new Map(rules.map(r => [r.key, r]));
   const out = [];
+  const monthTag = (year != null && month != null) ? `${year}|${month}` : null;
+  const monthIsConfigured = monthTag != null && configuredKeys.has(monthTag);
+  const isActiveThisMonth = key => {
+    if (!monthTag) return true; // no month context given — behave as before (used by suggestion lists etc.)
+    if (monthIsConfigured) return activeKeys.has(`${key}|${monthTag}`);
+    return true; // month never configured — legacy fallback, show everything not globally hidden
+  };
 
   detected.forEach(bill => {
     const rule = byKey.get(bill.key);
-    if (rule?.status === 'hidden') return;
+    if (rule?.status === 'hidden') return; // deleted everywhere, for good — the rare, explicit case
+    if (!isActiveThisMonth(bill.key)) return;
 
     out.push({
       ...bill,
@@ -247,6 +271,7 @@ export function applyBillRules(detected, rules = []) {
 
   // Bills the user added by hand
   rules.filter(r => r.status === 'manual').forEach(r => {
+    if (!isActiveThisMonth(r.key)) return;
     out.push({
       key:        r.key,
       label:      r.label || 'Untitled bill',

@@ -17,6 +17,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
+         getBillMonthActive, getBillMonthConfigured, setBillActiveForMonth, markMonthConfigured,
          getBillPayments, setBillPaid, syncLocalBillPayments, getAllBillPayments,
          deleteManyRows, getMonthEverything,
          getCategoryTargets, upsertCategoryTargets,
@@ -57,6 +58,21 @@ function parseLocalDate(dateStr) {
   if (!y || !m || !d) return new Date(dateStr);
   return new Date(y, m - 1, d);
 }
+// Filters a combined list of transactions down to whoever the view is
+// currently set to. Strict matching only — a transaction with no reliable
+// "who" attribution used to silently count as "mine" too (via a permissive
+// fallback), which made "Just me" and "Combined" look almost identical
+// whenever attribution was missing, and was very likely why the toggle
+// looked broken. Unattributed transactions now only show up in Combined,
+// where they belong until someone attributes them.
+export function filterByView(everything, view, myFirstName, partnerFirstName) {
+  if (view === 'mine') return everything.filter(t => firstName(t.who) === myFirstName);
+  if (view === 'partner') return everything.filter(t => firstName(t.who) === partnerFirstName);
+  return everything; // 'combined'
+}
+// Each view gets its own accent so it's immediately obvious, at a glance,
+// whose numbers are on screen — not just a label, the whole hero changes color.
+const VIEW_COLOR = { mine: '#1d4ed8', partner: '#be185d', combined: '#1a7a4a' };
 // Today's date if it falls within the given month, otherwise the 1st of that month —
 // used so "add income/expense for this month" forms default sensibly when you're
 // looking at a month other than the current one.
@@ -905,6 +921,33 @@ function UserAvatar({name,size=28}) {
     display:'flex',alignItems:'center',justifyContent:'center',
     fontSize:size*0.29,fontWeight:600,letterSpacing:'-0.02em',flexShrink:0,fontFamily:SANS}}>
     {initials}</div>;
+}
+// Shared by Home and Spending so the two can never drift apart. Three real
+// options — you, your partner, or combined — each with its own color, so
+// which one is active is obvious at a glance, not just from the label.
+function ViewToggle({view, setView, myLabel, partnerLabel}) {
+  const options = [
+    ['mine', capitalize(myLabel) || 'Me', VIEW_COLOR.mine],
+    ['partner', capitalize(partnerLabel) || 'Partner', VIEW_COLOR.partner],
+    ['combined', 'Combined', VIEW_COLOR.combined],
+  ];
+  return (
+    <div style={{display:'flex', background:C.sandMid, borderRadius:12, padding:3, marginBottom:12, gap:3}}>
+      {options.map(([k,l,color])=>(
+        <button key={k} onClick={()=>setView(k)} style={{
+          flex:1, border:'none', borderRadius:9, padding:'8px 4px', fontSize:12, fontWeight:600,
+          cursor:'pointer', fontFamily:SANS, background: view===k ? color : 'transparent',
+          color: view===k ? '#fff' : C.inkSoft,
+          boxShadow: view===k ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+          display:'flex', alignItems:'center', justifyContent:'center', gap:5,
+          transition:'background 0.15s, color 0.15s', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'
+        }}>
+          {k==='combined' && <Heart size={11} color={view===k?'#fff':C.inkSoft} fill={view===k?'#fff':'none'}/>}
+          {l}
+        </button>
+      ))}
+    </div>
+  );
 }
 function Bar({spent,target,color}) {
   const pct=Math.min((spent/Math.max(target,1))*100,100);
@@ -2291,6 +2334,7 @@ function GoalRow({goal, accent, onUpdate, onDeposit}) {
 
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
                   year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,onAddTxn,
+                  billActiveKeys,billConfiguredMonths,
                   showToast,profile,partnerName,goals,onSaveGoals,depositingGoalId,setDepositingGoalId,
                   onEditTxnSave,onDeleteTxn,setTab}) {
   const myName = profile?.name || 'You';
@@ -2329,7 +2373,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // Recurring charges are worked out from your own history rather than kept in
   // a hardcoded list. Uses the exact same buildSchedule the Bills tab uses, so
   // the two tabs never disagree about what's due, paid, or overdue.
-  const recurring = applyBillRules(detectRecurring(history || []), billRules || [])
+  const recurring = applyBillRules(detectRecurring(history || []), billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month)
     .filter(b => b.confidence === 'high');
   const sched = buildSchedule(recurring, everythingThisMonth, year, month, new Date(), billPayments || []);
   const dueTotal = sched.outstandingTotal;
@@ -2341,10 +2385,9 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   const carriedOverTotal = carriedOver.reduce((a,b)=>a+b.amount,0);
 
   // Same logic for the card payment: only pledge it if it hasn't gone out yet
-  // "Mine" shows only your own transactions. "Combined" shows the household.
-  const allTx = view==='mine'
-    ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
-    : everything;
+  // Which numbers show depends on the view: just yours, just your partner's,
+  // or the whole household together.
+  const allTx = filterByView(everything, view, me, firstName(partnerName));
 
   const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
@@ -2415,27 +2458,13 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   return (
     <div style={{padding:'16px 16px 0'}}>
       {/* Dashboard — the critical numbers, front and center */}
-      <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
-        marginBottom:12}}>
-        {[['mine','Just me'],['combined','Combined']].map(([k,l])=>(
-          <button key={k} onClick={()=>setView(k)} style={{flex:1,border:'none',
-            borderRadius:9,padding:'8px 0',fontSize:13,fontWeight:600,cursor:'pointer',
-            fontFamily:SANS,background:view===k?C.white:'transparent',
-            color:view===k?C.ink:C.inkSoft,
-            boxShadow:view===k?'0 1px 3px rgba(0,0,0,0.1)':'none',
-            display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
-            {k==='combined'&&<Heart size={12} color={view===k?'#be185d':C.inkSoft}
-              fill={view===k?'#be185d':'none'}/>}
-            {l}
-          </button>
-        ))}
-      </div>
+      <ViewToggle view={view} setView={setView} myLabel={me} partnerLabel={firstName(partnerName)}/>
 
-      {/* Hero */}
-      <Card style={{background:C.green,padding:'20px 20px'}}>
+      {/* Hero — recolors with the view, so whose numbers you're looking at is obvious at a glance */}
+      <Card style={{background:VIEW_COLOR[view] || C.green,padding:'20px 20px'}}>
         <p style={{fontSize:11,color:'rgba(255,255,255,0.7)',textTransform:'uppercase',
           letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>
-          Available Money
+          Available Money · {view==='mine' ? capitalize(myName) : view==='partner' ? capitalize(partnerName) : 'Combined'}
         </p>
         <p style={{fontFamily:SERIF,fontSize:44,fontWeight:600,color:'#fff',margin:'0 0 16px',
           letterSpacing:'-0.02em',lineHeight:1}}>
@@ -2758,7 +2787,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
 // ─── SPENDING TAB ─────────────────────────────────────────────────────────────
 export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcceptSuggested,
-                  onAddCat,onDeleteCat,profile,onReviewOther,otherCount,
+                  onAddCat,onDeleteCat,profile,partnerName,onReviewOther,otherCount,
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
                   setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave,
@@ -2778,10 +2807,9 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   const me=firstName(profile?.name);
   const everything=[...txns,...bankImports];
 
-  // "Mine" shows only your own transactions. "Combined" shows the household.
-  const allTx = view==='mine'
-    ? everything.filter(t=>!firstName(t.who)||firstName(t.who)===me)
-    : everything;
+  // Which numbers show depends on the view: just yours, just your partner's,
+  // or the whole household together.
+  const allTx = filterByView(everything, view, me, firstName(partnerName));
 
   const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
@@ -2821,10 +2849,12 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   return (
     <div style={{padding:'16px 16px 0'}}>
       {/* Dashboard — mirrors the Bills tab so the two feel like one system */}
-      <Card style={{background:C.green,padding:'20px 20px', marginBottom:12}}>
+      <ViewToggle view={view} setView={setView} myLabel={me} partnerLabel={firstName(partnerName)}/>
+
+      <Card style={{background:VIEW_COLOR[view] || C.green,padding:'20px 20px', marginBottom:12}}>
         <p style={{fontSize:11,color:'rgba(255,255,255,0.7)',textTransform:'uppercase',
           letterSpacing:'0.1em',margin:'0 0 4px',fontFamily:SANS}}>
-          Still Available To Spend
+          Still Available To Spend · {view==='mine' ? capitalize(me) : view==='partner' ? capitalize(firstName(partnerName)) : 'Combined'}
         </p>
         <p style={{fontFamily:SERIF,fontSize:40,fontWeight:600,color:'#fff',margin:'0 0 14px',
           letterSpacing:'-0.02em',lineHeight:1}}>
@@ -2889,23 +2919,6 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
           </p>
         )}
       </Card>
-
-
-      <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
-        marginBottom:12}}>
-        {[['mine','Just me'],['combined','Combined']].map(([k,l])=>(
-          <button key={k} onClick={()=>setView(k)} style={{flex:1,border:'none',
-            borderRadius:9,padding:'8px 0',fontSize:13,fontWeight:600,cursor:'pointer',
-            fontFamily:SANS,background:view===k?C.white:'transparent',
-            color:view===k?C.ink:C.inkSoft,
-            boxShadow:view===k?'0 1px 3px rgba(0,0,0,0.1)':'none',
-            display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
-            {k==='combined'&&<Heart size={12} color={view===k?'#be185d':C.inkSoft}
-              fill={view===k?'#be185d':'none'}/>}
-            {l}
-          </button>
-        ))}
-      </div>
 
       <button onClick={()=>setShowScan(true)} style={{
         width:'100%', border:'none', borderRadius:14, padding:'14px 16px', marginBottom:12,
@@ -3460,7 +3473,7 @@ export function HistoryTab({txns,bankImports,allCats,profile,partnerName,onDelet
 }
 
 // ─── Bill editor ──────────────────────────────────────────────────────────────
-export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
+export function BillEditModal({ bill, allCats, onSave, onDelete, onDeleteEverywhere, onClose }) {
   const [label,  setLabel]  = useState(bill?.label || '');
   const [amount, setAmount] = useState(bill?.amount ?? '');
   const [day,    setDay]    = useState(bill?.day ?? 1);
@@ -3607,17 +3620,25 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
         </button>
 
         {bill && (
-          <button onClick={() => {
-              const msg = bill.manual
-                ? `Delete "${bill.label}" for good?`
-                : `Remove "${bill.label}" from your bills? Any charges already in your statements stay put — this just stops tracking it as a bill.`;
-              if (window.confirm(msg)) onDelete(bill);
-            }}
-            style={{ width:'100%', border:`1px solid ${C.red}44`, padding:'13px',
-              borderRadius:12, background:C.white, color:C.red, fontSize:14,
-              fontWeight:600, cursor:'pointer', fontFamily:SANS }}>
-            Delete this bill
-          </button>
+          <>
+            <button onClick={() => onDelete(bill)}
+              style={{ width:'100%', border:`1px solid ${C.red}44`, padding:'13px',
+                borderRadius:12, background:C.white, color:C.red, fontSize:14,
+                fontWeight:600, cursor:'pointer', fontFamily:SANS }}>
+              Remove from this month
+            </button>
+            <button onClick={() => {
+                const msg = bill.manual
+                  ? `Delete "${bill.label}" for good, from every month?`
+                  : `Stop tracking "${bill.label}" as a bill in every month, past and future? Real charges already in your statements are never touched — this only affects the bill tracker.`;
+                if (window.confirm(msg)) onDeleteEverywhere(bill);
+              }}
+              style={{ width:'100%', border:'none', padding:'8px', marginTop:6,
+                background:'none', color:C.inkSoft, fontSize:11,
+                cursor:'pointer', fontFamily:SANS, textDecoration:'underline' }}>
+              Delete from every month instead
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -3625,7 +3646,7 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onClose }) {
 }
 
 // ─── CALENDAR TAB ────────────────────────────────────────────────────────────
-export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
   const [selectedDay, setSelectedDay] = useState(null);
   const today = new Date();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -3633,7 +3654,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
   // Merged bills (detected + manual overrides), same source of truth as the Bills tab
   const detected = detectRecurring(history || []);
-  const mergedBills = applyBillRules(detected, billRules || []).filter(b => b.confidence === 'high');
+  const mergedBills = applyBillRules(detected, billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month).filter(b => b.confidence === 'high');
 
   const billsByDay = {};
   mergedBills.forEach(b => {
@@ -3802,6 +3823,8 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
           setExpectedIncome={setExpectedIncome}
           onSaveRule={onSaveRule}
           onDeleteRule={onDeleteRule}
+          onDeleteBillForMonth={onDeleteBillForMonth}
+          allMonthBillKeys={mergedBills.map(b=>b.key)}
           showToast={showToast}
           onClose={() => setSelectedDay(null)}
         />
@@ -3812,7 +3835,8 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
 // ─── DAY DETAIL PANEL (calendar click-through, everything editable) ──────────
 function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, deposits, goals, onSaveGoals,
-                          expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, showToast, onClose}) {
+                          expectedIncome, setExpectedIncome, onSaveRule, onDeleteRule, onDeleteBillForMonth,
+                          allMonthBillKeys, showToast, onClose}) {
   const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
   const dateLabel = new Date(year, month, day).toLocaleDateString('en-CA', {weekday:'long', month:'long', day:'numeric'});
 
@@ -3891,14 +3915,10 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
     setAddingBill(false); setNewBillLabel(''); setNewBillAmount('');
   }
 
+  /** Removes this bill from just the current month, same as the Bills tab —
+   *  every other month keeps it as it was. */
   async function removeBill(bill) {
-    if (bill.manual) {
-      await onDeleteRule(bill.key);
-      showToast(`Deleted "${bill.label}"`);
-    } else {
-      await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
-      showToast(`Removed "${bill.label}" from your bills`);
-    }
+    await onDeleteBillForMonth(bill, allMonthBillKeys || []);
   }
 
   function saveDeposit() {
@@ -4100,14 +4120,21 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
-                          billPayments, allBillPayments, onTogglePaid, profile, setTab}) {
+                          billPayments, allBillPayments, onTogglePaid, profile, setTab,
+                          billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onConfigureMonth}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
 
   const detected = detectRecurring(history || []);
-  const bills    = applyBillRules(detected, billRules || []);
+  // Suggestions ("might be bills") are patterns noticed in your statements —
+  // unaffected by any month's active/excluded list, since confirming one is
+  // how it gets added to a month in the first place.
+  const allBillsUnscoped = applyBillRules(detected, billRules || []);
+  const suggested = allBillsUnscoped.filter(b => b.confidence !== 'high');
 
-  const confirmed  = bills.filter(b => b.confidence === 'high');
-  const suggested  = bills.filter(b => b.confidence !== 'high');
+  // What's actually on for THIS month specifically.
+  const thisMonthIsConfigured = (billConfiguredMonths || new Set()).has(`${year}|${month}`);
+  const bills = applyBillRules(detected, billRules || [], billActiveKeys || new Set(), billConfiguredMonths || new Set(), year, month);
+  const confirmed = bills.filter(b => b.confidence === 'high');
   const sched      = buildSchedule(confirmed, [...txns, ...bankImports], year, month,
                        new Date(), billPayments || []);
   const weekTotal  = sched.dueThisWeek.reduce((a, e) => a + e.amount, 0);
@@ -4127,18 +4154,25 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 
   async function saveRule(rule) { await onSaveRule(rule); setEditing(undefined); }
 
-  /** Delete a bill for good. Manually-added bills are removed outright —
-   *  the row is gone. Auto-detected bills can't erase the real transactions
-   *  they were found from, so this stops tracking the pattern as a bill
-   *  instead; either way, there's no "hidden bills" list to manage — once
-   *  deleted, it's off your list. */
+  /** The default "delete" — removes this bill from THIS month only. Every
+   *  other month, past or future, keeps it exactly as it was. This is what
+   *  fixes deleting a bill wiping it out everywhere. */
   async function removeRule(bill) {
+    await onDeleteBillForMonth(bill, confirmed.map(b => b.key));
+    setEditing(undefined);
+  }
+
+  /** The rare, explicit "actually delete this everywhere" — a manual bill's
+   *  row disappears for good; an auto-detected pattern stops being tracked
+   *  as a bill at all, in any month, though the real transactions behind it
+   *  are never touched. */
+  async function removeRuleEverywhere(bill) {
     if (bill.manual) {
       await onDeleteRule(bill.key);
-      showToast(`Deleted "${bill.label}"`);
+      showToast(`Deleted "${bill.label}" everywhere`);
     } else {
       await onSaveRule({ key: bill.key, status: 'hidden', label: bill.label });
-      showToast(`Removed "${bill.label}" from your bills`);
+      showToast(`Removed "${bill.label}" from every month`);
     }
     setEditing(undefined);
   }
@@ -4291,6 +4325,31 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
         </p>
       </Card>
 
+      {!thisMonthIsConfigured && confirmed.length > 0 && (
+        <div style={{ background:C.blue+'0d', border:`1px solid ${C.blue}33`, borderRadius:14,
+          padding:'14px 16px', marginBottom:12 }}>
+          <p style={{ margin:'0 0 4px', fontSize:13, fontWeight:700, color:C.blue, fontFamily:SANS }}>
+            New month — keep these {confirmed.length} bill{confirmed.length===1?'':'s'}, or start fresh?
+          </p>
+          <p style={{ margin:'0 0 10px', fontSize:12, color:C.inkMid, fontFamily:SANS, lineHeight:1.6 }}>
+            {MONTHS[month]} hasn't been set up yet. Bills from previous months are showing for now —
+            asking just this once so you can decide before charges start rolling in.
+          </p>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={()=>onConfigureMonth('empty', [])} style={{
+              flex:1, border:`1px solid ${C.sandDark}`, background:'white', color:C.ink,
+              padding:'10px', borderRadius:10, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer' }}>
+              Start {MONTHS[month]} empty
+            </button>
+            <button onClick={()=>onConfigureMonth('copy', confirmed.map(b=>b.key))} style={{
+              flex:1, border:'none', background:C.blue, color:'white',
+              padding:'10px', borderRadius:10, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer' }}>
+              Keep these bills
+            </button>
+          </div>
+        </div>
+      )}
+
       {billsLocal && (
         <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:14,
           padding:'12px 16px', marginBottom:12 }}>
@@ -4438,7 +4497,7 @@ create policy "allow all on bill_payments" on bill_payments
 
       {editing !== undefined && (
         <BillEditModal bill={editing} allCats={allCats}
-          onSave={saveRule} onDelete={removeRule}
+          onSave={saveRule} onDelete={removeRule} onDeleteEverywhere={removeRuleEverywhere}
           onClose={() => setEditing(undefined)}/>
       )}
     </div>
@@ -6293,6 +6352,8 @@ export default function App() {
   const [billsLocal, setBillsLocal]=useState(false);
   const [billPayments,setBillPayments]=useState([]);
   const [allBillPayments,setAllBillPayments]=useState([]); // unscoped by month — for cross-month overdue carry-forward
+  const [billMonthActive, setBillMonthActiveState]=useState([]); // [{key,year,month}] — which bills are on for which month
+  const [billMonthConfigured, setBillMonthConfiguredState]=useState([]); // [{year,month}] — months set up at all
   const [income,     setIncome    ]=useState(DEF_INCOME);
   const [expectedIncome, setExpectedIncome]=useState(() => {
     try {
@@ -6325,6 +6386,12 @@ export default function App() {
   // including custom ones added later.
   const allCats=[...DEFAULT_CATS,...customCats]
     .sort((a,b)=>a.label.localeCompare(b.label,'en',{sensitivity:'base'}));
+
+  // Fast lookups for "which bills are on for the month being viewed" — see
+  // applyBillRules() in recurring.js for how these get used.
+  const billActiveKeys = new Set(billMonthActive.map(r => `${r.key}|${r.year}|${r.month}`));
+  const billConfiguredMonths = new Set(billMonthConfigured.map(r => `${r.year}|${r.month}`));
+  const thisMonthIsConfigured = billConfiguredMonths.has(`${year}|${month}`);
 
   // The other household member's display name — read from their own
   // transactions (whoever isn't you), not hardcoded. Falls back to a plain
@@ -6410,6 +6477,10 @@ export default function App() {
         // Unscoped by month — lets an unpaid bill from a prior month carry
         // forward as overdue instead of disappearing when the month changes
         getAllBillPayments().then(setAllBillPayments).catch(()=>{});
+        // Which bills are switched on for which month, and which months have
+        // been explicitly set up at all — small datasets, fetched in full
+        getBillMonthActive().then(setBillMonthActiveState).catch(()=>{});
+        getBillMonthConfigured().then(setBillMonthConfiguredState).catch(()=>{});
         // Load category targets from Supabase (shared with partner)
         const remoteTargets = await getCategoryTargets();
         if(Object.keys(remoteTargets).length > 0) {
@@ -6597,6 +6668,41 @@ export default function App() {
       await deleteBillRule(key);
       setBillRules(await getBillRules());
     } catch (e) { showToast('Could not remove — ' + e.message); }
+  }
+
+  /** The actual "delete" a person reaches for from the Bills tab. Removes a
+   *  bill from THIS month only — every other month, past or future, is
+   *  untouched. If this month hasn't been explicitly configured yet, this
+   *  is also the moment it becomes explicit: everything else currently
+   *  showing gets carried over as-is, and only the one bill being deleted
+   *  drops out. */
+  async function deleteBillForMonth(bill, visibleKeysThisMonth) {
+    const monthTag = `${year}|${month}`;
+    const alreadyConfigured = billMonthConfigured.some(r => `${r.year}|${r.month}` === monthTag);
+    try {
+      if (!alreadyConfigured) {
+        const keep = visibleKeysThisMonth.filter(k => k !== bill.key);
+        await markMonthConfigured(year, month, keep);
+        setBillMonthConfiguredState(prev => [...prev, { year, month }]);
+        setBillMonthActiveState(prev => [...prev, ...keep.map(k => ({ key: k, year, month }))]);
+      } else {
+        await setBillActiveForMonth(bill.key, year, month, false);
+        setBillMonthActiveState(prev => prev.filter(r => !(r.key === bill.key && r.year === year && r.month === month)));
+      }
+      showToast(`Removed "${bill.label}" from ${MONTHS[month]} — other months are unaffected`);
+    } catch (e) { showToast('Could not remove that bill — ' + e.message); }
+  }
+
+  /** The one-time "copy last month's bills, or start fresh?" prompt. Either
+   *  choice marks the month configured, so the prompt never asks twice. */
+  async function configureThisMonth(choice, visibleKeysThisMonth) {
+    try {
+      const seed = choice === 'copy' ? visibleKeysThisMonth : [];
+      await markMonthConfigured(year, month, seed);
+      setBillMonthConfiguredState(prev => [...prev, { year, month }]);
+      setBillMonthActiveState(prev => [...prev, ...seed.map(k => ({ key: k, year, month }))]);
+      showToast(choice === 'copy' ? `Copied ${seed.length} bill${seed.length===1?'':'s'} into ${MONTHS[month]}` : `${MONTHS[month]} starts with no bills — add them as you go`);
+    } catch (e) { showToast('Could not set up this month — ' + e.message); }
   }
 
   async function handleSaveNote(id, type, note) {
@@ -6845,6 +6951,7 @@ export default function App() {
           allCats={allCats} catTargets={catTargets} year={year} month={month}
           view={view} setView={setView} history={history} billRules={billRules}
           billPayments={billPayments} allBillPayments={allBillPayments} profile={profile} partnerName={partnerName}
+          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome} onAddTxn={addTxn}
           showToast={showToast} goals={goals} onSaveGoals={saveGoals}
           depositingGoalId={depositingGoalId} setDepositingGoalId={setDepositingGoalId}
@@ -6852,7 +6959,7 @@ export default function App() {
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
           allCats={allCats} catTargets={catTargets}
           suggested={suggested} onAcceptSuggested={acceptSuggested}
-          onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile}
+          onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile} partnerName={partnerName}
           onReviewOther={openReview}
           otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}
           onChangeCategory={handleChangeCategory}
@@ -6872,9 +6979,13 @@ export default function App() {
           bankImports={imports} allCats={allCats} year={year} month={month}
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
           billPayments={billPayments} allBillPayments={allBillPayments} onTogglePaid={toggleBillPaid} profile={profile}
+          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
+          onDeleteBillForMonth={deleteBillForMonth} onConfigureMonth={configureThisMonth}
           onSaveRule={saveBillRule} onDeleteRule={removeBillRule} setTab={setTab}/>}
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
+          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
+          onDeleteBillForMonth={deleteBillForMonth}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
           goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}

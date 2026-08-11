@@ -7,7 +7,7 @@
  */
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { detectRecurring, splitRecurring, getCarriedOverBills } from '../src/recurring.js';
+import { detectRecurring, splitRecurring, getCarriedOverBills, applyBillRules } from '../src/recurring.js';
 import { getBudgetAdvice } from '../src/advice.js';
 import { categorizeBudget } from '../src/categorize.js';
 import { findSharedMoments, summariseTogether } from '../src/together.js';
@@ -15,7 +15,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal } from '../src/App.jsx';
+  ResetModal, BillEditModal, DuplicateModal, filterByView } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -387,7 +387,9 @@ check('render SpendingTab (no history)', () => renderToString(React.createElemen
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
   showToast: noop, billsLocal: false, setTab: noop,
-  billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' } };
+  billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' },
+  billActiveKeys: new Set(), billConfiguredMonths: new Set(),
+  onDeleteBillForMonth: noop, onConfigureMonth: noop };
 
 check('render BillsTab', () => renderToString(React.createElement(BillsTab, {
   history, txns, bankImports: imports, allCats, year: 2026, month: 6, ...billProps })));
@@ -422,21 +424,202 @@ check('BillsTab: no "hidden bills" restore section exists — deleting is final'
   if (html.includes('Restore')) throw new Error('expected no "Restore" affordance anywhere');
 });
 
+// This is the actual bug report: deleting a bill removed it from every
+// month, past and future, because there was no concept of "this month" at
+// all — a single global status flag was the only mechanism. These test
+// applyBillRules() directly, since that's where the fix genuinely lives.
+check('applyBillRules: deleting a bill for one month leaves other months untouched', () => {
+  const detected = [{ key:'netflix', label:'Netflix', amount:9.03, day:2, monthsSeen:3, confidence:'high', varies:false }];
+  const rules = [{ key:'netflix', status:'confirmed', label:'Netflix' }];
+
+  // August (month 7) is configured with Netflix explicitly removed
+  const activeKeys = new Set(); // Netflix NOT included for August — it was deleted
+  const configuredMonths = new Set(['2026|7']);
+
+  const august = applyBillRules(detected, rules, activeKeys, configuredMonths, 2026, 7);
+  if (august.some(b => b.key === 'netflix')) {
+    throw new Error('expected Netflix to be gone from August after being deleted there');
+  }
+
+  // July (month 6) was never touched — must still show Netflix via the
+  // legacy fallback, completely unaffected by August's deletion
+  const july = applyBillRules(detected, rules, activeKeys, configuredMonths, 2026, 6);
+  if (!july.some(b => b.key === 'netflix')) {
+    throw new Error('deleting Netflix from August also removed it from July — deletion is not month-scoped');
+  }
+
+  // September (month 8), also never touched, must likewise be unaffected
+  const september = applyBillRules(detected, rules, activeKeys, configuredMonths, 2026, 8);
+  if (!september.some(b => b.key === 'netflix')) {
+    throw new Error('deleting Netflix from August also removed it from September — deletion is not month-scoped');
+  }
+});
+
+check('applyBillRules: an unconfigured month falls back to showing everything (no silent data loss)', () => {
+  const detected = [{ key:'netflix', label:'Netflix', amount:9.03, day:2, monthsSeen:3, confidence:'high', varies:false }];
+  const rules = [{ key:'netflix', status:'confirmed', label:'Netflix' }];
+  // No active keys and no configured months at all — this month has simply
+  // never been touched by the new system
+  const result = applyBillRules(detected, rules, new Set(), new Set(), 2026, 6);
+  if (!result.some(b => b.key === 'netflix')) {
+    throw new Error('an untouched month should still show existing confirmed bills via the legacy fallback');
+  }
+});
+
+check('applyBillRules: status "hidden" still means gone from every month (the rare permanent case)', () => {
+  const detected = [{ key:'netflix', label:'Netflix', amount:9.03, day:2, monthsSeen:3, confidence:'high', varies:false }];
+  const rules = [{ key:'netflix', status:'hidden', label:'Netflix' }];
+  const july = applyBillRules(detected, rules, new Set(), new Set(['2026|6']), 2026, 6);
+  const august = applyBillRules(detected, rules, new Set(), new Set(['2026|7']), 2026, 7);
+  if (july.some(b => b.key === 'netflix') || august.some(b => b.key === 'netflix')) {
+    throw new Error('a globally-hidden bill should not appear in any month');
+  }
+});
+
+// The "Just me / Partner / Combined" toggle. The bug report was that it did
+// "nothing at all" — traced to a permissive fallback that let unattributed
+// transactions silently count as "mine" too, which made Just me and
+// Combined look nearly identical whenever attribution was missing.
+check('filterByView: "mine" only includes strictly-matching transactions, no fallback', () => {
+  const rows = [
+    { id:'1', who:'Jordan Yerbury', amount:50 },
+    { id:'2', who:'Mariel Smith', amount:80 },
+    { id:'3', who:'', amount:20 },       // unattributed
+    { id:'4', amount:15 },               // who missing entirely
+  ];
+  const mine = filterByView(rows, 'mine', 'jordan', 'mariel');
+  if (mine.length !== 1 || mine[0].id !== '1') {
+    throw new Error(`expected only Jordan's own transaction in "mine", got ${JSON.stringify(mine.map(r=>r.id))}`);
+  }
+});
+
+check('filterByView: "partner" only includes the partner\'s transactions', () => {
+  const rows = [
+    { id:'1', who:'Jordan Yerbury', amount:50 },
+    { id:'2', who:'Mariel Smith', amount:80 },
+    { id:'3', who:'', amount:20 },
+  ];
+  const partner = filterByView(rows, 'partner', 'jordan', 'mariel');
+  if (partner.length !== 1 || partner[0].id !== '2') {
+    throw new Error(`expected only Mariel's transaction in "partner", got ${JSON.stringify(partner.map(r=>r.id))}`);
+  }
+});
+
+check('filterByView: "combined" includes everyone, attributed or not', () => {
+  const rows = [
+    { id:'1', who:'Jordan Yerbury', amount:50 },
+    { id:'2', who:'Mariel Smith', amount:80 },
+    { id:'3', who:'', amount:20 },
+  ];
+  const combined = filterByView(rows, 'combined', 'jordan', 'mariel');
+  if (combined.length !== 3) {
+    throw new Error(`expected all 3 transactions in "combined", got ${combined.length}`);
+  }
+});
+
+check('HomeTab: Just me / Partner / Combined actually produce different numbers', () => {
+  const myTxn = mk({ description:'LOBLAWS 1032', amount:50, category:'groceries', who:'Jordan Yerbury' });
+  const partnerTxn = mk({ description:'WALMART', amount:80, category:'groceries', who:'Mariel Smith' });
+
+  const render = (view) => renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [myTxn, partnerTxn], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel Smith', view, setView: noop,
+    history: [], billRules: [], billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+
+  const mine = render('mine');
+  const partnerView = render('partner');
+  const combined = render('combined');
+
+  if (!mine.includes('50.00') || mine.includes('80.00')) {
+    throw new Error('"mine" view should show only the $50 Jordan transaction, not the $80 one');
+  }
+  if (!partnerView.includes('80.00') || partnerView.includes('50.00')) {
+    throw new Error('"partner" view should show only the $80 Mariel transaction, not the $50 one');
+  }
+  if (!combined.includes('130.00')) {
+    throw new Error('"combined" view should show both added together ($130)');
+  }
+  if (mine === combined) {
+    throw new Error('"mine" and "combined" rendered identically — the toggle is not actually filtering anything');
+  }
+});
+
+check('ViewToggle: three distinct options render, each with its own accent when active', () => {
+  const render = (view) => renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view, setView: noop,
+    history: [], billRules: [], billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+
+  const combinedHtml = render('combined');
+  if (!combinedHtml.includes('Jordan')) throw new Error('expected "Jordan" as one of the toggle options');
+  if (!combinedHtml.includes('Mariel')) throw new Error('expected "Mariel" as one of the toggle options');
+  if (!combinedHtml.includes('Combined')) throw new Error('expected "Combined" as one of the toggle options');
+
+  // Each view's own accent color shows up (as the hero background, and the
+  // toggle's active-button background) only once that view is selected —
+  // proving the coloring is genuinely tied to which view is active, not
+  // just three static buttons that happen to mention names.
+  const mineHtml = render('mine');
+  if (!mineHtml.includes('#1d4ed8')) throw new Error('expected the "mine" accent color (#1d4ed8) when mine is active');
+
+  const partnerHtml = render('partner');
+  if (!partnerHtml.includes('#be185d')) throw new Error('expected the "partner" accent color (#be185d) when partner is active');
+});
+
+check('BillsTab: shows the copy-or-start-fresh banner for an unconfigured month with existing bills', () => {
+  const html = renderToString(React.createElement(BillsTab, {
+    history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+    ...billProps, billRules: [
+      { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
+    ],
+    billActiveKeys: new Set(), billConfiguredMonths: new Set(), // unconfigured
+  }));
+  if (!html.includes('keep these') && !html.includes('start fresh')) {
+    throw new Error('expected the new-month copy-or-start-fresh banner to render for an unconfigured month with bills');
+  }
+});
+
+check('BillsTab: does not show the copy-or-start-fresh banner once a month is configured', () => {
+  const html = renderToString(React.createElement(BillsTab, {
+    history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+    ...billProps, billRules: [
+      { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
+    ],
+    billActiveKeys: new Set(['stela rent|2026|6']), billConfiguredMonths: new Set(['2026|6']),
+  }));
+  if (html.includes('start fresh') || html.includes('Keep these bills')) {
+    throw new Error('the one-time banner should not reappear once a month has been configured');
+  }
+});
+
 check('render BillEditModal (existing)', () => renderToString(React.createElement(BillEditModal, {
   bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
-  allCats, onSave: noop, onDelete: noop, onClose: noop })));
+  allCats, onSave: noop, onDelete: noop, onDeleteEverywhere: noop, onClose: noop })));
 
-check('BillEditModal: delete button always says "Delete this bill", no ambiguous "Not a bill"', () => {
+check('BillEditModal: month-scoped delete is primary, "everywhere" is a clearly separate secondary action', () => {
   const html = renderToString(React.createElement(BillEditModal, {
     bill: { key:'x', label:'Rent', amount:1900, day:30, category:'other', detected:true, monthsSeen:4 },
-    allCats, onSave: noop, onDelete: noop, onClose: noop
+    allCats, onSave: noop, onDelete: noop, onDeleteEverywhere: noop, onClose: noop
   }));
   if (html.includes('Not a bill')) throw new Error('found the old ambiguous "Not a bill" wording');
-  if (!html.includes('Delete this bill')) throw new Error('expected a consistent "Delete this bill" button');
+  if (!html.includes('Remove from this month')) throw new Error('expected the month-scoped delete to be the primary action');
+  if (!html.includes('every month')) throw new Error('expected a clearly-labeled "delete from every month" secondary option');
 });
 
 check('render BillEditModal (new)', () => renderToString(React.createElement(BillEditModal, {
-  bill: null, allCats, onSave: noop, onDelete: noop, onClose: noop })));
+  bill: null, allCats, onSave: noop, onDelete: noop, onDeleteEverywhere: noop, onClose: noop })));
 
 check('render BillsTab (no history)', () => renderToString(React.createElement(BillsTab, {
   history: [], txns: [], bankImports: [], allCats, year: 2026, month: 6, ...billProps })));

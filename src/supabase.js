@@ -318,6 +318,89 @@ export async function deleteBillRule(key) {
   }
 }
 
+// ── Which bills apply to which month ────────────────────────────────────────
+// Whether a bill "exists" used to be entirely global — hiding it removed it
+// from every month, past and future, because detection + a single status
+// flag was the only mechanism. These two tables make month membership
+// explicit: bill_month_active says which bills are on for a given month,
+// bill_month_configured marks a month as having been set up at all (so an
+// untouched month can fall back to the old always-show behavior rather than
+// looking mysteriously empty the first time you open it).
+const LOCAL_ACTIVE_KEY = 'b42_bill_month_active';
+const LOCAL_CONFIGURED_KEY = 'b42_bill_month_configured';
+const readLocalActive = () => { try { return JSON.parse(localStorage.getItem(LOCAL_ACTIVE_KEY) || '[]'); } catch { return []; } };
+const writeLocalActive = rows => { try { localStorage.setItem(LOCAL_ACTIVE_KEY, JSON.stringify(rows)); } catch {} };
+const readLocalConfigured = () => { try { return JSON.parse(localStorage.getItem(LOCAL_CONFIGURED_KEY) || '[]'); } catch { return []; } };
+const writeLocalConfigured = rows => { try { localStorage.setItem(LOCAL_CONFIGURED_KEY, JSON.stringify(rows)); } catch {} };
+
+export async function getBillMonthActive() {
+  try {
+    const { data, error } = await supabase.from('bill_month_active').select('*');
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    return readLocalActive();
+  }
+}
+
+export async function getBillMonthConfigured() {
+  try {
+    const { data, error } = await supabase.from('bill_month_configured').select('*');
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    return readLocalConfigured();
+  }
+}
+
+/** Sets whether a bill is active for one specific month, without touching
+ *  any other month. This is what "delete" actually calls now. */
+export async function setBillActiveForMonth(key, year, month, active) {
+  try {
+    if (active) {
+      const { error } = await supabase.from('bill_month_active')
+        .upsert({ key, year, month }, { onConflict: 'key,year,month' });
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from('bill_month_active')
+        .delete().eq('key', key).eq('year', year).eq('month', month);
+      if (error) throw error;
+    }
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    const rows = readLocalActive().filter(r => !(r.key === key && r.year === year && r.month === month));
+    if (active) rows.push({ key, year, month });
+    writeLocalActive(rows);
+  }
+}
+
+/** Marks a month as explicitly set up, optionally seeding it with a starting
+ *  set of active bill keys (e.g. everything copied from last month). */
+export async function markMonthConfigured(year, month, activeKeys = []) {
+  try {
+    const { error } = await supabase.from('bill_month_configured')
+      .upsert({ year, month }, { onConflict: 'year,month' });
+    if (error) throw error;
+    if (activeKeys.length) {
+      const rows = activeKeys.map(key => ({ key, year, month }));
+      const { error: e2 } = await supabase.from('bill_month_active').upsert(rows, { onConflict: 'key,year,month' });
+      if (e2) throw e2;
+    }
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+    const configured = readLocalConfigured().filter(r => !(r.year === year && r.month === month));
+    configured.push({ year, month });
+    writeLocalConfigured(configured);
+    if (activeKeys.length) {
+      const rows = readLocalActive().filter(r => !(r.year === year && r.month === month && activeKeys.includes(r.key)));
+      activeKeys.forEach(key => rows.push({ key, year, month }));
+      writeLocalActive(rows);
+    }
+  }
+}
+
 /** Push anything saved locally up once the table exists. */
 export async function syncLocalBillRules() {
   const local = readLocalRules();
