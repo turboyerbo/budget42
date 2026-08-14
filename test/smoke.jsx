@@ -15,7 +15,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView } from '../src/App.jsx';
+  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -554,6 +554,34 @@ check('filterByView: "combined" includes everyone, attributed or not', () => {
   if (combined.length !== 3) {
     throw new Error(`expected all 3 transactions in "combined", got ${combined.length}`);
   }
+});
+
+// Recording on your partner's behalf. The bug report: AddTab's "Who spent
+// this?" picker looked functional but was completely ignored — every entry
+// was silently attributed to whoever was logged in, regardless of which
+// button was tapped. resolveWho() is the fix, extracted so it can't drift
+// out of sync across the three places that now use it (AddTab, receipt
+// scanning, manual income).
+check('resolveWho: selecting yourself resolves to your own full name', () => {
+  const who = resolveWho('jordan', 'Jordan Yerbury', 'Mariel Smith', 'jordan');
+  if (who !== 'Jordan Yerbury') throw new Error(`expected "Jordan Yerbury", got "${who}"`);
+});
+
+check('resolveWho: selecting your partner resolves to THEIR full name, not yours', () => {
+  const who = resolveWho('mariel', 'Jordan Yerbury', 'Mariel Smith', 'jordan');
+  if (who !== 'Mariel Smith') throw new Error(`expected "Mariel Smith" (the partner), got "${who}" — recording on a partner's behalf is broken`);
+});
+
+check('resolveWho: works with the "mine"/"partner" selection style too (manual income picker)', () => {
+  const mine = resolveWho('mine', 'Jordan Yerbury', 'Mariel Smith', 'mine');
+  const partner = resolveWho('partner', 'Jordan Yerbury', 'Mariel Smith', 'mine');
+  if (mine !== 'Jordan Yerbury') throw new Error(`expected "Jordan Yerbury" for "mine", got "${mine}"`);
+  if (partner !== 'Mariel Smith') throw new Error(`expected "Mariel Smith" for "partner", got "${partner}"`);
+});
+
+check('resolveWho: falls back sensibly if the partner has no name on file yet', () => {
+  const who = resolveWho('partner', 'Jordan Yerbury', '', 'mine');
+  if (who === 'unknown' || !who) throw new Error('expected a usable fallback name, not empty/unknown, when partnerFullName is blank');
 });
 
 check('HomeTab: Just me / Partner / Combined actually produce different numbers', () => {

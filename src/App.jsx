@@ -73,6 +73,17 @@ export function filterByView(everything, view, myFirstName, partnerFirstName) {
 // Each view gets its own accent so it's immediately obvious, at a glance,
 // whose numbers are on screen — not just a label, the whole hero changes color.
 const VIEW_COLOR = { mine: '#1d4ed8', partner: '#be185d', combined: '#1a7a4a' };
+
+// Turns a picker's selection into the actual full name to store as "who."
+// Used everywhere a transaction can be logged on behalf of either partner —
+// whichever name comes back here is what every filter, avatar, and total
+// downstream will treat as the real owner of the record.
+export function resolveWho(selection, myFullName, partnerFullName, meKey = 'mine') {
+  const isMine = selection === meKey || selection === firstName(myFullName);
+  if (isMine) return myFullName || 'unknown';
+  return partnerFullName || capitalize(selection) || 'Partner';
+}
+
 // Today's date if it falls within the given month, otherwise the 1st of that month —
 // used so "add income/expense for this month" forms default sensibly when you're
 // looking at a month other than the current one.
@@ -1436,13 +1447,16 @@ export function AddCatModal({onSave,onClose}) {
 // Photo → Storage → Claude reads it → user confirms → becomes a transaction.
 // Three states in one modal: pick a photo, wait while it's read, then review
 // and edit what Claude found before it becomes real spending.
-export function ReceiptScanModal({allCats, onScan, onConfirm, onClose}) {
+export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfirm, onClose}) {
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
   const [file, setFile]       = useState(null);
   const [preview, setPreview] = useState(null);
   const [stage, setStage]     = useState('pick'); // 'pick' | 'reading' | 'review' | 'error'
   const [error, setError]     = useState('');
   const [receiptId, setReceiptId] = useState(null);
   const [fields, setFields]   = useState(null); // {merchant,date,amount,category,confidence,itemsSummary}
+  const [who, setWho]         = useState(myFirst); // whose spending this is — either partner can log for the other
   const [saving, setSaving]   = useState(false);
   const inputRef = useRef(null);
 
@@ -1471,7 +1485,8 @@ export function ReceiptScanModal({allCats, onScan, onConfirm, onClose}) {
     if (!fields || saving) return;
     setSaving(true);
     try {
-      await onConfirm(receiptId, fields);
+      const attributedTo = resolveWho(who, profile?.name, partnerName, myFirst);
+      await onConfirm(receiptId, { ...fields, who: attributedTo });
       onClose();
     } catch {
       setError('Could not save that transaction — try again.');
@@ -1609,9 +1624,25 @@ export function ReceiptScanModal({allCats, onScan, onConfirm, onClose}) {
 
             <SL>Category</SL>
             <select value={fields.category} onChange={e=>setFields({...fields, category:e.target.value})}
-              style={{...inputStyle, marginBottom:22, cursor:'pointer'}}>
+              style={{...inputStyle, marginBottom:16, cursor:'pointer'}}>
               {allCats.filter(c=>!c.excluded).map(c=><option key={c.id} value={c.id}>{c.label}</option>)}
             </select>
+
+            <SL>Whose spending is this?</SL>
+            <div style={{display:'flex', gap:8, marginBottom:22}}>
+              <button onClick={()=>setWho(myFirst)} style={{
+                flex:1, padding:'9px 12px', border:`1.5px solid ${who===myFirst?C.blue:C.sandDark}`,
+                borderRadius:10, background:who===myFirst?C.blue+'15':'white',
+                color:who===myFirst?C.blue:C.ink, fontSize:13, fontWeight:600, fontFamily:SANS, cursor:'pointer'}}>
+                {capitalize(myFirst)}
+              </button>
+              <button onClick={()=>setWho(partnerFirst)} style={{
+                flex:1, padding:'9px 12px', border:`1.5px solid ${who===partnerFirst?C.blue:C.sandDark}`,
+                borderRadius:10, background:who===partnerFirst?C.blue+'15':'white',
+                color:who===partnerFirst?C.blue:C.ink, fontSize:13, fontWeight:600, fontFamily:SANS, cursor:'pointer'}}>
+                {capitalize(partnerFirst)}
+              </button>
+            </div>
 
             <div style={{display:'flex', gap:8}}>
               <button onClick={onClose} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
@@ -2344,6 +2375,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   const [aiAmount, setAiAmount] = useState('');
   const [aiDate, setAiDate] = useState(() => today());
   const [aiSource, setAiSource] = useState('');
+  const [aiWho, setAiWho] = useState('mine'); // 'mine' | 'partner' — whose income this is
   const [savingActualIncome, setSavingActualIncome] = useState(false);
   const [showIncomeDetail, setShowIncomeDetail] = useState(false);
   const [editingIncomeTxn, setEditingIncomeTxn] = useState(null);
@@ -2355,10 +2387,11 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     if (isNaN(amt) || amt <= 0) { showToast('Enter an amount'); return; }
     setSavingActualIncome(true);
     try {
+      const attributedTo = resolveWho(aiWho, profile?.name, partnerName, 'mine');
       await onAddTxn({
         cat: 'income', amount: amt, date: aiDate,
         note: aiSource.trim() || 'Income', merchant: aiSource.trim(),
-        who: profile?.name || 'unknown', person: me || 'jordan',
+        who: attributedTo, person: firstName(attributedTo) || 'jordan',
       });
       showToast(`Added ${fmt(amt)} to Actual Income`);
       setShowAddActualIncome(false);
@@ -2618,6 +2651,25 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
                 style={{width:'100%', padding:'8px 10px', border:`1px solid ${C.sandDark}`, borderRadius:8,
                   background:C.sand, color:C.ink, fontFamily:SANS, fontSize:13, outline:'none', boxSizing:'border-box'}}/>
             </div>
+            <div style={{marginBottom:10}}>
+              <label style={{fontSize:10, color:C.inkSoft, fontFamily:SANS, display:'block', marginBottom:4}}>
+                Whose income is this?
+              </label>
+              <div style={{display:'flex', gap:8}}>
+                <button onClick={()=>setAiWho('mine')} style={{
+                  flex:1, padding:'8px', border:`1.5px solid ${aiWho==='mine'?C.green:C.sandDark}`,
+                  borderRadius:8, background:aiWho==='mine'?C.green+'15':'white',
+                  color:aiWho==='mine'?C.green:C.ink, fontSize:12, fontWeight:600, fontFamily:SANS, cursor:'pointer'}}>
+                  {capitalize(me)}
+                </button>
+                <button onClick={()=>setAiWho('partner')} style={{
+                  flex:1, padding:'8px', border:`1.5px solid ${aiWho==='partner'?C.green:C.sandDark}`,
+                  borderRadius:8, background:aiWho==='partner'?C.green+'15':'white',
+                  color:aiWho==='partner'?C.green:C.ink, fontSize:12, fontWeight:600, fontFamily:SANS, cursor:'pointer'}}>
+                  {capitalize(firstName(partnerName)) || 'Partner'}
+                </button>
+              </div>
+            </div>
             <div style={{display:'flex', gap:8}}>
               <button onClick={()=>setShowAddActualIncome(false)} style={{flex:1, border:`1px solid ${C.sandDark}`, background:'white',
                 color:C.ink, padding:'9px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS, cursor:'pointer'}}>
@@ -2631,7 +2683,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
             </div>
           </div>
         ) : (
-          <button onClick={()=>{setShowAddActualIncome(true); setAiAmount(''); setAiDate(today()); setAiSource('');}} style={{
+          <button onClick={()=>{setShowAddActualIncome(true); setAiAmount(''); setAiDate(today()); setAiSource(''); setAiWho('mine');}} style={{
             width:'100%', padding:'10px', border:`1px dashed ${C.green}55`, borderRadius:8,
             background:'none', color:C.green, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:SANS}}>
             + Add actual income manually
@@ -3153,6 +3205,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                             ` · together with ${sharedMoments.get(tx.id).partner}`}
                         </p>
                       </div>
+                      {tx.who && <UserAvatar name={tx.who} size={18}/>}
                       <p style={{margin:0,fontFamily:SERIF,fontSize:14,fontWeight:600,
                         color:C.ink,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
                       {busyId===tx.id
@@ -3213,7 +3266,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
       </Card>
 
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
-      {showScan&&<ReceiptScanModal allCats={allCats} onScan={onScanReceipt}
+      {showScan&&<ReceiptScanModal allCats={allCats} profile={profile} partnerName={partnerName} onScan={onScanReceipt}
         onConfirm={onConfirmReceipt} onClose={()=>setShowScan(false)}/>}
       {editingTxn&&<EditTransactionModal tx={editingTxn} allCats={allCats}
         onSave={async updates=>{
@@ -3245,7 +3298,11 @@ export function AddTab({profile,partnerName,allCats,onAdd,quickCat}) {
   async function submit() {
     if(!can||saving)return;
     setSaving(true);
-    await onAdd({cat,amount:parseFloat(amount),note:note.trim(),date,who:profile?.name||'unknown',person,merchant:merchant.trim()});
+    // The picker lets either partner log something on the other's behalf —
+    // "who spent this" was being silently ignored before, always recording
+    // whoever happened to be logged in instead of whoever was selected.
+    const attributedTo = resolveWho(person, profile?.name, partnerName, myFirst);
+    await onAdd({cat,amount:parseFloat(amount),note:note.trim(),date,who:attributedTo,person,merchant:merchant.trim()});
     setCat(null);setAmount('');setNote('');setDate(today());setPerson(myFirst);setMerchant('');
     setSaving(false);ref.current?.focus();
   }
@@ -6901,7 +6958,7 @@ export default function App() {
   /** Turns a reviewed/edited receipt into a real transaction, and marks the
    *  receipt row confirmed so the two stay linked. */
   async function confirmReceiptTxn(receiptId, fields) {
-    const who = profile?.name || 'unknown';
+    const who = fields.who || profile?.name || 'unknown';
     const tx = {
       cat: fields.category, amount: fields.amount, note: fields.itemsSummary || '',
       date: fields.date, who, person: firstName(who) || 'jordan',
