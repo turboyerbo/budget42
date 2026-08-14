@@ -44,6 +44,25 @@ const NOTIFS_KEY = 'b42_notifs';
 const EXPECTED_INCOME_KEY = 'b42_expected_income';
 const GOALS_KEY = 'b42_goals';
 const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
+// Tracks the "YYYY-M" this device last saw the budget-suggestion banner —
+// suggestions should surface once, near the start of a new month, not every
+// single time the app loads. Once shown (applied or dismissed), it stays
+// gone for the rest of that month; the category targets you set are the
+// targets until you change them again yourself.
+const SUGGESTED_SHOWN_KEY = 'b42_suggested_shown';
+
+// Whether to surface the budget-suggestion banner right now. Pulled out as
+// its own pure function so the "once a month, near the start, never again
+// once shown" rule can be tested directly rather than trusted by reading
+// the code — this exact behavior was the bug report (it kept re-asking on
+// every single load).
+export function shouldShowBudgetSuggestions(importCount, now, lastShownTag) {
+  const currentTag = `${now.getFullYear()}-${now.getMonth()}`;
+  const isStartOfMonth = now.getDate() <= 5;
+  const alreadyShownThisMonth = lastShownTag === currentTag;
+  return importCount > 20 && isStartOfMonth && !alreadyShownThisMonth;
+}
+
 const today = () => new Date().toISOString().slice(0,10);
 const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const capitalize = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
@@ -2838,7 +2857,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
 
 // ─── SPENDING TAB ─────────────────────────────────────────────────────────────
-export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcceptSuggested,
+export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcceptSuggested,onDismissSuggested,
                   onAddCat,onDeleteCat,profile,partnerName,onReviewOther,otherCount,
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
@@ -2999,6 +3018,8 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             letterSpacing:'0.08em'}}>💡 Suggested updates available • 
             <button onClick={onAcceptSuggested} style={{border:'none',background:'none',color:C.green,
               cursor:'pointer',fontWeight:600,fontSize:11,marginLeft:4}}>Apply all</button>
+            <button onClick={onDismissSuggested} style={{border:'none',background:'none',color:C.inkSoft,
+              cursor:'pointer',fontWeight:600,fontSize:11,marginLeft:8,textDecoration:'underline'}}>Dismiss</button>
           </p>
         </div>
       )}
@@ -3764,16 +3785,17 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
       </p>
 
       {/* Calendar Grid */}
-      <Card style={{padding: '16px', background: C.white}}>
-        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 12}}>
+      <Card style={{padding: '10px', background: C.white, overflow: 'hidden'}}>
+        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 3, marginBottom: 8}}>
           {weekDays.map(day => (
-            <div key={day} style={{textAlign: 'center', fontSize: 11, fontWeight: 600, color: C.inkSoft, fontFamily: SANS, padding: '8px 0'}}>
+            <div key={day} style={{textAlign: 'center', fontSize: 10, fontWeight: 600, color: C.inkSoft,
+              fontFamily: SANS, padding: '6px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
               {day}
             </div>
           ))}
         </div>
 
-        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4}}>
+        <div style={{display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 3}}>
           {weeks.map((week, weekIdx) => 
             week.map((day, dayIdx) => {
               const dayPredicted = day && predictedIncomeByDay[day];
@@ -3790,46 +3812,53 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
                   disabled={!day}
                   style={{
                     aspectRatio: '1',
+                    minWidth: 0,
+                    width: '100%',
+                    boxSizing: 'border-box',
                     border: `1px solid ${isToday ? C.blue : C.sandMid}`,
-                    borderRadius: 8,
-                    padding: '6px',
+                    borderRadius: 7,
+                    padding: '3px',
                     background: isToday ? C.blue + '08' : C.white,
                     display: 'flex',
                     flexDirection: 'column',
                     fontSize: 12,
                     fontFamily: SANS,
-                    minHeight: '70px',
+                    overflow: 'hidden',
                     cursor: day ? 'pointer' : 'default',
                     textAlign: 'left'
                   }}>
-                  <div style={{fontSize: 11, fontWeight: 600, color: isToday ? C.blue : C.ink, marginBottom: 4}}>
+                  <div style={{fontSize: 10, fontWeight: 600, color: isToday ? C.blue : C.ink, marginBottom: 2}}>
                     {day || ''}
                   </div>
 
                   {day && (
-                    <div style={{display: 'flex', flexDirection: 'column', gap: 2, flex: 1}}>
+                    <div style={{display: 'flex', flexDirection: 'column', gap: 1, flex: 1, minWidth: 0, overflow: 'hidden'}}>
                       {dayActual && dayActual.length > 0 && (
-                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.green + '20',
-                          color: C.green, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                          💵 {fmt(dayActual.reduce((a,i)=>a+i.amount,0))}
+                        <div style={{fontSize: 8, padding: '1px 2px', borderRadius: 2, background: C.green + '20',
+                          color: C.green, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          minWidth: 0}}>
+                          💵{fmtK(dayActual.reduce((a,i)=>a+i.amount,0))}
                         </div>
                       )}
                       {dayPredicted && dayPredicted.length > 0 && (
-                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.blue + '20',
-                          color: C.blue, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                          💰 {fmt(dayPredicted.reduce((a,i)=>a+i.amount,0))}
+                        <div style={{fontSize: 8, padding: '1px 2px', borderRadius: 2, background: C.blue + '20',
+                          color: C.blue, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          minWidth: 0}}>
+                          💰{fmtK(dayPredicted.reduce((a,i)=>a+i.amount,0))}
                         </div>
                       )}
                       {dayBills && dayBills.length > 0 && (
-                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.red + '20',
-                          color: C.red, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                          📋 {dayBills.length} bill{dayBills.length !== 1 ? 's' : ''}
+                        <div style={{fontSize: 8, padding: '1px 2px', borderRadius: 2, background: C.red + '20',
+                          color: C.red, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          minWidth: 0}}>
+                          📋{dayBills.length}
                         </div>
                       )}
                       {dayDeposits && dayDeposits.length > 0 && (
-                        <div style={{fontSize: 9, padding: '2px 4px', borderRadius: 3, background: C.purple + '20',
-                          color: C.purple, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
-                          🎯 {fmt(dayDeposits.reduce((a,d)=>a+d.amount,0))}
+                        <div style={{fontSize: 8, padding: '1px 2px', borderRadius: 2, background: C.purple + '20',
+                          color: C.purple, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          minWidth: 0}}>
+                          🎯{fmtK(dayDeposits.reduce((a,d)=>a+d.amount,0))}
                         </div>
                       )}
                       {!hasAnything && <div style={{flex:1}}/>}
@@ -6578,7 +6607,22 @@ export default function App() {
       } catch {}
       setTxns(t);setImports(b);
       setIncome(s?.income||DEF_INCOME);setCcTarget(s?.cc_target??500);
-      if(ai.length>20){const nt=computeTargets(ai);if(Object.keys(nt).length>0)setSuggested(nt);}
+      // Suggest new category budgets once, near the start of a real calendar
+      // month — not on every load, and never again once shown this month,
+      // whether the person applied it, dismissed it, or just ignored it.
+      // Manually-set targets are the targets for the month; this isn't
+      // allowed to keep second-guessing them.
+      const nowReal = new Date();
+      const realMonthTag = `${nowReal.getFullYear()}-${nowReal.getMonth()}`;
+      let lastShownTag = null;
+      try { lastShownTag = localStorage.getItem(SUGGESTED_SHOWN_KEY); } catch {}
+      if(shouldShowBudgetSuggestions(ai.length, nowReal, lastShownTag)){
+        const nt=computeTargets(ai);
+        if(Object.keys(nt).length>0){
+          setSuggested(nt);
+          try { localStorage.setItem(SUGGESTED_SHOWN_KEY, realMonthTag); } catch {}
+        }
+      }
     }catch(e){showToast('Load error: '+e.message);}
   }
 
@@ -6979,6 +7023,10 @@ export default function App() {
     setSuggested({});
     showToast('Budget targets updated');
   }
+  function dismissSuggested(){
+    setSuggested({});
+    showToast('Dismissed — your current targets stay as they are this month');
+  }
   async function handleSignOut(){await signOut();setProfile(null);setAuthState('auth');}
 
   // ── Render states ────────────────────────────────────────────────────────────
@@ -7065,7 +7113,7 @@ export default function App() {
           setTab={setTab} onEditTxnSave={handleEditTxnSave} onDeleteTxn={deleteRow}/>}
       {tab==='spending' && <SpendingTab txns={txns} bankImports={imports}
           allCats={allCats} catTargets={catTargets}
-          suggested={suggested} onAcceptSuggested={acceptSuggested}
+          suggested={suggested} onAcceptSuggested={acceptSuggested} onDismissSuggested={dismissSuggested}
           onAddCat={addCustomCat} onDeleteCat={deleteCustomCat} profile={profile} partnerName={partnerName}
           onReviewOther={openReview}
           otherCount={imports.filter(t=>(t.category||t.cat)==='other').length}

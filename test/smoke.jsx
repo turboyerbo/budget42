@@ -15,7 +15,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho } from '../src/App.jsx';
+  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, shouldShowBudgetSuggestions } from '../src/App.jsx';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -310,11 +310,13 @@ check('CalendarTab: predicted and actual income are shown separately, never summ
     }));
 
     // Each figure should appear on its own — never combined into one 5984.44
-    if (html.includes('5,984.44')) {
+    // (Calendar's month-grid badges show a compact "$Xk" format to fit
+    // narrow cells — see the calendar overflow fix.)
+    if (html.includes('$6.0k')) {
       throw new Error('predicted and actual income were added together into one figure — they must stay separate');
     }
-    if (!html.includes('2,000')) throw new Error('expected the $2,000 predicted income to appear on its own');
-    if (!html.includes('3,984.44')) throw new Error('expected the $3,984.44 actual income to appear on its own');
+    if (!html.includes('$2.0k')) throw new Error('expected the $2,000 predicted income to appear on its own (compact as $2.0k)');
+    if (!html.includes('$4.0k')) throw new Error('expected the $3,984.44 actual income to appear on its own (compact as $4.0k)');
   } finally {
     process.env.TZ = originalTZ;
   }
@@ -584,6 +586,48 @@ check('resolveWho: falls back sensibly if the partner has no name on file yet', 
   if (who === 'unknown' || !who) throw new Error('expected a usable fallback name, not empty/unknown, when partnerFullName is blank');
 });
 
+// The bug report: "Suggested updates available" kept reappearing on every
+// single load, and kept second-guessing budget targets someone had already
+// set manually. shouldShowBudgetSuggestions() is the actual gate — one
+// showing per real calendar month, only near the start of it, never again
+// once shown (applied, dismissed, or just ignored).
+check('shouldShowBudgetSuggestions: shows near the start of a new, never-seen month', () => {
+  const now = new Date(2026, 7, 3); // August 3rd — within the "start of month" window
+  if (!shouldShowBudgetSuggestions(25, now, null)) {
+    throw new Error('expected suggestions to show: enough imports, early in the month, never shown before');
+  }
+});
+
+check('shouldShowBudgetSuggestions: does NOT show again once already shown this month', () => {
+  const now = new Date(2026, 7, 3);
+  const alreadyShown = '2026-7'; // same year/month as `now`
+  if (shouldShowBudgetSuggestions(25, now, alreadyShown)) {
+    throw new Error('suggestions reappeared even though this exact month was already shown — this is the reported bug');
+  }
+});
+
+check('shouldShowBudgetSuggestions: does NOT show mid-month, even if never shown before', () => {
+  const now = new Date(2026, 7, 20); // August 20th — well past the start-of-month window
+  if (shouldShowBudgetSuggestions(25, now, null)) {
+    throw new Error('expected no suggestion mid-month — only near the start of the month');
+  }
+});
+
+check('shouldShowBudgetSuggestions: shows again once a genuinely new month begins', () => {
+  const now = new Date(2026, 8, 2); // September 2nd
+  const lastShown = '2026-7'; // last shown in August
+  if (!shouldShowBudgetSuggestions(25, now, lastShown)) {
+    throw new Error('expected suggestions to show again in a brand new month, even though a previous month was shown');
+  }
+});
+
+check('shouldShowBudgetSuggestions: requires enough transaction history regardless of timing', () => {
+  const now = new Date(2026, 7, 2);
+  if (shouldShowBudgetSuggestions(5, now, null)) {
+    throw new Error('expected no suggestion with too little transaction history, even at the ideal time');
+  }
+});
+
 check('HomeTab: Just me / Partner / Combined actually produce different numbers', () => {
   const myTxn = mk({ description:'LOBLAWS 1032', amount:50, category:'groceries', who:'Jordan Yerbury' });
   const partnerTxn = mk({ description:'WALMART', amount:80, category:'groceries', who:'Mariel Smith' });
@@ -735,6 +779,32 @@ check('render CalendarTab', () => renderToString(React.createElement(CalendarTab
   year: 2026, month: 6, txns, bankImports: imports, billRules: [], billPayments: [],
   expectedIncome: [], setExpectedIncome: noop, goals: [], onSaveGoals: noop, allCats,
   history, showToast: noop, onSaveRule: noop, onDeleteRule: noop })));
+
+// Regression guard for a real overflow bug: grid-template-columns:
+// repeat(7, 1fr) lets each column grow to fit its widest child. Day-cell
+// badges use white-space:nowrap, so their full (unwrapped) text width
+// becomes each column's minimum size — on a narrow phone, seven columns of
+// "$1,234.56"-width content blows past the screen and the whole calendar
+// scrolls sideways. minmax(0, 1fr) is what actually fixes it: it lets
+// columns shrink below their content's natural width, so the 1fr equal
+// split — and the badges' own overflow:hidden/ellipsis — can actually take
+// effect instead of being overridden by the grid's sizing algorithm.
+check('CalendarTab: month grid uses minmax(0,1fr) columns, not bare 1fr, to prevent horizontal overflow', () => {
+  const html = renderToString(React.createElement(CalendarTab, {
+    year: 2026, month: 6, txns, bankImports: imports, billRules: [], billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, goals: [], onSaveGoals: noop, allCats,
+    history, showToast: noop, onSaveRule: noop, onDeleteRule: noop
+  }));
+  const gridDeclarations = (html.match(/grid-template-columns:repeat\(7,\s*[^)]*\)/g) || []);
+  if (gridDeclarations.length === 0) {
+    throw new Error('expected to find a 7-column grid declaration in the rendered calendar');
+  }
+  gridDeclarations.forEach(decl => {
+    if (!/minmax\(0,\s*1fr\)/.test(decl)) {
+      throw new Error(`found a 7-column grid without minmax(0,1fr) — this will overflow on narrow screens: "${decl}"`);
+    }
+  });
+});
 
 check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {
   txns, bankImports: imports, allCats, year: 2026, month: 6,
