@@ -6,7 +6,7 @@ import {
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
   Bell, BellRing, Landmark, HelpCircle, Heart, Settings, Download,
-  Smartphone, Zap, Gift, Shield, ArrowLeftRight,
+  Smartphone, Zap, Gift, Shield, ArrowLeftRight, FolderOpen, Printer, Image,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -23,7 +23,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getCategoryTargets, upsertCategoryTargets,
          getGoals, upsertGoals,
          uploadReceiptImage, insertReceipt, updateReceipt } from './supabase.js';
-import { analyzeReceipt } from './receipt.js';
+import { analyzeReceipt, isHeic, MAX_RECEIPT_BYTES } from './receipt.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
@@ -479,7 +479,16 @@ function QuickGoalDepositModal({goal, onSave, onClose, C, SERIF, SANS, defaultDa
 }
 
 // ─── WEEKLY EMAIL PREVIEW MODAL ───────────────────────────────────────────────
-function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, profile, year, month, onClose, showToast, C, SERIF, SANS}) {
+// Never fabricate a fake @example.com address — that domain is reserved for
+// documentation and can't receive real mail, so a "successful" send against
+// it would be silently meaningless. This was the actual bug: the old logic
+// built a fake address whenever profile.email was missing and tried to send
+// to it anyway, which could never work but also never clearly said why.
+export function resolveTestEmailTarget(profile) {
+  return profile?.email || null;
+}
+
+export function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, profile, year, month, onClose, showToast, C, SERIF, SANS}) {
   const [sending, setSending] = React.useState(false);
   const allTx = [...txns, ...(bankImports||[])];
   
@@ -510,9 +519,17 @@ function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, pr
   const billsPaidThisWeek = billPayments?.length || 0;
 
   async function sendTestEmail() {
+    // Never fabricate a fake @example.com address — that domain is reserved
+    // for documentation and can't receive real mail, so a send "succeeding"
+    // against it would be silently meaningless. If there's no real email on
+    // file, say so plainly instead of quietly trying (and failing) anyway.
+    const email = resolveTestEmailTarget(profile);
+    if (!email) {
+      showToast('No email on file for your account — sign out and back in to refresh it');
+      return;
+    }
     setSending(true);
     try {
-      const email = profile?.email || profile?.name?.toLowerCase().replace(' ', '.') + '@example.com';
       const response = await fetch('/.netlify/functions/send-weekly-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -525,12 +542,22 @@ function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, pr
           endDate: endOfWeek.toLocaleDateString('en-CA'),
         }),
       });
-      
+
       if (response.ok) {
         showToast(`✅ Test email sent to ${email}!`);
         onClose();
       } else {
-        showToast('Could not send email (service not configured yet)');
+        // Show the SERVER's actual reason, not a generic guess — this was
+        // the real problem before: the function usually explains exactly
+        // what's wrong (missing Brevo credentials, a send error, etc.) but
+        // that message was being discarded here and replaced with a vague
+        // "not configured yet" regardless of the real cause.
+        let reason = `Server returned ${response.status}`;
+        try {
+          const body = await response.json();
+          if (body?.error) reason = body.error;
+        } catch {}
+        showToast('Could not send email: ' + reason);
       }
     } catch (e) {
       showToast('Error sending email: ' + e.message);
@@ -600,9 +627,18 @@ function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRules, pr
           </div>
         </div>
 
-        <p style={{margin:'0 0 12px', fontSize:12, color:C.inkSoft, fontFamily:SANS}}>
-          <strong>How it works:</strong> An email will be sent every Friday with your week's spending, bills paid, and upcoming deadlines. You can set this up with an external scheduler like EasyCron (free tier available).
-        </p>
+        <div style={{background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:10, padding:'12px 14px', marginBottom:12}}>
+          <p style={{margin:0, fontSize:12, color:'#92400e', fontFamily:SANS, lineHeight:1.6}}>
+            <strong>Nothing is scheduled automatically yet.</strong> The button below sends
+            one email right now, so you can see what it looks like and confirm delivery
+            works. For an actual weekly Friday email, point a free scheduler (like
+            EasyCron) at this address, once a week:
+          </p>
+          <code style={{display:'block', marginTop:8, padding:'8px 10px', background:'#fff',
+            borderRadius:6, fontSize:10, color:'#92400e', wordBreak:'break-all', fontFamily:'monospace'}}>
+            POST https://budgetfortwo.netlify.app/.netlify/functions/send-weekly-summary
+          </code>
+        </div>
 
         <button onClick={sendTestEmail} disabled={sending} style={{
           width:'100%', border:'none', background:C.green, color:'#fff',
@@ -819,15 +855,15 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, o
 }
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
-const C = {
+export const C = {
   green:'#1a7a4a', greenLight:'#e8f4ee', greenMid:'#2d9d61',
   ink:'#1a1a18', inkMid:'#4a4a46', inkSoft:'#8a8a84',
   sand:'#f5f3ef', sandMid:'#eceae4', sandDark:'#ddd9d0', white:'#ffffff',
   red:'#c0392b', redLight:'#fdf0ee', blue:'#1d4ed8', amber:'#b45309',
   purple:'#7c3aed',
 };
-const SERIF = "'Cormorant Garamond', Georgia, 'Times New Roman', serif";
-const SANS  = "'DM Sans', system-ui, sans-serif";
+export const SERIF = "'Cormorant Garamond', Georgia, 'Times New Roman', serif";
+export const SANS  = "'DM Sans', system-ui, sans-serif";
 const MONTHS = ['January','February','March','April','May','June',
                 'July','August','September','October','November','December'];
 const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -877,6 +913,74 @@ const PICKABLE_ICONS = Object.keys(ICON_MAP);
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt   = n => '$' + Math.abs(n).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtK  = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : fmt(n);
+
+// Builds a clean, self-contained printable page for a month's bills — pulled
+// out as its own pure function (HTML string in, no DOM/window dependency)
+// so the content itself can be tested without needing a browser print
+// dialog. printBillsForMonth() below is the thin wrapper that actually
+// opens it and calls .print().
+export function buildBillsPrintHtml({monthLabel, carriedOver, entries, totals}) {
+  const row = (e, tag) => `<tr>
+    <td>${escapeHtml(e.label)}${tag ? ` <span class="tag">${tag}</span>` : ''}</td>
+    <td>${escapeHtml(e.categoryLabel || '')}</td>
+    <td class="right">${fmt(e.amount)}</td>
+    <td>${escapeHtml(e.dateLabel || '')}</td>
+    <td>${escapeHtml(e.statusLabel || '')}</td>
+  </tr>`;
+
+  const carriedRows = (carriedOver || []).map(e => row(e, 'overdue from earlier')).join('');
+  const entryRows = (entries || []).map(e => row(e)).join('');
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+      { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+    ));
+  }
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Bills — ${escapeHtml(monthLabel)}</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; color:#1a1a18; padding:32px; max-width:720px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:#78716c; font-size:13px; margin:0 0 24px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; border-bottom:2px solid #1a1a18; padding:8px 6px; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:#57534e; }
+  td { padding:8px 6px; border-bottom:1px solid #e7e5e4; }
+  td.right { text-align:right; font-variant-numeric:tabular-nums; }
+  .tag { font-size:10px; color:#c0392b; font-weight:600; }
+  .totals { margin-top:20px; padding-top:14px; border-top:2px solid #1a1a18; }
+  .totals p { display:flex; justify-content:space-between; margin:4px 0; font-size:14px; }
+  .totals p.grand { font-weight:700; font-size:16px; margin-top:8px; }
+  @media print { body { padding:0; } }
+</style></head>
+<body>
+  <h1>Bills — ${escapeHtml(monthLabel)}</h1>
+  <p class="sub">Printed ${escapeHtml(new Date().toLocaleDateString('en-CA', {weekday:'long', year:'numeric', month:'long', day:'numeric'}))}</p>
+  <table>
+    <thead><tr><th>Bill</th><th>Category</th><th>Amount</th><th>Due</th><th>Status</th></tr></thead>
+    <tbody>${carriedRows}${entryRows}</tbody>
+  </table>
+  <div class="totals">
+    <p><span>Already paid</span><span>${fmt(totals.paid)}</span></p>
+    <p><span>Still to be paid</span><span>${fmt(totals.outstanding)}</span></p>
+    <p class="grand"><span>Whole month</span><span>${fmt(totals.whole)}</span></p>
+  </div>
+</body></html>`;
+}
+
+// Opens the printable page in a new tab and triggers the browser's print
+// dialog. Isolated to its own function so buildBillsPrintHtml (the actual
+// content) stays testable without a real window/browser.
+function printBillsForMonth(printData) {
+  const html = buildBillsPrintHtml(printData);
+  const win = window.open('', '_blank');
+  if (!win) return false;
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  setTimeout(() => win.print(), 250);
+  return true;
+}
 
 // Derive avatar color from name — a stable hash, not a hardcoded name list,
 // so this works for any household's actual names, not just specific people.
@@ -1466,7 +1570,7 @@ export function AddCatModal({onSave,onClose}) {
 // Photo → Storage → Claude reads it → user confirms → becomes a transaction.
 // Three states in one modal: pick a photo, wait while it's read, then review
 // and edit what Claude found before it becomes real spending.
-export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfirm, onClose}) {
+export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfirm, onClose, presetCategory}) {
   const myFirst = firstName(profile?.name) || 'me';
   const partnerFirst = firstName(partnerName) || 'partner';
   const [file, setFile]       = useState(null);
@@ -1477,7 +1581,9 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
   const [fields, setFields]   = useState(null); // {merchant,date,amount,category,confidence,itemsSummary}
   const [who, setWho]         = useState(myFirst); // whose spending this is — either partner can log for the other
   const [saving, setSaving]   = useState(false);
-  const inputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const libraryInputRef = useRef(null);
+  const presetCat = presetCategory ? allCats.find(c => c.id === presetCategory) : null;
 
   async function handleFile(f) {
     if (!f) return;
@@ -1490,7 +1596,9 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
       setReceiptId(result.id);
       setFields({
         merchant: result.merchant, date: result.date, amount: result.amount,
-        category: result.category, confidence: result.confidence,
+        // Scanning from a specific category's "+" means you've already told
+        // us what this is — that intent wins over Claude's own guess.
+        category: presetCategory || result.category, confidence: result.confidence,
         itemsSummary: result.itemsSummary,
       });
       setStage('review');
@@ -1536,25 +1644,57 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
 
         {stage==='pick' && (
           <>
-            <p style={{margin:'0 0 20px',fontSize:13,color:C.inkSoft,fontFamily:SANS,lineHeight:1.6}}>
-              Take a photo of a paper receipt, or choose one from your camera roll.
-              Claude reads the merchant, total, and date, and suggests a category —
-              you confirm before anything's added.
-            </p>
-            <input ref={inputRef} type="file" accept="image/*" capture="environment"
-              style={{display:'none'}} onChange={e=>handleFile(e.target.files?.[0])}/>
-            <button onClick={()=>inputRef.current?.click()} style={{
-              width:'100%', border:`1.5px dashed ${C.sandDark}`, borderRadius:14, padding:'28px 16px',
-              background:C.sand, cursor:'pointer', display:'flex', flexDirection:'column',
-              alignItems:'center', gap:8, fontFamily:SANS
-            }}>
-              <div style={{width:48,height:48,borderRadius:99,background:C.green+'18',
-                display:'flex',alignItems:'center',justifyContent:'center'}}>
-                <Camera size={22} color={C.green}/>
+            {presetCat && (
+              <div style={{display:'flex', alignItems:'center', gap:8, background:presetCat.color+'15',
+                border:`1px solid ${presetCat.color}33`, borderRadius:10, padding:'8px 12px', marginBottom:14}}>
+                <CatIcon name={presetCat.icon} size={14} color={presetCat.color}/>
+                <span style={{fontSize:12, color:C.ink, fontFamily:SANS}}>
+                  Adding to <strong>{presetCat.label}</strong>
+                </span>
               </div>
-              <span style={{fontSize:14,fontWeight:600,color:C.ink}}>Take or choose a photo</span>
-              <span style={{fontSize:11,color:C.inkSoft}}>JPG, PNG, up to 15MB</span>
-            </button>
+            )}
+            <p style={{margin:'0 0 20px',fontSize:13,color:C.inkSoft,fontFamily:SANS,lineHeight:1.6}}>
+              Take a photo of a paper receipt, or choose one already saved — from your
+              camera roll, Files, Google Drive, wherever it lives. Claude reads the
+              merchant, total, and date, and suggests a category — you confirm before
+              anything's added.
+            </p>
+            {/* accept deliberately excludes image/heic — restricting to
+                formats Claude can actually read makes iOS Safari convert a
+                HEIC library photo to JPEG automatically during picking,
+                rather than passing the original HEIC bytes through
+                unconverted (which analyzeReceipt would then have to reject). */}
+            <input ref={cameraInputRef} type="file" accept="image/jpeg,image/png,image/webp" capture="environment"
+              style={{display:'none'}} onChange={e=>handleFile(e.target.files?.[0])}/>
+            <input ref={libraryInputRef} type="file" accept="image/jpeg,image/png,image/webp"
+              style={{display:'none'}} onChange={e=>handleFile(e.target.files?.[0])}/>
+            <div style={{display:'flex', gap:10}}>
+              <button onClick={()=>cameraInputRef.current?.click()} style={{
+                flex:1, border:`1.5px dashed ${C.sandDark}`, borderRadius:14, padding:'22px 12px',
+                background:C.sand, cursor:'pointer', display:'flex', flexDirection:'column',
+                alignItems:'center', gap:8, fontFamily:SANS
+              }}>
+                <div style={{width:44,height:44,borderRadius:99,background:C.green+'18',
+                  display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  <Camera size={20} color={C.green}/>
+                </div>
+                <span style={{fontSize:13,fontWeight:600,color:C.ink,textAlign:'center'}}>Take a photo</span>
+              </button>
+              <button onClick={()=>libraryInputRef.current?.click()} style={{
+                flex:1, border:`1.5px dashed ${C.sandDark}`, borderRadius:14, padding:'22px 12px',
+                background:C.sand, cursor:'pointer', display:'flex', flexDirection:'column',
+                alignItems:'center', gap:8, fontFamily:SANS
+              }}>
+                <div style={{width:44,height:44,borderRadius:99,background:C.blue+'18',
+                  display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  <FolderOpen size={20} color={C.blue}/>
+                </div>
+                <span style={{fontSize:13,fontWeight:600,color:C.ink,textAlign:'center'}}>Choose a file</span>
+              </button>
+            </div>
+            <p style={{margin:'10px 0 0',fontSize:11,color:C.inkSoft,fontFamily:SANS,textAlign:'center'}}>
+              JPG, PNG, up to 15MB
+            </p>
           </>
         )}
 
@@ -1682,7 +1822,110 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
   );
 }
 
+// ─── RECEIPT HISTORY MODAL ─────────────────────────────────────────────────────
+// Every receipt ever scanned is already saved (image + what Claude read off
+// it) the moment it's confirmed — this is just the browse/retrieve view for
+// it, so a scanned bill isn't a one-way trip once you tap past the confirm
+// screen.
+export function ReceiptHistoryModal({onClose}) {
+  const [loading, setLoading]   = useState(true);
+  const [receipts, setReceipts] = useState([]);
+  const [error, setError]       = useState(null);
+  const [viewing, setViewing]   = useState(null); // the receipt whose full image is open
 
+  useEffect(() => {
+    let cancelled = false;
+    import('./supabase.js').then(({ getReceipts }) => {
+      getReceipts(60).then(rows => { if (!cancelled) { setReceipts(rows); setLoading(false); } })
+        .catch(err => { if (!cancelled) { setError(err.message || 'Could not load past receipts'); setLoading(false); } });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const STATUS_LABEL = { pending: 'Uploading…', analyzed: 'Not yet added', confirmed: 'Added', failed: 'Failed to read' };
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:510,display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
+      <div onClick={onClose} style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.4)'}}/>
+      <div style={{position:'relative',background:C.white,borderRadius:'20px 20px 0 0',
+        padding:'24px 20px 40px',animation:'slideUp 0.25s ease',maxHeight:'85dvh',overflowY:'auto'}}>
+
+        <div style={{display:'flex',alignItems:'center',marginBottom:16}}>
+          <h2 style={{flex:1,fontFamily:SERIF,fontSize:22,fontWeight:600,color:C.ink}}>Scanned receipts</h2>
+          <button onClick={onClose} style={{border:'none',background:'none',padding:4,cursor:'pointer'}}>
+            <X size={20} color={C.inkSoft}/>
+          </button>
+        </div>
+
+        {loading && (
+          <div style={{textAlign:'center', padding:'30px 0'}}><Spinner size={20}/></div>
+        )}
+
+        {!loading && error && (
+          <p style={{fontSize:13, color:C.red, fontFamily:SANS, textAlign:'center', padding:'20px 0'}}>{error}</p>
+        )}
+
+        {!loading && !error && receipts.length === 0 && (
+          <p style={{fontSize:13, color:C.inkSoft, fontFamily:SANS, textAlign:'center', padding:'30px 0', lineHeight:1.6}}>
+            No receipts scanned yet — every photo you scan is saved here automatically,
+            so you can find it again later.
+          </p>
+        )}
+
+        {!loading && !error && receipts.length > 0 && (
+          <div style={{display:'flex', flexDirection:'column', gap:8}}>
+            {receipts.map(r => (
+              <button key={r.id} onClick={()=>setViewing(r)} style={{
+                display:'flex', alignItems:'center', gap:12, border:`1px solid ${C.sandMid}`,
+                borderRadius:12, padding:'10px 12px', background:C.white, cursor:'pointer', textAlign:'left'}}>
+                <img src={r.image_path} alt="Receipt" style={{width:44, height:44, borderRadius:8,
+                  objectFit:'cover', flexShrink:0, background:C.sand}}/>
+                <div style={{flex:1, minWidth:0}}>
+                  <p style={{margin:0, fontSize:13, fontWeight:600, color:C.ink, fontFamily:SANS,
+                    overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                    {r.merchant || 'Unknown merchant'}
+                  </p>
+                  <p style={{margin:'1px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
+                    {r.date || (r.uploaded_at || '').slice(0,10)} · {STATUS_LABEL[r.status] || r.status}
+                  </p>
+                </div>
+                {r.amount != null && (
+                  <p style={{margin:0, fontFamily:SERIF, fontSize:14, fontWeight:600, color:C.ink}}>
+                    {fmt(r.amount)}
+                  </p>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {viewing && (
+        <div onClick={()=>setViewing(null)} style={{position:'fixed', inset:0, zIndex:520,
+          background:'rgba(0,0,0,0.85)', display:'flex', flexDirection:'column',
+          alignItems:'center', justifyContent:'center', padding:20}}>
+          <button onClick={()=>setViewing(null)} style={{position:'absolute', top:16, right:16,
+            border:'none', background:'rgba(255,255,255,0.15)', borderRadius:99, padding:8, cursor:'pointer'}}>
+            <X size={20} color="#fff"/>
+          </button>
+          <img src={viewing.image_path} alt="Receipt" onClick={e=>e.stopPropagation()}
+            style={{maxWidth:'100%', maxHeight:'75dvh', borderRadius:12, objectFit:'contain'}}/>
+          <div style={{marginTop:14, textAlign:'center'}}>
+            <p style={{margin:0, color:'#fff', fontFamily:SANS, fontSize:14, fontWeight:600}}>
+              {viewing.merchant || 'Unknown merchant'}
+            </p>
+            <p style={{margin:'2px 0 0', color:'rgba(255,255,255,0.7)', fontFamily:SANS, fontSize:12}}>
+              {viewing.date || (viewing.uploaded_at || '').slice(0,10)}
+              {viewing.amount != null && ` · ${fmt(viewing.amount)}`}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── OtherReviewModal ─────────────────────────────────────────────────────────
 // Shows all transactions still in "Other" so the user can re-categorise them.
 // Each row has: description, date, amount, category dropdown, note field, AI button.
 export function OtherReviewModal({ items, allCats, onSave, onClose, onDeleteRow }) {
@@ -2862,11 +3105,14 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
                   setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave,
-                  predictedIncomeTotal}) {
+                  predictedIncomeTotal,receiptsSetup}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
   const [showScan, setShowScan] = useState(false);
+  const [scanPresetCat, setScanPresetCat] = useState(null); // category to lock the scan modal to
+  const [quickAddMenuFor, setQuickAddMenuFor] = useState(null); // which category's +  menu is open
+  const [showReceipts, setShowReceipts] = useState(false);
   const [editingTxn, setEditingTxn] = useState(null); // the transaction being date/amount/category-edited
   const [editingBudget, setEditingBudget] = useState(false);
   const [budgetOverride, setBudgetOverride] = useState(() => {
@@ -2991,8 +3237,27 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
         )}
       </Card>
 
+      {receiptsSetup && !receiptsSetup.ready && (
+        <div style={{background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:14,
+          padding:'12px 16px', marginBottom:12}}>
+          <p style={{margin:'0 0 4px', fontSize:13, fontWeight:700, color:C.amber, fontFamily:SANS}}>
+            ⚠️ Scan a receipt isn't set up yet
+          </p>
+          <p style={{margin:0, fontSize:12, color:'#92400e', fontFamily:SANS, lineHeight:1.6}}>
+            {!receiptsSetup.bucketOk && !receiptsSetup.tableOk
+              ? "The storage bucket and database table this feature needs don't exist yet."
+              : !receiptsSetup.bucketOk
+              ? "The storage bucket this feature needs doesn't exist yet."
+              : "The database table this feature needs doesn't exist yet."}
+            {' '}Run <strong>RECEIPT_SCANNING_MIGRATION.sql</strong> in Supabase → SQL Editor,
+            then reload this page. Every scan is meant to be a permanent, retrievable
+            record — this step is what makes that possible.
+          </p>
+        </div>
+      )}
+
       <button onClick={()=>setShowScan(true)} style={{
-        width:'100%', border:'none', borderRadius:14, padding:'14px 16px', marginBottom:12,
+        width:'100%', border:'none', borderRadius:14, padding:'14px 16px', marginBottom:8,
         background:C.green, cursor:'pointer', display:'flex', alignItems:'center', gap:12,
         boxShadow:'0 2px 8px rgba(26,122,74,0.25)'
       }}>
@@ -3009,6 +3274,15 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
           </p>
         </div>
         <ChevronRight size={16} color="rgba(255,255,255,0.8)"/>
+      </button>
+
+      <button onClick={()=>setShowReceipts(true)} style={{
+        width:'100%', border:'none', background:'none', padding:'2px 4px 12px', cursor:'pointer',
+        display:'flex', alignItems:'center', gap:6, justifyContent:'center'}}>
+        <Image size={12} color={C.inkSoft}/>
+        <span style={{fontSize:11, color:C.inkSoft, fontFamily:SANS, textDecoration:'underline'}}>
+          View past scanned receipts
+        </span>
       </button>
 
       {/* Suggested targets - show inline with categories instead of big block */}
@@ -3181,17 +3455,42 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                       {fmt(spent-target)} over</p>}
                   </div>
                 </button>
-                <button
-                  onClick={e=>{e.stopPropagation();setQuickAddCat(cat.id);setTab('add');}}
-                  onMouseEnter={e=>e.target.style.transform='scale(1.08)'}
-                  onMouseLeave={e=>e.target.style.transform='scale(1)'}
-                  style={{width:32,height:32,borderRadius:8,border:'none',
-                    background:cat.color,color:'#fff',cursor:'pointer',
-                    display:'flex',alignItems:'center',justifyContent:'center',
-                    flexShrink:0,fontSize:18,fontWeight:300,transition:'all 0.12s'}}
-                  title={`Quick add to ${cat.label}`}>
-                  +
-                </button>
+                <div style={{position:'relative', flexShrink:0}}>
+                  <button
+                    onClick={e=>{e.stopPropagation();setQuickAddMenuFor(quickAddMenuFor===cat.id?null:cat.id);}}
+                    onMouseEnter={e=>e.target.style.transform='scale(1.08)'}
+                    onMouseLeave={e=>e.target.style.transform='scale(1)'}
+                    style={{width:32,height:32,borderRadius:8,border:'none',
+                      background:cat.color,color:'#fff',cursor:'pointer',
+                      display:'flex',alignItems:'center',justifyContent:'center',
+                      fontSize:18,fontWeight:300,transition:'all 0.12s'}}
+                    title={`Add to ${cat.label}`}>
+                    +
+                  </button>
+                  {quickAddMenuFor===cat.id && (
+                    <>
+                      <div onClick={e=>{e.stopPropagation();setQuickAddMenuFor(null);}}
+                        style={{position:'fixed', inset:0, zIndex:400}}/>
+                      <div style={{position:'absolute', top:'110%', right:0, zIndex:401,
+                        background:C.white, borderRadius:12, boxShadow:'0 6px 20px rgba(0,0,0,0.18)',
+                        border:`1px solid ${C.sandMid}`, minWidth:170, overflow:'hidden'}}>
+                        <button onClick={e=>{e.stopPropagation();setQuickAddMenuFor(null);setQuickAddCat(cat.id);setTab('add');}}
+                          style={{width:'100%', border:'none', background:'none', padding:'11px 14px',
+                            display:'flex', alignItems:'center', gap:9, cursor:'pointer', fontFamily:SANS,
+                            fontSize:13, color:C.ink, textAlign:'left'}}>
+                          ✏️ Enter manually
+                        </button>
+                        <Divider/>
+                        <button onClick={e=>{e.stopPropagation();setQuickAddMenuFor(null);setScanPresetCat(cat.id);setShowScan(true);}}
+                          style={{width:'100%', border:'none', background:'none', padding:'11px 14px',
+                            display:'flex', alignItems:'center', gap:9, cursor:'pointer', fontFamily:SANS,
+                            fontSize:13, color:C.ink, textAlign:'left'}}>
+                          📷 Scan a bill
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               {/* Drill-down: every transaction in this category */}
@@ -3288,7 +3587,9 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
       {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
       {showScan&&<ReceiptScanModal allCats={allCats} profile={profile} partnerName={partnerName} onScan={onScanReceipt}
-        onConfirm={onConfirmReceipt} onClose={()=>setShowScan(false)}/>}
+        presetCategory={scanPresetCat}
+        onConfirm={onConfirmReceipt} onClose={()=>{setShowScan(false);setScanPresetCat(null);}}/>}
+      {showReceipts&&<ReceiptHistoryModal onClose={()=>setShowReceipts(false)}/>}
       {editingTxn&&<EditTransactionModal tx={editingTxn} allCats={allCats}
         onSave={async updates=>{
           setBusyId(editingTxn.id);
@@ -4390,13 +4691,43 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
     </button>
   );
 
+  const STATUS_PRINT_LABEL = { paid:'Paid', due:'Upcoming', overdue:'Overdue' };
+  function handlePrint() {
+    const toRow = e => ({
+      label: e.label,
+      amount: e.amount,
+      categoryLabel: (allCats.find(c => c.id === e.category) || {}).label || e.category || '',
+      dateLabel: e.date ? new Date(e.date).toLocaleDateString('en-CA', {month:'short', day:'numeric'}) : '',
+      statusLabel: STATUS_PRINT_LABEL[e.status] || e.status || '',
+    });
+    const ok = printBillsForMonth({
+      monthLabel: `${MONTHS[month]} ${year}`,
+      carriedOver: carriedOver.map(toRow),
+      entries: sched.entries.map(toRow),
+      totals: {
+        paid: sched.paidTotal,
+        outstanding: sched.outstandingTotal + carriedOverTotal,
+        whole: sched.monthTotal + carriedOverTotal,
+      },
+    });
+    if (!ok) showToast('Could not open the print view — check if pop-ups are blocked');
+  }
+
   return (
     <div style={{ padding:'16px 16px 0' }}>
       <Card style={{ background:C.green, padding:'20px 20px' }}>
-        <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
-          letterSpacing:'0.1em', margin:'0 0 4px', fontFamily:SANS }}>
-          Still to be paid in {MONTHS[month]}
-        </p>
+        <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:4 }}>
+          <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
+            letterSpacing:'0.1em', margin:0, fontFamily:SANS }}>
+            Still to be paid in {MONTHS[month]}
+          </p>
+          <button onClick={handlePrint} title={`Print all bills for ${MONTHS[month]}`}
+            style={{ border:'none', background:'rgba(255,255,255,0.18)', borderRadius:8,
+              padding:'5px 9px', cursor:'pointer', display:'flex', alignItems:'center', gap:5, flexShrink:0 }}>
+            <Printer size={12} color="#fff"/>
+            <span style={{ fontSize:10, fontWeight:700, color:'#fff', fontFamily:SANS }}>Print</span>
+          </button>
+        </div>
         <p style={{ fontFamily:SERIF, fontSize:40, fontWeight:600, color:'#fff',
           margin:'0 0 14px', letterSpacing:'-0.02em', lineHeight:1 }}>
           {fmt(sched.outstandingTotal + carriedOverTotal)}
@@ -6447,6 +6778,7 @@ export default function App() {
   const [view,       setView      ]=useState('combined');
   const [aiOn,       setAiOn      ]=useState(null); // null = still checking
   const [aiDiag,     setAiDiag    ]=useState(null);
+  const [receiptsSetup, setReceiptsSetup]=useState(null); // null = still checking; {bucketOk,tableOk,ready}
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
   const [showExport, setShowExport]=useState(false);
@@ -6957,6 +7289,15 @@ export default function App() {
     .then(ok=>{ setAiOn(ok); setAiDiag(aiDiagnostics()); })
     .catch(()=>setAiOn(false)); },[]);
 
+  // Receipt scanning needs a Storage bucket AND a table to exist — check
+  // once, up front, so a missing migration shows as a clear banner instead
+  // of a scan silently failing partway through.
+  useEffect(()=>{
+    import('./supabase.js').then(({ checkReceiptsSetup }) => {
+      checkReceiptsSetup().then(setReceiptsSetup).catch(()=>setReceiptsSetup({bucketOk:false,tableOk:false,ready:false}));
+    });
+  },[]);
+
   // Keep localStorage in sync with expected income as a backup — the editor
   // and calendar already write on every change, but this covers any other
   // path that updates the list, including clearing it back to empty.
@@ -6978,23 +7319,60 @@ export default function App() {
    * later can link back to this exact receipt.
    */
   async function scanReceipt(file) {
+    // Check the file BEFORE spending an upload on something that's going to
+    // fail anyway — HEIC (the default iPhone photo format) isn't something
+    // Claude's vision API can read, and a mismatched-format file was
+    // previously uploaded and inserted first, only to fail once analysis
+    // actually ran. Catching it here means "Choose a file" from an iPhone
+    // library (which iOS auto-converts to JPEG when the input asks for it)
+    // never wastes a round trip, and the error is immediate and specific.
+    if (isHeic(file)) {
+      throw new Error(
+        "That photo is in Apple's HEIC format, which can't be read directly. " +
+        'Try "Choose a file" instead of the camera roll for this one — it converts ' +
+        'automatically. Or in Settings > Camera > Formats, switch to "Most Compatible."'
+      );
+    }
+    if (file.size > MAX_RECEIPT_BYTES) {
+      throw new Error('That photo is larger than 15MB — try retaking it at a lower resolution.');
+    }
+
     const id = uid();
-    const { url } = await uploadReceiptImage(file, id);
+    let url;
+    try {
+      ({ url } = await uploadReceiptImage(file, id));
+    } catch (err) {
+      throw new Error('Could not upload that photo: ' + (err.message || err));
+    }
+
     const who = profile?.name || 'unknown';
-    await insertReceipt({
-      id, image_path: url, uploaded_by: who,
-      uploaded_at: new Date().toISOString(), status: 'pending',
-    });
+    try {
+      await insertReceipt({
+        id, image_path: url, uploaded_by: who,
+        uploaded_at: new Date().toISOString(), status: 'pending',
+      });
+    } catch (err) {
+      // The photo is already safely in Storage even if this row fails —
+      // don't lose the upload over a metadata-row problem, just note it.
+      console.error('insertReceipt failed (image still uploaded):', err);
+    }
+
     try {
       const extracted = await analyzeReceipt(file, allCats.map(c => c.id));
-      await updateReceipt(id, {
-        status: 'analyzed', merchant: extracted.merchant, amount: extracted.amount,
-        date: extracted.date, suggested_category: extracted.category,
-        confidence: extracted.confidence, note: extracted.itemsSummary,
-      });
+      try {
+        await updateReceipt(id, {
+          status: 'analyzed', merchant: extracted.merchant, amount: extracted.amount,
+          date: extracted.date, suggested_category: extracted.category,
+          confidence: extracted.confidence, note: extracted.itemsSummary,
+        });
+      } catch (err) {
+        // Reading succeeded — don't let a status-row update failure block
+        // the review screen from showing what Claude actually found.
+        console.error('updateReceipt (analyzed) failed:', err);
+      }
       return { id, imageUrl: url, ...extracted };
     } catch (err) {
-      await updateReceipt(id, { status: 'failed', note: String(err.message || err) });
+      try { await updateReceipt(id, { status: 'failed', note: String(err.message || err) }); } catch {}
       throw err;
     }
   }
@@ -7008,8 +7386,19 @@ export default function App() {
       date: fields.date, who, person: firstName(who) || 'jordan',
       merchant: fields.merchant, source: 'receipt',
     };
+    // This is the part that actually matters — the money getting recorded.
+    // If this throws, the modal's own error handling is correct to show it.
     await addTxn(tx);
-    if (receiptId) await updateReceipt(receiptId, { status: 'confirmed' });
+    // This is just tidying up the receipt's own status row for the "past
+    // receipts" list. It must never be allowed to make a successful add
+    // look like a failure — that was happening before this fix: addTxn
+    // would succeed, then this line alone would throw and the whole
+    // function would fail, showing "could not save" for a transaction
+    // that had, in fact, already been saved.
+    if (receiptId) {
+      try { await updateReceipt(receiptId, { status: 'confirmed' }); }
+      catch (err) { console.error('updateReceipt (confirmed) failed — transaction was still added:', err); }
+    }
     showToast(`Added ${fmt(fields.amount)} from receipt`);
   }
 
@@ -7125,7 +7514,7 @@ export default function App() {
           setQuickAddCat={setQuickAddCat} setTab={setTab}
           setEditingCatTarget={setEditingCatTarget} showToast={showToast}
           onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}
-          onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal}/>}
+          onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal} receiptsSetup={receiptsSetup}/>}
       {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           profile={profile} partnerName={partnerName}

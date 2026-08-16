@@ -14,8 +14,10 @@ import { findSharedMoments, summariseTogether } from '../src/together.js';
 import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
-  AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, shouldShowBudgetSuggestions } from '../src/App.jsx';
+  AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, ReceiptHistoryModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
+  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, shouldShowBudgetSuggestions,
+  buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, C, SERIF, SANS } from '../src/App.jsx';
+import { isHeic } from '../src/receipt.js';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -386,6 +388,45 @@ check('render SpendingTab (no history)', () => renderToString(React.createElemen
   setEditingCatTarget: noop, showToast: noop,
   onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
 })));
+
+// The actual bug report: "uploading bills does not work." Traced to the
+// receipts feature needing a Storage bucket AND a database table that may
+// never have been created (a required migration, easy to lose track of
+// among several accumulated over time) — every scan would fail silently at
+// the very first step. This banner is what makes that diagnosable instead
+// of just "doesn't work."
+check('SpendingTab: shows a clear setup warning when the receipts backend is not ready', () => {
+  const html = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [],
+    allCats, catTargets: {}, suggested: {},
+    onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
+    profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view: 'combined', setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop,
+    receiptsSetup: { bucketOk: false, tableOk: false, ready: false }
+  }));
+  if (!html.includes("isn&#x27;t set up yet")) throw new Error('expected a clear setup warning when the receipts backend is not ready');
+  if (!html.includes('RECEIPT_SCANNING_MIGRATION.sql')) throw new Error('expected the warning to name the exact migration file to run');
+});
+
+check('SpendingTab: does NOT show the setup warning once the receipts backend is ready', () => {
+  const html = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [],
+    allCats, catTargets: {}, suggested: {},
+    onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
+    profile, onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view: 'combined', setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop,
+    receiptsSetup: { bucketOk: true, tableOk: true, ready: true }
+  }));
+  if (html.includes("isn't set up yet")) throw new Error('should not show the setup warning once the backend is confirmed ready');
+});
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
   showToast: noop, billsLocal: false, setTab: noop,
@@ -875,6 +916,147 @@ check('render AddCatModal', () => renderToString(React.createElement(AddCatModal
 
 check('render ReceiptScanModal (pick stage)', () => renderToString(React.createElement(ReceiptScanModal, {
   allCats, onScan: noop, onConfirm: noop, onClose: noop })));
+
+check('ReceiptScanModal: shows which category a scan is locked to, when scanned from a category\'s "+"', () => {
+  const html = renderToString(React.createElement(ReceiptScanModal, {
+    allCats, onScan: noop, onConfirm: noop, onClose: noop, presetCategory: 'groceries'
+  }));
+  const groceriesLabel = allCats.find(c => c.id === 'groceries')?.label;
+  if (!html.includes('Adding to')) throw new Error('expected an indicator showing which category this scan is locked to');
+  if (!html.includes(groceriesLabel)) throw new Error(`expected the category's real label ("${groceriesLabel}") to appear`);
+});
+
+check('render ReceiptScanModal (no preset category — general scan, no lock-in banner)', () => {
+  const html = renderToString(React.createElement(ReceiptScanModal, {
+    allCats, onScan: noop, onConfirm: noop, onClose: noop
+  }));
+  if (html.includes('Adding to')) throw new Error('did not expect a category lock-in banner for a general (non-preset) scan');
+});
+
+check('render ReceiptHistoryModal', () => renderToString(React.createElement(ReceiptHistoryModal, { onClose: noop })));
+
+// "Print all bills from this month" — buildBillsPrintHtml is the actual
+// content generator, kept as a pure string-in/string-out function
+// specifically so it's testable without a real browser print dialog.
+check('buildBillsPrintHtml: includes every bill, both carried-over and this month\'s, with real numbers', () => {
+  const html = buildBillsPrintHtml({
+    monthLabel: 'August 2026',
+    carriedOver: [{ label:'Toronto Hydro', amount:142.50, categoryLabel:'Home', dateLabel:'Jul 15', statusLabel:'Overdue' }],
+    entries: [
+      { label:'Netflix', amount:9.03, categoryLabel:'Subscriptions', dateLabel:'Aug 2', statusLabel:'Paid' },
+      { label:'Stela Rent', amount:1900, categoryLabel:'Home', dateLabel:'Aug 30', statusLabel:'Upcoming' },
+    ],
+    totals: { paid: 9.03, outstanding: 2042.50, whole: 2051.53 },
+  });
+  if (!html.includes('Toronto Hydro')) throw new Error('expected the carried-over bill (Toronto Hydro) to appear');
+  if (!html.includes('overdue from earlier')) throw new Error('expected carried-over bills to be visibly tagged as such');
+  if (!html.includes('Netflix') || !html.includes('Stela Rent')) throw new Error('expected this month\'s bills to appear');
+  if (!html.includes('$2,042.50')) throw new Error('expected the "still to be paid" total to appear');
+  if (!html.includes('$2,051.53')) throw new Error('expected the "whole month" total to appear');
+  if (!html.includes('August 2026')) throw new Error('expected the month label in the title');
+});
+
+check('buildBillsPrintHtml: escapes HTML in bill labels (never inject raw markup into a printed page)', () => {
+  const html = buildBillsPrintHtml({
+    monthLabel: 'August 2026',
+    carriedOver: [],
+    entries: [{ label:'<script>alert(1)</script>', amount:10, categoryLabel:'Other', dateLabel:'Aug 1', statusLabel:'Paid' }],
+    totals: { paid: 10, outstanding: 0, whole: 10 },
+  });
+  if (html.includes('<script>alert')) {
+    throw new Error('a bill label was written into the printed page as raw HTML — this must be escaped');
+  }
+  if (!html.includes('&lt;script&gt;')) {
+    throw new Error('expected the label to be HTML-escaped, not silently dropped');
+  }
+});
+
+check('buildBillsPrintHtml: produces a complete, well-formed HTML document', () => {
+  const html = buildBillsPrintHtml({
+    monthLabel: 'August 2026', carriedOver: [], entries: [],
+    totals: { paid: 0, outstanding: 0, whole: 0 },
+  });
+  if (!html.includes('<!DOCTYPE html>') || !html.includes('</html>')) {
+    throw new Error('expected a complete HTML document, since this gets written directly into a new browser window');
+  }
+});
+
+// Bug report: scanning a receipt reads and categorizes fine, then fails.
+// Root cause: HEIC photos (the default iPhone format) were declared to
+// Claude's vision API as "image/jpeg" regardless of their real format —
+// genuinely mismatched data that Claude can't reliably read. isHeic() is
+// the detector that now catches this BEFORE any upload or API call happens.
+check('isHeic: detects HEIC/HEIF by MIME type', () => {
+  if (!isHeic({ type: 'image/heic', name: 'IMG_1234.heic' })) {
+    throw new Error('expected image/heic to be detected as HEIC');
+  }
+  if (!isHeic({ type: 'image/heif', name: 'IMG_1234.heif' })) {
+    throw new Error('expected image/heif to be detected as HEIC');
+  }
+});
+
+check('isHeic: falls back to filename extension when the browser leaves type blank', () => {
+  // Some mobile browsers don't populate file.type for HEIC files at all —
+  // this is the actual real-world case the extension fallback exists for.
+  if (!isHeic({ type: '', name: 'IMG_5678.HEIC' })) {
+    throw new Error('expected a blank-type file with a .HEIC extension to still be caught');
+  }
+});
+
+check('isHeic: does not flag ordinary JPEG/PNG photos', () => {
+  if (isHeic({ type: 'image/jpeg', name: 'receipt.jpg' })) {
+    throw new Error('a normal JPEG must not be flagged as HEIC');
+  }
+  if (isHeic({ type: 'image/png', name: 'receipt.png' })) {
+    throw new Error('a normal PNG must not be flagged as HEIC');
+  }
+});
+
+// Bug report: the weekly summary email "wasn't working at all." Two real
+// causes found: (1) when profile.email was missing, the code fabricated a
+// fake "name@example.com" address and tried to send to it anyway — that
+// domain is reserved and can never receive real mail, so this could never
+// have worked, and (2) the actual server error was being discarded and
+// replaced with a generic "not configured yet" message regardless of what
+// really went wrong, making the real problem impossible to diagnose from
+// the UI. resolveTestEmailTarget() is the fix for (1); the response-body
+// error-surfacing fix for (2) lives directly in sendTestEmail's fetch
+// handling and isn't separately unit-testable without a live network mock.
+check('resolveTestEmailTarget: never fabricates a fake @example.com address', () => {
+  const noEmailProfile = { name: 'Jordan Yerbury' }; // no .email at all
+  const result = resolveTestEmailTarget(noEmailProfile);
+  if (result && result.includes('@example.com')) {
+    throw new Error('fabricated a fake @example.com address — this domain can never receive real mail, so sending to it can never have worked');
+  }
+  if (result !== null) {
+    throw new Error(`expected null when there's no real email on file, got "${result}"`);
+  }
+});
+
+check('resolveTestEmailTarget: uses the real account email when present', () => {
+  const result = resolveTestEmailTarget({ name: 'Jordan Yerbury', email: 'jordan@realaddress.com' });
+  if (result !== 'jordan@realaddress.com') {
+    throw new Error(`expected the real email to be used, got "${result}"`);
+  }
+});
+
+check('render WeeklyEmailPreviewModal', () => renderToString(React.createElement(WeeklyEmailPreviewModal, {
+  txns, bankImports: imports, billPayments: [], billRules: [], profile,
+  year: 2026, month: 6, onClose: noop, showToast: noop, C, SERIF, SANS })));
+
+check('WeeklyEmailPreviewModal: is honest that nothing sends automatically yet', () => {
+  const html = renderToString(React.createElement(WeeklyEmailPreviewModal, {
+    txns, bankImports: imports, billPayments: [], billRules: [], profile,
+    year: 2026, month: 6, onClose: noop, showToast: noop, C, SERIF, SANS
+  }));
+  // The old copy said "An email will be sent every Friday" as if automatic
+  // delivery were already active, when in fact nothing is scheduled unless
+  // someone sets up an external cron job — actively misleading given the
+  // bug report was about the feature seeming broken.
+  if (!html.includes('Nothing is scheduled automatically')) {
+    throw new Error('expected the modal to say plainly that nothing sends automatically without an external scheduler');
+  }
+});
 
 check('render EditTransactionModal', () => renderToString(React.createElement(EditTransactionModal, {
   tx: { id:'t1', date:'2026-07-12', amount:84.2, category:'groceries', note:'Loblaws' },

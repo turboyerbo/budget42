@@ -677,3 +677,24 @@ export async function getReceipts(limit = 30) {
     throw err;
   }
 }
+
+/**
+ * Checks whether the receipts feature is actually usable — both the
+ * storage bucket and the table need to exist, and either one missing means
+ * every scan will fail. Meant to run once, up front, so "receipts don't
+ * work" is a visible, specific banner rather than something only discovered
+ * after tapping Scan and getting a cryptic failure.
+ */
+export async function checkReceiptsSetup() {
+  let bucketOk = false, tableOk = false;
+  try {
+    const { error } = await supabase.storage.from('receipts').list('', { limit: 1 });
+    bucketOk = !error;
+  } catch { bucketOk = false; }
+  try {
+    const { error } = await supabase.from('receipts').select('id', { count: 'exact', head: true });
+    tableOk = !error;
+  } catch { tableOk = false; }
+  return { bucketOk, tableOk, ready: bucketOk && tableOk };
+}
+

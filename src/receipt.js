@@ -10,7 +10,21 @@ import { callClaude, textOf } from './claude.js';
  * confirm it in a couple of taps instead of typing the whole thing by hand.
  */
 
-const MAX_BYTES = 15 * 1024 * 1024; // 15MB — generous for a phone photo
+// iPhones save photos as HEIC/HEIF by default (Settings > Camera > Formats >
+// High Efficiency). Claude's vision API only accepts jpeg/png/gif/webp — a
+// HEIC file's actual bytes don't match any of those, so declaring it as
+// "image/jpeg" (the old fallback) sends genuinely mismatched data and the
+// read fails or comes back wrong. Exported so callers can check this BEFORE
+// spending an upload on a file that's going to fail anyway.
+export const HEIC_TYPES = ['image/heic', 'image/heif'];
+export function isHeic(file) {
+  if (HEIC_TYPES.includes((file.type || '').toLowerCase())) return true;
+  // Some mobile browsers don't populate file.type for HEIC at all — fall
+  // back to the filename extension, which is still usually present.
+  return /\.hei[cf]$/i.test(file.name || '');
+}
+
+export const MAX_RECEIPT_BYTES = 15 * 1024 * 1024; // 15MB — generous for a phone photo
 
 function buildPrompt(catIds) {
   return `You are reading a photo of a paper receipt for a Canadian household budget app.
@@ -41,13 +55,23 @@ function fileToBase64(file) {
 }
 
 /**
- * @param file    an image File/Blob (jpeg, png, webp, heic-as-jpeg from most phones)
+ * @param file    an image File/Blob — jpeg, png, webp, or gif. HEIC is
+ *                rejected with a clear message before this is even called
+ *                (see isHeic above); Claude's vision API can't read it.
  * @param catIds  array of valid category id strings to choose from
  * @returns {Promise<{merchant,date,amount,category,confidence,itemsSummary}>}
  */
 export async function analyzeReceipt(file, catIds) {
   if (!file) throw new Error('No image to analyze.');
-  if (file.size > MAX_BYTES) {
+  if (isHeic(file)) {
+    throw new Error(
+      "That photo is in Apple's HEIC format, which this can't read directly. " +
+      'Easiest fix: use "Choose a file" instead of the camera roll picker for this one — ' +
+      'it converts automatically. Or in Settings > Camera > Formats, switch to "Most Compatible" ' +
+      'so new photos save as JPEG.'
+    );
+  }
+  if (file.size > MAX_RECEIPT_BYTES) {
     throw new Error('That photo is larger than 15MB — try retaking it at a lower resolution.');
   }
 
