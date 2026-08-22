@@ -16,8 +16,11 @@ import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, ReceiptHistoryModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
   ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, shouldShowBudgetSuggestions,
-  buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, C, SERIF, SANS } from '../src/App.jsx';
+  buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, describeReceiptsBackendIssue,
+  describeBillPaidBy,
+  C, SERIF, SANS } from '../src/App.jsx';
 import { isHeic } from '../src/receipt.js';
+import { isRlsDenied } from '../src/supabase.js';
 
 const mk = (o = {}) => ({
   id: Math.random().toString(36).slice(2),
@@ -248,12 +251,45 @@ check('HomeTab: Available Money = Income − Spent − Bills Paid, no double-cou
   }));
 
   if (!html.includes('Available Money')) throw new Error('expected an "Available Money" hero label');
-  if (!html.includes('Bills Paid This Month')) throw new Error('expected a "Bills Paid This Month" stat');
+  if (!html.includes('Bills Paid')) throw new Error('expected a "Bills Paid" stat');
   if (!html.includes('1,900.00')) throw new Error('expected the $1,900 rent to appear as bills paid');
   if (!html.includes('120.00')) throw new Error('expected the $120 groceries to appear as spent this month');
   // Available = 5000 - 120 - 1900 = 2980.00 — must appear once, not some
   // double-subtracted lower figure like 980.00 (5000-120-1900-1900)
   if (!html.includes('2,980.00')) throw new Error('Available Money is wrong — looks like bills were subtracted twice');
+});
+
+// Bug report, with screenshots: Bills tab showed $3,260.75 paid this
+// month. Home's "Bills Paid This Month" showed only $387.46 for the exact
+// same month. Traced it to several of the paid bills being credit card
+// payments (category 'cc_payment') — a category that's normally EXCLUDED
+// from spend totals, to avoid double-counting the purchases it covers.
+// Bills Paid used to be derived by filtering transactions down to
+// bill-matching categories, which silently dropped ANY bill whose own
+// category happened to be excluded — so a real, ticked-paid $480 credit
+// card bill contributed exactly $0 to Home's figure, even though the
+// Bills tab correctly counted it.
+check('HomeTab: a bill categorized as a credit card payment counts as Bills Paid, matching the Bills tab — not silently dropped', () => {
+  const ccPaymentBill = { key:'manual:scotiabank', label:'Scotiabank Credit Card', amount:480, day:15, status:'manual', category:'cc_payment' };
+  const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
+  const paycheck = mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15' });
+
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [groceries, paycheck], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+    history: [],
+    billRules: [ccPaymentBill],
+    billPayments: [{ key:'manual:scotiabank', year:2026, month:6, label:'Scotiabank Credit Card', paid_by:'Jordan', paid_at:'2026-07-15T00:00:00.000Z' }],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+
+  if (!html.includes('480.00')) {
+    throw new Error('the $480 credit card payment is missing from Bills Paid — this reproduces the reported bug exactly');
+  }
 });
 
 // Regression guard for a real, reproducible bug: new Date('2026-08-01') parses
@@ -339,6 +375,48 @@ check('SpendingTab: dashboard shows Still Available To Spend', () => {
   }));
   if (!html.includes('Still Available To Spend')) throw new Error('expected the Spending tab dashboard hero');
   if (!html.includes('120.00')) throw new Error('expected the $120 grocery spend to appear');
+});
+
+// Bug report: "Combined is the total. If I click Jordan it should be HALF
+// of combined. Ness should also be HALF the combined total. Right now it
+// makes no sense." Confirmed from the screenshots this wasn't a math bug —
+// Jordan ($3,501.02) + Ness ($432.29) really did add up to Combined
+// ($3,933.31) exactly. The problem was the MODEL: individual attribution
+// (whoever's name is on a transaction) doesn't reflect fair spending when
+// a shared card gets bulk-tagged to whichever partner uploaded the
+// statement. Each view should show an equal half, always.
+check('SpendingTab: Jordan and Ness each show exactly half of Combined, not lopsided individual totals', () => {
+  // Deliberately unequal attribution — Jordan tagged with $300, Ness with
+  // only $60 — mirroring the real lopsided screenshot, not a coincidental
+  // even split that could hide a bug.
+  const jordanTxn = mk({ description:'BIG PURCHASE', amount:300, category:'groceries', date:'2026-07-10', who:'Jordan Yerbury' });
+  const nessTxn = mk({ description:'SMALL PURCHASE', amount:60, category:'groceries', date:'2026-07-11', who:'Mariel Smith' });
+
+  const render = (view) => renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [jordanTxn, nessTxn],
+    allCats, catTargets: {}, suggested: {},
+    onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
+    profile, partnerName: 'Mariel Smith', onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view, setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
+  }));
+
+  const combined = render('combined');
+  const mine = render('mine');       // Jordan (profile's own name)
+  const partner = render('partner'); // Ness/Mariel
+
+  // Combined must show the real total: $360
+  if (!combined.includes('360.00')) throw new Error('expected Combined to show the true total ($360)');
+
+  // Each individual view must show exactly half ($180) — NOT the lopsided
+  // individually-attributed amounts ($300 / $60) from the old behavior
+  if (!mine.includes('180.00')) throw new Error('expected "mine" to show exactly half of Combined ($180), not the lopsided $300 individual total');
+  if (mine.includes('300.00')) throw new Error('"mine" is still showing the old lopsided individually-attributed amount ($300) instead of half of Combined');
+  if (!partner.includes('180.00')) throw new Error('expected "partner" to show exactly half of Combined ($180), not the lopsided $60 individual total');
+  if (partner.includes('60.00')) throw new Error('"partner" is still showing the old lopsided individually-attributed amount ($60) instead of half of Combined');
 });
 
 ['mine','combined'].forEach(v => {
@@ -430,7 +508,7 @@ check('SpendingTab: does NOT show the setup warning once the receipts backend is
 
 const billProps = { billRules: [], onSaveRule: noop, onDeleteRule: noop,
   showToast: noop, billsLocal: false, setTab: noop,
-  billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' },
+  billPayments: [], allBillPayments: [], onTogglePaid: noop, profile: { name:'Jordan' }, partnerName: 'Mariel',
   billActiveKeys: new Map(), billConfiguredMonths: new Set(),
   onDeleteBillForMonth: noop, onConfigureMonth: noop };
 
@@ -455,6 +533,23 @@ check('render BillsTab (with user rules)', () => renderToString(React.createElem
     { key:'netflix',    label:'Netflix', status:'hidden' },
     { key:'manual:gym', label:'Gym', amount:59.99, day:5, status:'manual', category:'other' },
   ] })));
+
+// "Who paid this?" — either partner should be able to mark a bill paid on
+// the other's behalf, not have it silently attributed to whoever's logged
+// in. The picker itself opens via local component state on a checkbox
+// click, which this SSR-only test harness can't simulate (no DOM
+// interaction) — this confirms the component renders safely with the new
+// partnerName prop and an unpaid bill present; the actual attribution
+// logic (resolveWho) is already covered by its own dedicated tests above.
+check('render BillsTab (unpaid bill, partnerName present for the "who paid" picker)', () => {
+  const html = renderToString(React.createElement(BillsTab, {
+    history, txns, bankImports: imports, allCats, year: 2026, month: 6,
+    ...billProps, partnerName: 'Mariel Smith', billRules: [
+      { key:'stela rent', label:'Rent', amount:1900, day:30, status:'confirmed', category:'other' },
+    ]
+  }));
+  if (!html.includes('Rent')) throw new Error('expected the unpaid Rent bill to render');
+});
 
 check('BillsTab: no "hidden bills" restore section exists — deleting is final', () => {
   const html = renderToString(React.createElement(BillsTab, {
@@ -625,6 +720,22 @@ check('resolveWho: works with the "mine"/"partner" selection style too (manual i
 check('resolveWho: falls back sensibly if the partner has no name on file yet', () => {
   const who = resolveWho('partner', 'Jordan Yerbury', '', 'mine');
   if (who === 'unknown' || !who) throw new Error('expected a usable fallback name, not empty/unknown, when partnerFullName is blank');
+});
+
+// Bug report: bill payments were always silently attributed to whoever's
+// logged in, with no way to mark a bill paid on the other partner's
+// behalf. resolveWho() (already tested above) is the actual attribution
+// fix, reused directly by the new "Who paid this?" picker. This covers
+// the toast-wording half specifically: it should stay personal for your
+// own bills and name the person only when it's genuinely on their behalf.
+check('describeBillPaidBy: stays personal ("You") when marking your own bill', () => {
+  const result = describeBillPaidBy('Jordan Yerbury', 'Jordan Yerbury');
+  if (result !== 'You') throw new Error(`expected "You" for a self-attributed payment, got "${result}"`);
+});
+
+check('describeBillPaidBy: names the partner when a bill is logged on their behalf', () => {
+  const result = describeBillPaidBy('Mariel Smith', 'Jordan Yerbury');
+  if (result !== 'Mariel') throw new Error(`expected "Mariel" when Jordan logs a bill on Mariel's behalf, got "${result}"`);
 });
 
 // The bug report: "Suggested updates available" kept reappearing on every
@@ -1037,6 +1148,71 @@ check('resolveTestEmailTarget: uses the real account email when present', () => 
   const result = resolveTestEmailTarget({ name: 'Jordan Yerbury', email: 'jordan@realaddress.com' });
   if (result !== 'jordan@realaddress.com') {
     throw new Error(`expected the real email to be used, got "${result}"`);
+  }
+});
+
+// Bug report: "the info on the bill is read but then I can't upload the
+// image or store information." The bucket/table "missing" checks only
+// caught one failure mode — if the bucket or table already EXISTS but Row
+// Level Security is blocking the actual insert/upload (a completely
+// different, common Supabase misconfiguration — e.g. the bucket created via
+// the dashboard without the accompanying policies), that error has a
+// different shape entirely and was falling through as a raw, unexplained
+// error instead of a clear "here's what to fix" message.
+check('isRlsDenied: recognizes a Postgres RLS denial by error code', () => {
+  if (!isRlsDenied({ code: '42501', message: 'permission denied for table receipts' })) {
+    throw new Error('expected Postgres code 42501 to be recognized as an RLS denial');
+  }
+});
+
+check('isRlsDenied: recognizes Supabase\'s "row-level security" and "new row violates" messages', () => {
+  if (!isRlsDenied({ message: 'new row violates row-level security policy for table "objects"' })) {
+    throw new Error('expected a Storage RLS-denial message to be recognized');
+  }
+  if (!isRlsDenied({ message: 'permission denied for relation receipts' })) {
+    throw new Error('expected a "permission denied" message to be recognized');
+  }
+});
+
+check('isRlsDenied: does not misclassify an unrelated error as RLS', () => {
+  if (isRlsDenied({ message: 'Network request failed' })) {
+    throw new Error('a generic network error must not be misclassified as an RLS denial');
+  }
+  if (isRlsDenied({ code: '23505', message: 'duplicate key value violates unique constraint' })) {
+    throw new Error('a duplicate-key error must not be misclassified as an RLS denial');
+  }
+});
+
+// The sneaky case checkReceiptsBackendReady() was extended to catch: the
+// Storage bucket works fine (photos upload, transactions get added — the
+// core feature genuinely works), but the receipts TABLE's own permissions
+// are broken, so the retrievable record silently never saves. Nothing
+// visibly fails, so without a check that looks at the table specifically,
+// there's no way to know why "View past scanned receipts" stays empty no
+// matter how many photos get scanned.
+check('describeReceiptsBackendIssue: distinguishes bucket-broken from the sneaky table-only-broken case', () => {
+  const bucketBroken = { ready: false, bucket: { ready: false, reason: 'bucket-missing' }, table: { ready: true } };
+  const tableBroken = { ready: false, bucket: { ready: true }, table: { ready: false, reason: 'table-rls-denied' } };
+
+  const bucketMsg = describeReceiptsBackendIssue(bucketBroken);
+  const tableMsg = describeReceiptsBackendIssue(tableBroken);
+
+  if (!bucketMsg.includes('storage bucket')) throw new Error('expected the bucket-broken message to mention the storage bucket');
+  if (!tableMsg.includes('upload')) throw new Error('expected the table-broken message to acknowledge uploads still work');
+  if (!tableMsg.includes("won't actually save") && !tableMsg.includes('receipt record')) {
+    throw new Error('expected the table-broken message to explain the record itself is what fails, not the photo');
+  }
+  if (bucketMsg === tableMsg) {
+    throw new Error('bucket-broken and table-broken are different problems with different fixes — they must not share the same message');
+  }
+});
+
+check('describeReceiptsBackendIssue: returns null when everything is ready', () => {
+  if (describeReceiptsBackendIssue({ ready: true }) !== null) {
+    throw new Error('expected no message when the backend is fully ready');
+  }
+  if (describeReceiptsBackendIssue(null) !== null) {
+    throw new Error('expected no message (not a crash) when there is no check result yet');
   }
 });
 

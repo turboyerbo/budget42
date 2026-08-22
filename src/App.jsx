@@ -103,6 +103,42 @@ export function resolveWho(selection, myFullName, partnerFullName, meKey = 'mine
   return partnerFullName || capitalize(selection) || 'Partner';
 }
 
+// The "who paid" toast should stay personal ("You just paid the rent!")
+// when you're marking your own bill, but name the person when it's logged
+// on their behalf ("Mariel just paid the rent!") — "Jordan just paid"
+// reads oddly to Jordan himself.
+export function describeBillPaidBy(attributedTo, myFullName) {
+  return firstName(attributedTo) === firstName(myFullName) ? 'You' : capitalize(firstName(attributedTo));
+}
+
+// Turns checkReceiptsBackendReady()'s result into one clear sentence. The
+// bucket-broken and table-broken cases need genuinely different messages:
+// a broken bucket means scanning can't work at all, but a broken table (with
+// the bucket fine) is the sneaky one — photos upload and transactions get
+// added just fine, so nothing LOOKS wrong, but the retrievable receipt
+// record silently never saves, and "View past scanned receipts" stays
+// empty no matter how many photos get scanned.
+export function describeReceiptsBackendIssue(backendCheck) {
+  if (!backendCheck || backendCheck.ready) return null;
+  const { bucket, table } = backendCheck;
+  const bucketBroken = bucket && !bucket.ready;
+  const tableBroken = table && !table.ready;
+
+  if (bucketBroken && bucket.reason === 'bucket-missing') {
+    return "The 'receipts' storage bucket doesn't exist. Run RECEIPT_SCANNING_MIGRATION.sql in Supabase (SQL Editor), then reload.";
+  }
+  if (bucketBroken) {
+    return "The 'receipts' storage bucket exists but its permissions are blocking uploads. Re-run RECEIPT_SCANNING_MIGRATION.sql in Supabase — it recreates the policies even if the bucket is already there.";
+  }
+  if (tableBroken && table.reason === 'table-missing') {
+    return "Photos will upload, but there's nowhere to save what Claude reads off them yet — the 'receipts' table doesn't exist. Run RECEIPT_SCANNING_MIGRATION.sql in Supabase, then reload.";
+  }
+  if (tableBroken) {
+    return "Photos will upload fine, but the receipt record won't actually save — the 'receipts' table's permissions are blocking it, even though the bucket itself is fine. Re-run RECEIPT_SCANNING_MIGRATION.sql in Supabase to fix its policy.";
+  }
+  return "Something's blocking receipt storage right now — scanning will likely fail. Try again in a moment, or check that RECEIPT_SCANNING_MIGRATION.sql has been run.";
+}
+
 // Today's date if it falls within the given month, otherwise the 1st of that month —
 // used so "add income/expense for this month" forms default sensibly when you're
 // looking at a month other than the current one.
@@ -1581,9 +1617,18 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
   const [fields, setFields]   = useState(null); // {merchant,date,amount,category,confidence,itemsSummary}
   const [who, setWho]         = useState(myFirst); // whose spending this is — either partner can log for the other
   const [saving, setSaving]   = useState(false);
+  const [backendCheck, setBackendCheck] = useState(null); // null while checking; {ready, reason} once known
   const cameraInputRef = useRef(null);
   const libraryInputRef = useRef(null);
   const presetCat = presetCategory ? allCats.find(c => c.id === presetCategory) : null;
+
+  useEffect(() => {
+    let cancelled = false;
+    import('./supabase.js').then(({ checkReceiptsBackendReady }) => {
+      checkReceiptsBackendReady().then(result => { if (!cancelled) setBackendCheck(result); });
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   async function handleFile(f) {
     if (!f) return;
@@ -1644,6 +1689,17 @@ export function ReceiptScanModal({allCats, profile, partnerName, onScan, onConfi
 
         {stage==='pick' && (
           <>
+            {backendCheck && !backendCheck.ready && (
+              <div style={{background:C.redLight, border:`1px solid ${C.red}33`, borderRadius:12,
+                padding:'12px 14px', marginBottom:16}}>
+                <p style={{margin:'0 0 4px', fontSize:12, fontWeight:700, color:C.red, fontFamily:SANS}}>
+                  ⚠️ Receipt storage isn't set up yet
+                </p>
+                <p style={{margin:0, fontSize:12, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.6}}>
+                  {describeReceiptsBackendIssue(backendCheck)}
+                </p>
+              </div>
+            )}
             {presetCat && (
               <div style={{display:'flex', alignItems:'center', gap:8, background:presetCat.color+'15',
                 border:`1px solid ${presetCat.color}33`, borderRadius:10, padding:'8px 12px', marginBottom:14}}>
@@ -2704,16 +2760,24 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     .filter(([k])=>!excludedIds.has(k))
     .reduce((a,[,v])=>a+v,0);
 
-  // Split that same total into two honest buckets: money that went to a
-  // recognized bill's category, and everything else (discretionary). The two
-  // always add up to totalSpent exactly — this is a relabeling of the same
-  // transactions, not a second, separate pool of money.
+  // Two honest, non-overlapping buckets that always add up to the same
+  // total money out. Bills Paid matches the Bills tab's own "Already paid"
+  // figure EXACTLY (buildSchedule's paidTotal) — this used to be computed
+  // separately here by filtering transactions to bill-matching categories,
+  // which silently dropped any bill whose category is normally excluded
+  // from spending (a credit card payment, categorized 'cc_payment', is the
+  // common case) — so paying off a card didn't reduce Available Money at
+  // all, and Home's "Bills Paid" could read far lower than what the Bills
+  // tab showed as paid for the exact same month. Discretionary is
+  // everything else: every non-excluded category that ISN'T one of these
+  // recognized bill categories, so the two buckets never double-count.
   const billCategoryIds = new Set(recurring.map(b => b.category));
-  let billsPaidThisMonth = 0, discretionarySpent = 0;
+  const billsPaidThisMonth = sched.paidTotal;
+  let discretionarySpent = 0;
   Object.entries(txByCat).forEach(([catId, amt]) => {
-    if (excludedIds.has(catId)) return;
-    if (billCategoryIds.has(catId)) billsPaidThisMonth += amt;
-    else discretionarySpent += amt;
+    if (excludedIds.has(catId)) return;       // cc_payment/transfer/income — never "spending"
+    if (billCategoryIds.has(catId)) return;   // already counted in billsPaidThisMonth above
+    discretionarySpent += amt;
   });
 
   // Predicted income comes from what you've entered as expected for THIS month,
@@ -2723,9 +2787,13 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     .reduce((a,i)=>a+(i.amount||0),0);
 
   // AVAILABLE MONEY = Actual Income − Money Spent This Month − Bills Paid This
-  // Month. The two subtracted terms are the exact same totalSpent split into
-  // two buckets above, so this equals totalIncome − totalSpent — no double
-  // counting, just presented as the two lines you actually asked to see.
+  // Month. Bills Paid now genuinely includes every paid bill (matching the
+  // Bills tab exactly), even ones categorized as a credit card payment or
+  // transfer — those dollars really did leave the account, so this can be
+  // slightly MORE than totalSpent's own "excluded categories" total, not
+  // just a relabeling of it. That's intentional: it's what makes Available
+  // Money correctly drop when a credit card gets paid off, instead of that
+  // payment silently going unaccounted for.
   const availableMoney = totalIncome - discretionarySpent - billsPaidThisMonth;
 
   // A lightweight budget figure just for the advice snapshot below — the
@@ -2775,21 +2843,38 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Spent This Month</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Other Spending</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
               color:'rgba(255,255,255,0.95)'}}>{fmt(discretionarySpent)}</p>
           </div>
 
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Bills Paid This Month</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>
+              Bills Paid
+              {setTab && (
+                <button onClick={()=>setTab('bills')} style={{border:'none',background:'none',padding:0,
+                  marginLeft:5,color:'rgba(255,255,255,0.75)',cursor:'pointer',fontFamily:SANS,
+                  fontSize:9,textDecoration:'underline',verticalAlign:'middle'}}>
+                  see Bills
+                </button>
+              )}
+            </p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
               color:'rgba(255,255,255,0.95)'}}>{fmt(billsPaidThisMonth)}</p>
           </div>
         </div>
 
+        <p style={{margin:'12px 0 0', fontSize:10, color:'rgba(255,255,255,0.6)', fontFamily:SANS,
+          borderTop:'1px solid rgba(255,255,255,0.15)', paddingTop:8}}>
+          {fmt(totalIncome)} income − {fmt(discretionarySpent)} other spending − {fmt(billsPaidThisMonth)} bills paid = {fmt(availableMoney)}.
+          "Bills Paid" here always matches the Bills tab's own "Already paid" exactly — including
+          bills like a credit card payment, which is real money out even though it's not counted
+          as everyday spending.
+        </p>
+
         {(dueTotal + carriedOverTotal) > 0 && (
-          <p style={{margin:'14px 0 0', fontSize:11, color:'rgba(255,255,255,0.75)',
+          <p style={{margin:'10px 0 0', fontSize:11, color:'rgba(255,255,255,0.75)',
             fontFamily:SANS, borderTop:'1px solid rgba(255,255,255,0.2)', paddingTop:10}}>
             {fmt(dueTotal + carriedOverTotal)} more in bills not charged yet — see{' '}
             <button onClick={()=>setTab?.('bills')} style={{border:'none', background:'none', padding:0,
@@ -3130,17 +3215,37 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
   const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
-  const txByCat={};
-  allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
-  const totalSpent=Object.entries(txByCat)
+  // "Combined" is the real total — it's always the sum of every transaction,
+  // full stop. Individual attribution ("who" on each transaction) isn't a
+  // reliable way to say what YOUR spending was, though: a shared credit
+  // card statement gets bulk-tagged to whoever uploaded it, even though
+  // both of you use the card, so "Jordan's spending" ends up meaning
+  // "whichever statements Jordan happened to upload" rather than anything
+  // meaningful. Each individual view instead shows an equal half of the
+  // household total — your fair share of what was actually spent together,
+  // which is always mathematically half of Combined by construction, and
+  // the two halves always add back up to the same Combined total exactly.
+  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
+
+  const combinedTxByCat = {};
+  everything.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')combinedTxByCat[k]=(combinedTxByCat[k]||0)+t.amount;});
+  const combinedTotalSpent = Object.entries(combinedTxByCat)
     .filter(([k])=>!excludedIds.has(k))
     .reduce((a,[,v])=>a+v,0);
-
-  // Spent in the last 7 days — same "is this week tight?" question Bills asks
-  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
-  const weekSpent = allTx
+  const combinedWeekSpent = everything
     .filter(t => !excludedIds.has(t.category||t.cat) && parseLocalDate(t.date) >= weekAgo)
     .reduce((a,t)=>a+t.amount,0);
+
+  const totalSpent = view === 'combined' ? combinedTotalSpent : combinedTotalSpent / 2;
+  const weekSpent   = view === 'combined' ? combinedWeekSpent  : combinedWeekSpent  / 2;
+
+  // Same halving applies per category, so the category list always sums
+  // back up to the hero's "Spent so far" exactly — showing individually-
+  // filtered amounts here while the hero shows half of combined would just
+  // relocate the same "these numbers don't add up" confusion one level down.
+  const txByCat = view === 'combined'
+    ? combinedTxByCat
+    : Object.fromEntries(Object.entries(combinedTxByCat).map(([k,v]) => [k, v/2]));
 
   const categoryBudgetSum = allCats
     .filter(c=>!excludedIds.has(c.id))
@@ -3152,8 +3257,12 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   const { shared:sharedMoments } = findSharedMoments(allTx);
   const together = summariseTogether(sharedMoments);
 
-  // Every transaction belonging to one category, newest first
-  const rowsFor=catId=>allTx
+  // Every transaction belonging to one category, newest first. Always shows
+  // every real transaction — never filtered by view — since the category
+  // TOTAL above can meaningfully be split in half, but there's no such
+  // thing as half a transaction. Each row's own avatar still shows who it
+  // was actually attributed to, for reference.
+  const rowsFor=catId=>everything
     .filter(t=>(t.category||t.cat)===catId)
     .sort((a,b)=>new Date(b.date)-new Date(a.date));
 
@@ -4505,10 +4614,13 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
 // ─── BILLS TAB ────────────────────────────────────────────────────────────────
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
-                          billPayments, allBillPayments, onTogglePaid, profile, setTab,
+                          billPayments, allBillPayments, onTogglePaid, profile, partnerName, setTab,
                           billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onConfigureMonth,
                           onUpdateBillForMonth, onConfirmSuggestedBill}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
+  const [payingWhoFor, setPayingWhoFor] = useState(null); // key of the bill currently showing "who paid this?"
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
 
   const detected = detectRecurring(history || []);
   // Suggestions ("might be bills") are patterns noticed in your statements —
@@ -4595,13 +4707,29 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
     const done = e.status === 'paid';
     const lockedByData = e.seenInData;   // came from a statement, cannot be un-ticked
     const carried = e.carriedFrom;       // {year, month} if this is an overdue bill rolled forward
+    // Unique per bill+month instance, so a carried-over row and a
+    // current-month row for the same merchant never share one picker.
+    const rowId = e.key + (carried ? `|${carried.year}-${carried.month}` : '');
+    const showingWhoPicker = payingWhoFor === rowId;
+
+    async function markPaid(paidByFullName) {
+      setPayingWhoFor(null);
+      await onTogglePaid(e, true, carried?.year, carried?.month, paidByFullName);
+    }
 
     return (
+      <div>
       <div style={{ display:'flex', alignItems:'center', gap:10, padding:'12px 14px 12px 12px' }}>
         {/* Tick it off yourself — for a carried-over bill this closes out the
-            month it was actually due in, not the one you're viewing */}
+            month it was actually due in, not the one you're viewing. Marking
+            paid asks who paid it first — either partner can log this on the
+            other's behalf, so it shouldn't default to whoever's tapping. */}
         <button
-          onClick={() => { if (!lockedByData) onTogglePaid(e, !done, carried?.year, carried?.month); }}
+          onClick={() => {
+            if (lockedByData) return;
+            if (done) { onTogglePaid(e, false, carried?.year, carried?.month); return; }
+            setPayingWhoFor(showingWhoPicker ? null : rowId);
+          }}
           disabled={lockedByData}
           title={lockedByData
             ? 'Already matched to a transaction in your statements'
@@ -4662,6 +4790,36 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
           </div>
           <ChevronRight size={14} color={C.sandDark} style={{ flexShrink:0 }}/>
         </button>
+      </div>
+
+      {showingWhoPicker && (
+        <div style={{ background:C.green+'0d', border:`1px solid ${C.green}33`, borderRadius:10,
+          padding:'10px 12px', margin:'0 14px 10px 46px' }}>
+          <p style={{ margin:'0 0 8px', fontSize:11, fontWeight:600, color:C.ink, fontFamily:SANS }}>
+            Who paid {e.label}?
+          </p>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={()=>markPaid(resolveWho('mine', profile?.name, partnerName, 'mine'))} style={{
+              flex:1, border:`1.5px solid ${C.blue}`, background:C.blue+'12', color:C.blue,
+              padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS,
+              cursor:'pointer', textTransform:'capitalize' }}>
+              {myFirst}
+            </button>
+            <button onClick={()=>markPaid(resolveWho('partner', profile?.name, partnerName, 'mine'))} style={{
+              flex:1, border:`1.5px solid ${C.purple}`, background:C.purple+'12', color:C.purple,
+              padding:'8px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS,
+              cursor:'pointer', textTransform:'capitalize' }}>
+              {partnerFirst}
+            </button>
+            <button onClick={()=>setPayingWhoFor(null)} style={{
+              border:`1px solid ${C.sandDark}`, background:'white', color:C.inkSoft,
+              padding:'8px 12px', borderRadius:8, fontWeight:600, fontSize:12, fontFamily:SANS,
+              cursor:'pointer' }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       </div>
     );
   };
@@ -7045,22 +7203,26 @@ export default function App() {
   /** Tick a bill off, or untick it. Defaults to marking it paid for the
    *  currently viewed month, but a carried-over overdue bill from an earlier
    *  month can pass its own year/month so the right instance gets closed out. */
-  async function toggleBillPaid(bill, paid, billYear = year, billMonth = month) {
-    const me = profile?.name || 'someone';
+  async function toggleBillPaid(bill, paid, billYear = year, billMonth = month, paidBy = null) {
+    // Either partner can mark a bill paid on the other's behalf — it
+    // doesn't matter who's physically holding the phone. paidBy lets the
+    // caller say who actually paid; defaulting to whoever's logged in only
+    // when nothing more specific was given.
+    const attributedTo = paidBy || profile?.name || 'someone';
     const sameAsViewedMonth = billYear === year && billMonth === month;
     // Update the screen first — waiting on the network to see a tick land feels broken
     if (sameAsViewedMonth) {
       setBillPayments(prev => paid
         ? [...prev.filter(p => p.key !== bill.key),
-           { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
+           { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:attributedTo, paid_at:new Date().toISOString() }]
         : prev.filter(p => p.key !== bill.key));
     }
     setAllBillPayments(prev => paid
       ? [...prev.filter(p => !(p.key === bill.key && p.year === billYear && p.month === billMonth)),
-         { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:me, paid_at:new Date().toISOString() }]
+         { key:bill.key, year:billYear, month:billMonth, label:bill.label, paid_by:attributedTo, paid_at:new Date().toISOString() }]
       : prev.filter(p => !(p.key === bill.key && p.year === billYear && p.month === billMonth)));
     try {
-      await setBillPaid(bill.key, billYear, billMonth, paid, me, bill.label);
+      await setBillPaid(bill.key, billYear, billMonth, paid, attributedTo, bill.label);
 
       // A bill only counts as spending once a real transaction exists for it.
       // If it's already matched to something in your statements (seenInData),
@@ -7073,7 +7235,7 @@ export default function App() {
                         : `${billYear}-${String(billMonth+1).padStart(2,'0')}-${String(bill.day||1).padStart(2,'0')}`;
         await addTxn({
           cat: bill.category || 'other', amount: bill.amount, date: billDate,
-          note: marker, merchant: bill.label, who: me, person: firstName(me) || 'jordan',
+          note: marker, merchant: bill.label, who: attributedTo, person: firstName(attributedTo) || 'jordan',
           source: 'bill-manual',
         });
       } else if (!paid) {
@@ -7087,9 +7249,12 @@ export default function App() {
       }
 
       if(paid) {
-        // Encouragement message when bill is paid
+        // Encouragement message when bill is paid — stays personal ("You")
+        // when marking your own bill, names the person when it's logged on
+        // their behalf, since "Jordan just paid" reads oddly to Jordan.
+        const who = describeBillPaidBy(attributedTo, profile?.name);
         const messages = [
-          `✨ Nice! You just paid ${bill.label}!`,
+          `✨ Nice! ${who} just paid ${bill.label}!`,
           `💪 ${bill.label} is handled!`,
           `🎯 Another bill knocked out!`,
           `💚 ${bill.label} ✓`,
@@ -7522,7 +7687,7 @@ export default function App() {
       {tab==='bills'   && <BillsTab history={history} txns={txns}
           bankImports={imports} allCats={allCats} year={year} month={month}
           billRules={billRules} showToast={showToast} billsLocal={billsLocal}
-          billPayments={billPayments} allBillPayments={allBillPayments} onTogglePaid={toggleBillPaid} profile={profile}
+          billPayments={billPayments} allBillPayments={allBillPayments} onTogglePaid={toggleBillPaid} profile={profile} partnerName={partnerName}
           billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
           onDeleteBillForMonth={deleteBillForMonth} onConfigureMonth={configureThisMonth}
           onUpdateBillForMonth={updateBillForMonth} onConfirmSuggestedBill={confirmSuggestedBill}

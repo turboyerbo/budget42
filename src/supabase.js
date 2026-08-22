@@ -9,6 +9,15 @@ const isMissingTable = err =>
   err?.code === '42P01' || err?.code === 'PGRST205' ||
   /schema cache|does not exist|not find the table/i.test(err?.message || '');
 
+/** A table/bucket that DOES exist, but Row Level Security is blocking the
+ *  read/write — a completely different failure from "missing," with its own
+ *  distinct error shape, and one the old narrow checks below didn't catch at
+ *  all: an RLS-denied insert would fall through as a raw, unexplained error
+ *  instead of a clear "here's what to fix" message. */
+export const isRlsDenied = err =>
+  err?.code === '42501' ||
+  /row-level security|permission denied|new row violates/i.test(err?.message || '');
+
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 export async function signUp(email, password, meta) {
@@ -619,12 +628,16 @@ export async function upsertGoals(goals, who) {
 
 // ── Receipt scanning (photo → Storage + a row, then Claude reads it) ───────────
 const isMissingBucket = err =>
-  err?.message && /bucket not found/i.test(err.message);
+  err?.statusCode === '404' || err?.status === 404 ||
+  /bucket not found|does not exist/i.test(err?.message || '');
 
 /**
  * Upload a receipt photo to the 'receipts' Storage bucket.
- * Returns { path, url }. Throws a readable error if the bucket doesn't exist
- * yet, so the UI can point at the migration instead of failing silently.
+ * Returns { path, url }. Throws a specific, readable error for the two
+ * distinct ways this fails — the bucket doesn't exist yet, or it exists but
+ * Row Level Security is denying the upload — rather than one narrow check
+ * that only caught the first case and let the second one through as a raw,
+ * unexplained Supabase error.
  */
 export async function uploadReceiptImage(file, id) {
   const ext = file.type === 'image/png' ? 'png'
@@ -635,14 +648,65 @@ export async function uploadReceiptImage(file, id) {
   if (error) {
     if (isMissingBucket(error)) {
       throw new Error(
-        "The 'receipts' storage bucket hasn't been created yet. Run the receipts " +
-        "migration in Supabase (SQL Editor) once, then try again."
+        "The 'receipts' storage bucket hasn't been created yet. Run " +
+        "RECEIPT_SCANNING_MIGRATION.sql in Supabase (SQL Editor) once, then try again."
       );
     }
-    throw error;
+    if (isRlsDenied(error)) {
+      throw new Error(
+        "The 'receipts' storage bucket exists but its permissions are blocking uploads. " +
+        "Re-run RECEIPT_SCANNING_MIGRATION.sql in Supabase (SQL Editor) — it recreates the " +
+        "upload policy even if the bucket is already there."
+      );
+    }
+    throw new Error('Could not upload to Storage: ' + (error.message || error));
   }
   const { data } = supabase.storage.from('receipts').getPublicUrl(path);
   return { path, url: data.publicUrl };
+}
+
+/**
+ * A cheap, harmless check for whether receipt scanning can actually work
+ * right now — run once when the scan modal opens, so a broken backend shows
+ * a clear message immediately instead of only surfacing after someone has
+ * already taken a photo and waited for it to fail.
+ *
+ * Checks BOTH halves independently — the Storage bucket AND the receipts
+ * table — because they can fail separately. A table-only problem is the
+ * sneakiest case: the photo uploads fine, the transaction gets added fine
+ * (that doesn't depend on this table at all), so nothing visibly breaks —
+ * but the receipt record never actually saves, "View past scanned receipts"
+ * stays empty no matter how many photos get scanned, and there's no error
+ * anywhere to explain why. Checking only the bucket (the original version
+ * of this function) would have missed exactly that case.
+ */
+export async function checkReceiptsBackendReady() {
+  const bucketCheck = async () => {
+    try {
+      const { error } = await supabase.storage.from('receipts').list('', { limit: 1 });
+      if (!error) return { ready: true };
+      if (isMissingBucket(error)) return { ready: false, reason: 'bucket-missing' };
+      if (isRlsDenied(error)) return { ready: false, reason: 'bucket-rls-denied' };
+      return { ready: false, reason: 'bucket-unknown' };
+    } catch {
+      return { ready: false, reason: 'bucket-unknown' };
+    }
+  };
+  const tableCheck = async () => {
+    try {
+      const { error } = await supabase.from('receipts').select('id').limit(1);
+      if (!error) return { ready: true };
+      if (isMissingTable(error)) return { ready: false, reason: 'table-missing' };
+      if (isRlsDenied(error)) return { ready: false, reason: 'table-rls-denied' };
+      return { ready: false, reason: 'table-unknown' };
+    } catch {
+      return { ready: false, reason: 'table-unknown' };
+    }
+  };
+
+  const [bucket, table] = await Promise.all([bucketCheck(), tableCheck()]);
+  if (bucket.ready && table.ready) return { ready: true };
+  return { ready: false, bucket, table };
 }
 
 export async function insertReceipt(receipt) {
@@ -652,7 +716,7 @@ export async function insertReceipt(receipt) {
     if (error) throw error;
     return data;
   } catch (err) {
-    if (isMissingTable(err)) return receipt; // degrade gracefully — image is still uploaded
+    if (isMissingTable(err) || isRlsDenied(err)) return receipt; // degrade gracefully — image is still uploaded
     throw err;
   }
 }
@@ -662,7 +726,7 @@ export async function updateReceipt(id, updates) {
     const { error } = await supabase.from('receipts').update(updates).eq('id', id);
     if (error) throw error;
   } catch (err) {
-    if (!isMissingTable(err)) throw err;
+    if (!isMissingTable(err) && !isRlsDenied(err)) throw err;
   }
 }
 
@@ -673,7 +737,7 @@ export async function getReceipts(limit = 30) {
     if (error) throw error;
     return data || [];
   } catch (err) {
-    if (isMissingTable(err)) return [];
+    if (isMissingTable(err) || isRlsDenied(err)) return [];
     throw err;
   }
 }
