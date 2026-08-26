@@ -215,19 +215,36 @@ function TopNav({tabs, activeTab, onTabChange, C, SANS}) {
       display:'flex', overflowX:'auto', padding:'0 8px',
       gap:4
     }}>
-      {tabs.map(({id, label, Icon}) => (
-        <button key={id} onClick={() => onTabChange(id)} style={{
-          padding:'10px 14px', border:'none', background:'transparent',
-          cursor:'pointer', color: activeTab===id ? C.green : C.inkSoft,
-          fontWeight: activeTab===id ? 600 : 400, fontSize:13,
-          fontFamily:SANS, whiteSpace:'nowrap',
-          borderBottom: activeTab===id ? `2px solid ${C.green}` : '2px solid transparent',
-          transition:'all 0.2s', display:'flex', alignItems:'center', gap:6
-        }}>
-          <Icon size={16} />
-          {label}
-        </button>
-      ))}
+      {tabs.map(({id, label, Icon, badge, badgeColor}) => {
+        // The three core tabs carry their own accent colour (A green /
+        // B red / C blue) so the classification is visible at a glance,
+        // not just a word to memorise. Secondary tabs keep the default.
+        const accent = badgeColor || C.green;
+        const active = activeTab === id;
+        return (
+          <button key={id} onClick={() => onTabChange(id)} style={{
+            padding:'10px 14px', border:'none', background:'transparent',
+            cursor:'pointer', color: active ? accent : C.inkSoft,
+            fontWeight: active ? 600 : 400, fontSize:13,
+            fontFamily:SANS, whiteSpace:'nowrap',
+            borderBottom: active ? `2px solid ${accent}` : '2px solid transparent',
+            transition:'all 0.2s', display:'flex', alignItems:'center', gap:6
+          }}>
+            {badge ? (
+              <span style={{
+                width:16, height:16, borderRadius:4, flexShrink:0,
+                background: active ? accent : C.sandMid,
+                color: active ? '#fff' : C.inkSoft,
+                fontSize:10, fontWeight:700, fontFamily:SANS,
+                display:'flex', alignItems:'center', justifyContent:'center'
+              }}>{badge}</span>
+            ) : (
+              <Icon size={16} />
+            )}
+            {label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -3190,7 +3207,8 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onChangeCategory,view,setView,
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
                   setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave,
-                  predictedIncomeTotal,receiptsSetup}) {
+                  predictedIncomeTotal,receiptsSetup,
+                  year,month,history,billRules,billActiveKeys,billConfiguredMonths}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
@@ -3215,40 +3233,51 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
   const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
 
-  // "Combined" is the real total — it's always the sum of every transaction,
-  // full stop. Individual attribution ("who" on each transaction) isn't a
-  // reliable way to say what YOUR spending was, though: a shared credit
-  // card statement gets bulk-tagged to whoever uploaded it, even though
-  // both of you use the card, so "Jordan's spending" ends up meaning
-  // "whichever statements Jordan happened to upload" rather than anything
-  // meaningful. Each individual view instead shows an equal half of the
-  // household total — your fair share of what was actually spent together,
-  // which is always mathematically half of Combined by construction, and
-  // the two halves always add back up to the same Combined total exactly.
+  // "Charges" (this tab) and "All"'s "Other Spending" must mean the exact
+  // same thing everywhere in the app, or the two numbers will keep looking
+  // like they disagree even when both are technically correct — which is
+  // exactly what was happening before this fix. A recognized bill's
+  // category is excluded here the same way it's excluded there, so the two
+  // totals are now genuinely the same calculation, not two different
+  // approximations of a similar idea.
+  const detected = detectRecurring(history || []);
+  const recurring = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Map(), year, month)
+    .filter(b => b.confidence === 'high');
+  const billCategoryIds = new Set(recurring.map(b => b.category));
+
+  // Each view shows what that person was ACTUALLY charged — the real
+  // transactions attributed to them, not a synthetic half-share. (An
+  // earlier version split Combined evenly on the theory that shared-card
+  // attribution was unreliable; attribution is now solid enough — every
+  // transaction carries a "who," visible as an avatar on each row — that
+  // showing real personal spending is both more honest and more useful.
+  // The two people's totals will NOT generally each be half of Combined,
+  // and that's correct: one of you genuinely spends more some months.)
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
 
-  const combinedTxByCat = {};
-  everything.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')combinedTxByCat[k]=(combinedTxByCat[k]||0)+t.amount;});
-  const combinedTotalSpent = Object.entries(combinedTxByCat)
-    .filter(([k])=>!excludedIds.has(k))
+  const isCountable = k => !excludedIds.has(k) && !billCategoryIds.has(k);
+
+  // allTx is already narrowed to the selected person (or everyone, for
+  // Combined) by filterByView above, so every figure below follows the
+  // view automatically and consistently.
+  const txByCat = {};
+  allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
+  const totalSpent = Object.entries(txByCat)
+    .filter(([k])=>isCountable(k))
     .reduce((a,[,v])=>a+v,0);
-  const combinedWeekSpent = everything
-    .filter(t => !excludedIds.has(t.category||t.cat) && parseLocalDate(t.date) >= weekAgo)
+  const weekSpent = allTx
+    .filter(t => isCountable(t.category||t.cat) && parseLocalDate(t.date) >= weekAgo)
     .reduce((a,t)=>a+t.amount,0);
 
-  const totalSpent = view === 'combined' ? combinedTotalSpent : combinedTotalSpent / 2;
-  const weekSpent   = view === 'combined' ? combinedWeekSpent  : combinedWeekSpent  / 2;
-
-  // Same halving applies per category, so the category list always sums
-  // back up to the hero's "Spent so far" exactly — showing individually-
-  // filtered amounts here while the hero shows half of combined would just
-  // relocate the same "these numbers don't add up" confusion one level down.
-  const txByCat = view === 'combined'
-    ? combinedTxByCat
-    : Object.fromEntries(Object.entries(combinedTxByCat).map(([k,v]) => [k, v/2]));
+  // Combined stays available for the "your share of the household" line
+  // shown alongside an individual view, so it's always clear how one
+  // person's spending relates to the total.
+  const combinedTotalSpent = [...txns,...bankImports]
+    .filter(t => isCountable(t.category||t.cat))
+    .reduce((a,t)=>a+t.amount,0);
 
   const categoryBudgetSum = allCats
-    .filter(c=>!excludedIds.has(c.id))
+    .filter(c=>!excludedIds.has(c.id) && !billCategoryIds.has(c.id))
     .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
   const budgetedForSpending = budgetOverride != null ? budgetOverride : categoryBudgetSum;
   const remainingToSpend = budgetedForSpending - totalSpent;
@@ -3257,12 +3286,13 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   const { shared:sharedMoments } = findSharedMoments(allTx);
   const together = summariseTogether(sharedMoments);
 
-  // Every transaction belonging to one category, newest first. Always shows
-  // every real transaction — never filtered by view — since the category
-  // TOTAL above can meaningfully be split in half, but there's no such
-  // thing as half a transaction. Each row's own avatar still shows who it
-  // was actually attributed to, for reference.
-  const rowsFor=catId=>everything
+  // Every transaction belonging to one category, newest first — narrowed
+  // to the selected person, so tapping into a category while viewing
+  // "Ness" shows only Ness's charges. (This previously showed everyone's
+  // transactions regardless of view, which is what the screenshot caught:
+  // Jordan's rows listed underneath a Ness total.) Each row keeps its
+  // avatar so who-spent-what stays visible at a glance.
+  const rowsFor=catId=>allTx
     .filter(t=>(t.category||t.cat)===catId)
     .sort((a,b)=>new Date(b.date)-new Date(a.date));
 
@@ -3327,6 +3357,16 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             )}
           </div>
         </div>
+
+        {view !== 'combined' && (
+          <p style={{margin:'12px 0 0', fontSize:10, color:'rgba(255,255,255,0.7)', fontFamily:SANS,
+            borderTop:'1px solid rgba(255,255,255,0.18)', paddingTop:8, lineHeight:1.5}}>
+            {view==='mine' ? capitalize(me) : capitalize(firstName(partnerName))}'s own charges only —
+            just the transactions attributed to them. The household spent {fmt(combinedTotalSpent)} in total
+            this month{combinedTotalSpent > 0 ? `, so this is ${Math.round((totalSpent/combinedTotalSpent)*100)}% of it` : ''}.
+            Recurring bills are tracked separately under Bills, not counted here.
+          </p>
+        )}
         {budgetOverride != null && (
           <button onClick={()=>{
             setBudgetOverride(null);
@@ -3499,13 +3539,13 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             color:C.blue, fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11, textDecoration:'underline'}}>
             Bills
           </button>
-          {' '}— once charged, they still count toward what you've spent below, under Home.
+          {' '}— tracked and budgeted separately, so they're not counted again in the totals below.
         </p>
       </div>
 
       <SL>Spending this month</SL>
       <Card style={{padding:'8px 0'}}>
-        {allCats.map((cat,i)=>{
+        {allCats.filter(cat=>!billCategoryIds.has(cat.id)).map((cat,i)=>{
           const spent=txByCat[cat.id]||0;
           const target=catTargets[cat.id]||cat.target;
           const over=spent>target&&target>0;
@@ -4134,11 +4174,31 @@ export function BillEditModal({ bill, allCats, onSave, onDelete, onDeleteEverywh
 }
 
 // ─── CALENDAR TAB ────────────────────────────────────────────────────────────
-export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onUpdateBillForMonth, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule}) {
+export function CalendarTab({year, month, txns, bankImports, billRules, billPayments, billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onUpdateBillForMonth, expectedIncome, setExpectedIncome, goals, onSaveGoals, allCats, history, showToast, onSaveRule, onDeleteRule, profile, partnerName, view, setView}) {
   const [selectedDay, setSelectedDay] = useState(null);
   const today = new Date();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDayOfWeek = new Date(year, month, 1).getDay();
+
+  // Default to Combined so an unset view never blanks the calendar.
+  const v = view || 'combined';
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
+  const viewFirst = v === 'mine' ? myFirst : v === 'partner' ? partnerFirst : null;
+  const viewName = v === 'combined' ? 'Combined' : capitalize(viewFirst);
+
+  // Income carries a real "who" — filter it honestly.
+  const matchesWho = t => v === 'combined' || firstName(t.who) === viewFirst;
+
+  // A goal belongs to one person or to the couple. The person keys are
+  // positional ('jordan' = alphabetically-first name), so resolve them
+  // through the same helper the Goals UI uses rather than assuming.
+  const goalOwnerFirst = g => {
+    if (g.person === 'couple') return null; // shared — Combined only
+    const names = [profile?.name, partnerName].filter(Boolean).sort((a,b)=>a.localeCompare(b));
+    return firstName(g.person === 'jordan' ? names[0] : names[1]);
+  };
+  const goalMatchesView = g => v === 'combined' || goalOwnerFirst(g) === viewFirst;
 
   // Merged bills (detected + manual overrides), same source of truth as the Bills tab
   const detected = detectRecurring(history || []);
@@ -4164,6 +4224,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
   const actualIncomeByDay = {};
   [...(txns||[]), ...(bankImports||[])]
     .filter(t => (t.category||t.cat) === 'income')
+    .filter(matchesWho)
     .forEach(t => {
       const d = parseLocalDate(t.date).getDate();
       if (!actualIncomeByDay[d]) actualIncomeByDay[d] = [];
@@ -4171,7 +4232,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
     });
 
   const depositsByDay = {};
-  (goals || []).forEach(g => {
+  (goals || []).filter(goalMatchesView).forEach(g => {
     (g.deposits || []).forEach(dep => {
       const d = parseLocalDate(dep.date).getDate();
       if (!depositsByDay[d]) depositsByDay[d] = [];
@@ -4187,11 +4248,16 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
   return (
     <div style={{padding: '16px'}}>
-      <h2 style={{margin: '0 0 16px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
-        📅 Financial Calendar
+      <h2 style={{margin: '0 0 12px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
+        📅 Financial Calendar · {viewName}
       </h2>
-      <p style={{margin: '0 0 16px', fontSize: 12, color: C.inkSoft, fontFamily: SANS}}>
-        Tap any day to see and edit what's happening — predicted income, bills due, and goal deposits.
+
+      {setView && <ViewToggle view={v} setView={setView} myLabel={myFirst} partnerLabel={partnerFirst}/>}
+
+      <p style={{margin: '0 0 16px', fontSize: 12, color: C.inkSoft, fontFamily: SANS, lineHeight: 1.6}}>
+        {v === 'combined'
+          ? "Tap any day to see and edit what's happening — predicted income, bills due, and goal deposits."
+          : `Showing ${viewName}'s own income and goal deposits. Bills due are shown for the whole household — a bill isn't anyone's personally until someone is recorded paying it, which happens in Bills.`}
       </p>
 
       {/* Calendar Grid */}
@@ -4615,12 +4681,29 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
 export function BillsTab({history, txns, bankImports, allCats, year, month,
                           billRules, onSaveRule, onDeleteRule, showToast, billsLocal,
                           billPayments, allBillPayments, onTogglePaid, profile, partnerName, setTab,
+                          view, setView,
                           billActiveKeys, billConfiguredMonths, onDeleteBillForMonth, onConfigureMonth,
                           onUpdateBillForMonth, onConfirmSuggestedBill}) {
   const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
   const [payingWhoFor, setPayingWhoFor] = useState(null); // key of the bill currently showing "who paid this?"
   const myFirst = firstName(profile?.name) || 'me';
   const partnerFirst = firstName(partnerName) || 'partner';
+  // Default to Combined — an unset view must never silently filter every
+  // bill out of the list.
+  const v = view || 'combined';
+  const viewName = v === 'mine' ? capitalize(myFirst)
+                 : v === 'partner' ? capitalize(partnerFirst) : 'Combined';
+
+  // Who a paid bill is attributed to. A bill ticked off by hand records
+  // paid_by; one matched automatically from a statement doesn't name anyone,
+  // so it stays unattributed rather than being guessed at.
+  const billPaidByFirst = e => firstName(e.tickedBy) || null;
+  const matchesView = e => {
+    if (v === 'combined') return true;
+    const who = billPaidByFirst(e);
+    if (!who) return false; // unattributed — only ever shown under Combined
+    return who === (v === 'mine' ? myFirst : partnerFirst);
+  };
 
   const detected = detectRecurring(history || []);
   // Suggestions ("might be bills") are patterns noticed in your statements —
@@ -4649,6 +4732,13 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
     sched.entries.filter(e => e.status === 'due' || e.status === 'overdue').map(e => e.key)
   );
   const needsReview = carriedOver.filter(e => thisMonthActiveKeys.has(e.key));
+
+  // Who paid what, of the bills already settled this month.
+  const paidEntries = sched.entries.filter(e => e.status === 'paid');
+  const paidByViewTotal = paidEntries.filter(matchesView).reduce((a, e) => a + e.amount, 0);
+  const unattributedPaidTotal = paidEntries
+    .filter(e => !billPaidByFirst(e))
+    .reduce((a, e) => a + e.amount, 0);
 
   /** Saving a bill's details (amount, label, day, category) only ever
    *  affects the month you're looking at — amounts genuinely change month
@@ -4873,11 +4963,15 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 
   return (
     <div style={{ padding:'16px 16px 0' }}>
-      <Card style={{ background:C.green, padding:'20px 20px' }}>
+      {setView && <ViewToggle view={v} setView={setView} myLabel={myFirst} partnerLabel={partnerFirst}/>}
+
+      <Card style={{ background:VIEW_COLOR[v] || C.green, padding:'20px 20px' }}>
         <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:4 }}>
           <p style={{ fontSize:11, color:'rgba(255,255,255,0.7)', textTransform:'uppercase',
             letterSpacing:'0.1em', margin:0, fontFamily:SANS }}>
-            Still to be paid in {MONTHS[month]}
+            {v === 'combined'
+              ? `Still to be paid in ${MONTHS[month]}`
+              : `${viewName} paid in ${MONTHS[month]}`}
           </p>
           <button onClick={handlePrint} title={`Print all bills for ${MONTHS[month]}`}
             style={{ border:'none', background:'rgba(255,255,255,0.18)', borderRadius:8,
@@ -4888,12 +4982,19 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
         </div>
         <p style={{ fontFamily:SERIF, fontSize:40, fontWeight:600, color:'#fff',
           margin:'0 0 14px', letterSpacing:'-0.02em', lineHeight:1 }}>
-          {fmt(sched.outstandingTotal + carriedOverTotal)}
+          {v === 'combined'
+            ? fmt(sched.outstandingTotal + carriedOverTotal)
+            : fmt(paidByViewTotal)}
         </p>
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
-          {[['Next 7 days', fmt(weekTotal)],
-            ['Already paid', fmt(sched.paidTotal)],
-            ['Whole month', fmt(sched.monthTotal)]].map(([l, v]) => (
+          {(v === 'combined'
+            ? [['Next 7 days', fmt(weekTotal)],
+               ['Already paid', fmt(sched.paidTotal)],
+               ['Whole month', fmt(sched.monthTotal)]]
+            : [[`${viewName} paid`, fmt(paidByViewTotal)],
+               ['Paid by both', fmt(sched.paidTotal)],
+               ['Still owed (household)', fmt(sched.outstandingTotal + carriedOverTotal)]]
+          ).map(([l, v]) => (
             <div key={l}>
               <p style={{ margin:0, fontSize:10, color:'rgba(255,255,255,0.65)',
                 textTransform:'uppercase', letterSpacing:'0.08em', fontFamily:SANS }}>{l}</p>
@@ -4902,7 +5003,16 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
             </div>
           ))}
         </div>
-        {carriedOverTotal > 0 && (
+        {v !== 'combined' && (
+          <p style={{ margin:'12px 0 0', fontSize:10, color:'rgba(255,255,255,0.7)', fontFamily:SANS,
+            borderTop:'1px solid rgba(255,255,255,0.18)', paddingTop:8, lineHeight:1.5 }}>
+            {fmt(paidByViewTotal)} of the household's {fmt(sched.paidTotal)} in paid bills was recorded
+            as paid by {viewName}
+            {sched.paidTotal > 0 ? ` — ${Math.round((paidByViewTotal / sched.paidTotal) * 100)}% of it` : ''}.
+            {unattributedPaidTotal > 0 && ` ${fmt(unattributedPaidTotal)} was matched automatically from a statement and isn't assigned to either of you.`}
+          </p>
+        )}
+        {v === 'combined' && carriedOverTotal > 0 && (
           <p style={{ margin:'12px 0 0', fontSize:11, color:'rgba(255,255,255,0.75)',
             fontFamily:SANS, borderTop:'1px solid rgba(255,255,255,0.2)', paddingTop:10 }}>
             Includes {fmt(carriedOverTotal)} still owed from earlier months
@@ -5013,14 +5123,18 @@ create policy "allow all on bill_payments" on bill_payments
       <Section title="Overdue from earlier months"
         items={carriedOver}
         note={carriedOver.length > 0 ? "These stay here — untouched — until you mark them complete. They don't reset just because the month changed." : null}/>
-      <Section title="Past the usual date"
+      <Section title={v === 'combined' ? 'Past the usual date' : 'Past the usual date — household'}
         items={sched.entries.filter(e => e.status === 'overdue')}/>
-      <Section title="Coming up"
+      <Section title={v === 'combined' ? 'Coming up' : 'Coming up — household'}
         items={sched.entries.filter(e => e.status === 'due')}
-        note={weekTotal > 0 ? `${fmt(weekTotal)} of this lands within seven days.` : null}/>
-      <Section title="Paid this month"
-        items={sched.entries.filter(e => e.status === 'paid')}
-        note="Ticked off by either of you, or matched to a transaction in an uploaded statement."/>
+        note={v === 'combined'
+          ? (weekTotal > 0 ? `${fmt(weekTotal)} of this lands within seven days.` : null)
+          : "Nobody's paid these yet, so they aren't anyone's personally — whoever pays gets credited when it's ticked off."}/>
+      <Section title={v === 'combined' ? 'Paid this month' : `Paid this month by ${viewName}`}
+        items={sched.entries.filter(e => e.status === 'paid').filter(matchesView)}
+        note={v === 'combined'
+          ? "Ticked off by either of you, or matched to a transaction in an uploaded statement."
+          : `Only bills ${viewName} was recorded as paying. Bills matched automatically from a statement don't name anyone, so they stay under Combined.`}/>
 
       {confirmed.length === 0 && (
         <Card style={{ textAlign:'center', padding:'32px 24px' }}>
@@ -5163,7 +5277,7 @@ export function GoalsTab({txns, bankImports, billPayments, billRules, profile}) 
   );
 }
 
-export function ChartsTab({txns,bankImports,allCats,year,month,personView,profile}) {
+export function ChartsTab({txns,bankImports,allCats,year,month,personView,profile,partnerName}) {
   const me=firstName(profile?.name);
   const [view,setView]=useState('month'); // 'month' | 'year'
   const [annualData,setAnnualData]=useState([]);
@@ -5173,10 +5287,12 @@ export function ChartsTab({txns,bankImports,allCats,year,month,personView,profil
     getAllBankImports().then(data=>{setAnnualData(data);setAnnualLoaded(true);}).catch(()=>{setAnnualLoaded(true);});
   },[]);
 
-  // Monthly data
-  const allTx=(personView==='mine'
-    ? [...txns,...bankImports].filter(t=>!firstName(t.who)||firstName(t.who)===me)
-    : [...txns,...bankImports]);
+  // Monthly data. Uses the shared filterByView so charts agree with every
+  // other tab — this previously had its own copy of the old permissive
+  // filter (unattributed transactions counted as "mine" too, fixed
+  // elsewhere in v63) and had no partner view at all, so selecting Ness
+  // silently showed the household's charts.
+  const allTx=filterByView([...txns,...bankImports], personView || 'combined', me, firstName(partnerName));
   const excludedIds=new Set([...ALWAYS_EXCLUDED_CATS, ...allCats.filter(c=>c.excluded).map(c=>c.id)]);
   const monthly={};
   allTx.forEach(t=>{const k=t.category||t.cat;
@@ -6343,13 +6459,22 @@ export function UploadTab({showToast, onImported, allCats, aiOn, aiDiag, profile
 }
 
 // ─── AUTOMATION TAB (Charts + Upload combined) ────────────────────────────────
-export function AutomationTab({txns,bankImports,allCats,year,month,personView,profile,partnerName,
+export function AutomationTab({txns,bankImports,allCats,year,month,personView,setView,profile,partnerName,
                                 showToast,onImported,aiOn,aiDiag}) {
   const [section, setSection] = useState('charts'); // 'charts' | 'upload'
+  const v = personView || 'combined';
+  const myFirst = firstName(profile?.name) || 'me';
+  const partnerFirst = firstName(partnerName) || 'partner';
 
   return (
     <div>
       <div style={{padding:'16px 16px 0'}}>
+        {/* Charts follow whoever's selected; uploads always ask who the
+            statement belongs to as part of the upload itself, so the
+            toggle only applies to the charts half. */}
+        {setView && section==='charts' &&
+          <ViewToggle view={v} setView={setView} myLabel={myFirst} partnerLabel={partnerFirst}/>}
+
         <div style={{display:'flex',background:C.sandMid,borderRadius:12,padding:3,
           marginBottom:4}}>
           {[['charts','📊 Charts'],['upload','⬆️ Upload']].map(([k,l])=>(
@@ -6365,7 +6490,7 @@ export function AutomationTab({txns,bankImports,allCats,year,month,personView,pr
       </div>
       {section==='charts'
         ? <ChartsTab txns={txns} bankImports={bankImports} allCats={allCats}
-            year={year} month={month} personView={personView} profile={profile}/>
+            year={year} month={month} personView={v} profile={profile} partnerName={partnerName}/>
         : <UploadTab showToast={showToast} onImported={onImported} allCats={allCats}
             aiOn={aiOn} aiDiag={aiDiag} profile={profile} partnerName={partnerName}/>}
     </div>
@@ -7608,10 +7733,16 @@ export default function App() {
   );
 
   const color=nameColor(profile.name);
+  // Renamed for a simple, memorable A/B/C system: All (the whole combined
+  // picture), Bills (recurring, tracked separately), Charges (everyday
+  // discretionary spending). Internal tab ids stay 'home'/'spending' —
+  // renaming those would mean touching every tab==='home' check in the
+  // file for a change that's purely about what the person sees, so this
+  // only renames the label and adds a color-coded letter, not the routing.
   const NAV=[
-    {id:'home',   label:'Home',   Icon:Home},
-    {id:'spending',label:'Spending',Icon:Wallet},
-    {id:'bills',  label:'Bills',  Icon:CalendarDays},
+    {id:'home',   label:'All',     Icon:Home,       badge:'A', badgeColor:C.green},
+    {id:'bills',  label:'Bills',   Icon:CalendarDays,badge:'B', badgeColor:C.red},
+    {id:'spending',label:'Charges',Icon:Wallet,      badge:'C', badgeColor:C.blue},
     {id:'calendar',label:'Calendar',Icon:Calendar},
     {id:'automation',label:'Automation',Icon:PieChart},
   ];
@@ -7679,7 +7810,9 @@ export default function App() {
           setQuickAddCat={setQuickAddCat} setTab={setTab}
           setEditingCatTarget={setEditingCatTarget} showToast={showToast}
           onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}
-          onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal} receiptsSetup={receiptsSetup}/>}
+          onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal} receiptsSetup={receiptsSetup}
+          year={year} month={month} history={history} billRules={billRules}
+          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}/>}
       {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           profile={profile} partnerName={partnerName}
@@ -7691,16 +7824,18 @@ export default function App() {
           billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
           onDeleteBillForMonth={deleteBillForMonth} onConfigureMonth={configureThisMonth}
           onUpdateBillForMonth={updateBillForMonth} onConfirmSuggestedBill={confirmSuggestedBill}
-          onSaveRule={saveBillRule} onDeleteRule={removeBillRule} setTab={setTab}/>}
+          onSaveRule={saveBillRule} onDeleteRule={removeBillRule} setTab={setTab}
+          view={view} setView={setView}/>}
       {tab==='calendar' && <CalendarTab year={year} month={month} txns={txns}
           bankImports={imports} billRules={billRules} billPayments={billPayments}
           billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
           onDeleteBillForMonth={deleteBillForMonth} onUpdateBillForMonth={updateBillForMonth}
           expectedIncome={expectedIncome} setExpectedIncome={setExpectedIncome}
           goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
-          showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}/>}
+          showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}
+          profile={profile} partnerName={partnerName} view={view} setView={setView}/>}
       {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCats}
-          year={year} month={month} personView={view} profile={profile} partnerName={partnerName}
+          year={year} month={month} personView={view} setView={setView} profile={profile} partnerName={partnerName}
           showToast={showToast} onImported={loadAll} aiOn={aiOn} aiDiag={aiDiag}/>}
 
       {showReset && (

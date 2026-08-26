@@ -292,6 +292,60 @@ check('HomeTab: a bill categorized as a credit card payment counts as Bills Paid
   }
 });
 
+// Bug report: Spending tab showed "Spent so far $4,005.31" while Home
+// showed "Other Spending $3,565.85" for the same month — two different
+// numbers under two similarly-named labels. Both were technically correct
+// under their own (different) definitions, which is exactly the problem:
+// Spending counted bill-category transactions, Home deliberately didn't
+// (to avoid double-counting with Bills Paid). This proves they're now
+// the same calculation, not two approximations of a similar idea — a
+// recognized bill's category (Netflix → 'subscriptions') is excluded from
+// BOTH tabs' spending totals identically, given the exact same underlying
+// data.
+check('SpendingTab and HomeTab show the exact same spending total for identical data', () => {
+  const netflixBill = { key:'manual:netflix', label:'Netflix', amount:15, day:2, status:'manual', category:'subscriptions' };
+  const netflixCharge = mk({ description:'NETFLIX.COM', amount:15, category:'subscriptions', date:'2026-07-02' });
+  const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
+  const paycheck = mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15' });
+
+  const sharedProps = {
+    year: 2026, month: 6, history: [], billRules: [netflixBill],
+    billActiveKeys: new Map(), billConfiguredMonths: new Map(),
+  };
+
+  const homeHtml = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [netflixCharge, groceries, paycheck], ccTarget: 0,
+    allCats, catTargets: {}, ...sharedProps,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+    billPayments: [],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+
+  const spendingHtml = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [netflixCharge, groceries, paycheck],
+    allCats, catTargets: {}, ...sharedProps,
+    suggested: {}, onAcceptSuggested: noop, onDismissSuggested: noop,
+    onAddCat: noop, onDeleteCat: noop, profile, partnerName: 'Mariel',
+    onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view: 'combined', setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop,
+    setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
+  }));
+
+  // Both should show $120 (groceries only) — NOT $135 (groceries + the
+  // $15 Netflix bill charge), and NOT disagree with each other.
+  if (!homeHtml.includes('120.00')) throw new Error('expected Home\'s Other Spending to show $120 (Netflix excluded as a bill category)');
+  if (!spendingHtml.includes('120.00')) throw new Error('expected Spending\'s total to show $120 (Netflix excluded as a bill category) — this is the reported mismatch');
+  if (spendingHtml.includes('135.00') || homeHtml.includes('135.00')) {
+    throw new Error('a bill-category transaction leaked into the discretionary total on one of the two tabs');
+  }
+});
+
 // Regression guard for a real, reproducible bug: new Date('2026-08-01') parses
 // as UTC midnight. In any timezone behind UTC (Toronto included), reading it
 // back with local getters like getMonth() rolls it back to the previous day —
@@ -377,18 +431,17 @@ check('SpendingTab: dashboard shows Still Available To Spend', () => {
   if (!html.includes('120.00')) throw new Error('expected the $120 grocery spend to appear');
 });
 
-// Bug report: "Combined is the total. If I click Jordan it should be HALF
-// of combined. Ness should also be HALF the combined total. Right now it
-// makes no sense." Confirmed from the screenshots this wasn't a math bug —
-// Jordan ($3,501.02) + Ness ($432.29) really did add up to Combined
-// ($3,933.31) exactly. The problem was the MODEL: individual attribution
-// (whoever's name is on a transaction) doesn't reflect fair spending when
-// a shared card gets bulk-tagged to whichever partner uploaded the
-// statement. Each view should show an equal half, always.
-check('SpendingTab: Jordan and Ness each show exactly half of Combined, not lopsided individual totals', () => {
-  // Deliberately unequal attribution — Jordan tagged with $300, Ness with
-  // only $60 — mirroring the real lopsided screenshot, not a coincidental
-  // even split that could hide a bug.
+// Bug report (reversing an earlier decision): "when I click either myself
+// or my partner spending, it should ONLY show personal spending, not
+// combined." An earlier version split Combined evenly between the two
+// people, on the theory that shared-card attribution was too unreliable to
+// show real per-person totals. Attribution is solid now — every
+// transaction carries a "who," visible as an avatar on each row — so each
+// view shows that person's REAL charges. The two totals will not each be
+// half of Combined, and that's the point: one person genuinely spends more
+// some months, and the app should say so.
+check('SpendingTab: each person sees their own real charges, not an even split of Combined', () => {
+  // Deliberately unequal: Jordan $300, Ness $60.
   const jordanTxn = mk({ description:'BIG PURCHASE', amount:300, category:'groceries', date:'2026-07-10', who:'Jordan Yerbury' });
   const nessTxn = mk({ description:'SMALL PURCHASE', amount:60, category:'groceries', date:'2026-07-11', who:'Mariel Smith' });
 
@@ -408,15 +461,17 @@ check('SpendingTab: Jordan and Ness each show exactly half of Combined, not lops
   const mine = render('mine');       // Jordan (profile's own name)
   const partner = render('partner'); // Ness/Mariel
 
-  // Combined must show the real total: $360
-  if (!combined.includes('360.00')) throw new Error('expected Combined to show the true total ($360)');
+  if (!combined.includes('360.00')) throw new Error('expected Combined to show the true household total ($360)');
 
-  // Each individual view must show exactly half ($180) — NOT the lopsided
-  // individually-attributed amounts ($300 / $60) from the old behavior
-  if (!mine.includes('180.00')) throw new Error('expected "mine" to show exactly half of Combined ($180), not the lopsided $300 individual total');
-  if (mine.includes('300.00')) throw new Error('"mine" is still showing the old lopsided individually-attributed amount ($300) instead of half of Combined');
-  if (!partner.includes('180.00')) throw new Error('expected "partner" to show exactly half of Combined ($180), not the lopsided $60 individual total');
-  if (partner.includes('60.00')) throw new Error('"partner" is still showing the old lopsided individually-attributed amount ($60) instead of half of Combined');
+  // Each view must show that person's OWN real spending
+  if (!mine.includes('300.00')) throw new Error('expected Jordan\'s view to show his real $300 of charges');
+  if (!partner.includes('60.00')) throw new Error('expected Ness\'s view to show her real $60 of charges');
+
+  // And must NOT show the other person's money, or an even split
+  if (partner.includes('300.00')) throw new Error('Ness\'s view is showing Jordan\'s $300 — individual views must be personal only');
+  if (mine.includes('180.00') || partner.includes('180.00')) {
+    throw new Error('still showing an even half-split of Combined instead of real personal spending');
+  }
 });
 
 ['mine','combined'].forEach(v => {
@@ -541,6 +596,51 @@ check('render BillsTab (with user rules)', () => renderToString(React.createElem
 // interaction) — this confirms the component renders safely with the new
 // partnerName prop and an unpaid bill present; the actual attribution
 // logic (resolveWho) is already covered by its own dedicated tests above.
+// Every part of the app should distinguish combined from personal. Bills
+// already record WHO paid (v74), but the tab ignored the view entirely and
+// always showed the household picture. Combined now shows everything;
+// each personal view shows only the bills that person was recorded paying.
+// Fixtures here are deliberately self-contained (empty history/txns) so the
+// only bills in play are the two below — otherwise the shared fixtures'
+// own detected bills muddy the amounts being asserted.
+check('BillsTab: personal views show only the bills that person paid', () => {
+  const cats = [{ id:'other', label:'Other', icon:'Package', color:'#888', target:0 }];
+  const rules = [
+    { key:'manual:rent', label:'Rent', amount:1900, day:1, status:'manual', category:'other' },
+    { key:'manual:gym',  label:'Gym',  amount:60,   day:5, status:'manual', category:'other' },
+  ];
+  const payments = [
+    { key:'manual:rent', year:2026, month:6, label:'Rent', paid_by:'Jordan Yerbury', paid_at:'2026-07-01T00:00:00.000Z' },
+    { key:'manual:gym',  year:2026, month:6, label:'Gym',  paid_by:'Mariel Smith',   paid_at:'2026-07-05T00:00:00.000Z' },
+  ];
+  const render = (view) => renderToString(React.createElement(BillsTab, {
+    history: [], txns: [], bankImports: [], allCats: cats, year: 2026, month: 6,
+    billRules: rules, onSaveRule: noop, onDeleteRule: noop, showToast: noop, billsLocal: false,
+    billPayments: payments, allBillPayments: payments, onTogglePaid: noop,
+    profile: { name:'Jordan Yerbury' }, partnerName: 'Mariel Smith', setTab: noop,
+    billActiveKeys: new Map(), billConfiguredMonths: new Set(),
+    onDeleteBillForMonth: noop, onConfigureMonth: noop,
+    view, setView: noop,
+  }));
+
+  const combined = render('combined');
+  const mine = render('mine');
+  const partner = render('partner');
+
+  // Combined shows both partners' paid bills
+  if (!combined.includes('$1,900.00') || !combined.includes('$60.00')) {
+    throw new Error("Combined should list both partners' paid bills");
+  }
+
+  // The real signal: each personal view shows that person's bill and NOT
+  // the other person's. (The household total $1,960 legitimately appears in
+  // both, as the "paid by both" context line — so it can't be the test.)
+  if (!mine.includes('$1,900.00')) throw new Error("Jordan's view should show the $1,900 rent he paid");
+  if (mine.includes('$60.00')) throw new Error("Jordan's view is showing the $60 gym Ness paid — Bills is ignoring the view");
+  if (!partner.includes('$60.00')) throw new Error("Ness's view should show the $60 gym she paid");
+  if (partner.includes('$1,900.00')) throw new Error("Ness's view is showing the $1,900 rent Jordan paid — Bills is ignoring the view");
+});
+
 check('render BillsTab (unpaid bill, partnerName present for the "who paid" picker)', () => {
   const html = renderToString(React.createElement(BillsTab, {
     history, txns, bankImports: imports, allCats, year: 2026, month: 6,
@@ -956,6 +1056,53 @@ check('CalendarTab: month grid uses minmax(0,1fr) columns, not bare 1fr, to prev
       throw new Error(`found a 7-column grid without minmax(0,1fr) — this will overflow on narrow screens: "${decl}"`);
     }
   });
+});
+
+// Calendar and Charts were the last two tabs ignoring the view.
+check('CalendarTab: personal views show only that person\'s income', () => {
+  const jordanPay = mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15', who:'Jordan Yerbury' });
+  const nessPay   = mk({ description:'CLINIC PAY',   amount:2200, category:'income', direction:'credit', date:'2026-07-16', who:'Mariel Smith' });
+
+  const render = (view) => renderToString(React.createElement(CalendarTab, {
+    year: 2026, month: 6, txns: [], bankImports: [jordanPay, nessPay],
+    billRules: [], billPayments: [], expectedIncome: [], setExpectedIncome: noop,
+    goals: [], onSaveGoals: noop, allCats, history: [], showToast: noop,
+    onSaveRule: noop, onDeleteRule: noop,
+    profile: { name:'Jordan Yerbury' }, partnerName: 'Mariel Smith',
+    view, setView: noop,
+  }));
+
+  const combined = render('combined');
+  const mine = render('mine');
+  const partner = render('partner');
+
+  // Day badges use the compact $Xk format, so assert on those
+  if (!combined.includes('$5.0k') || !combined.includes('$2.2k')) {
+    throw new Error("Combined should show both partners' income on the calendar");
+  }
+  if (!mine.includes('$5.0k')) throw new Error("Jordan's calendar should show his own $5,000 income");
+  if (mine.includes('$2.2k')) throw new Error("Jordan's calendar is showing Ness's income — Calendar is ignoring the view");
+  if (!partner.includes('$2.2k')) throw new Error("Ness's calendar should show her own $2,200 income");
+  if (partner.includes('$5.0k')) throw new Error("Ness's calendar is showing Jordan's income — Calendar is ignoring the view");
+});
+
+check('ChartsTab: personal views chart only that person\'s spending', () => {
+  const jordanTxn = mk({ description:'BIG BUY', amount:300, category:'groceries', date:'2026-07-10', who:'Jordan Yerbury' });
+  const nessTxn   = mk({ description:'SMALL BUY', amount:60, category:'groceries', date:'2026-07-11', who:'Mariel Smith' });
+
+  const render = (personView) => renderToString(React.createElement(ChartsTab, {
+    txns: [], bankImports: [jordanTxn, nessTxn], allCats, year: 2026, month: 6,
+    personView, profile: { name:'Jordan Yerbury' }, partnerName: 'Mariel Smith',
+  }));
+
+  const combined = render('combined');
+  const mine = render('mine');
+  const partner = render('partner');
+
+  if (!combined.includes('360.00')) throw new Error('Combined charts should total both partners ($360)');
+  if (!mine.includes('300.00')) throw new Error("Jordan's charts should total his own $300");
+  if (!partner.includes('60.00')) throw new Error("Ness's charts should total her own $60");
+  if (partner.includes('360.00')) throw new Error("Ness's charts are showing the household total — Charts is ignoring the view");
 });
 
 check('render ChartsTab', () => renderToString(React.createElement(ChartsTab, {
