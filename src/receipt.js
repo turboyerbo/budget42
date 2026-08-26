@@ -110,3 +110,53 @@ export async function analyzeReceipt(file, catIds) {
     itemsSummary: parsed.itemsSummary || '',
   };
 }
+
+// ─── Making a phone photo safe to handle ──────────────────────────────────────
+// A modern phone photo is 12MP+ and 3-15MB. Turning that straight into a
+// base64 string (which the vision API needs) produces a ~20MB string, and
+// doing that on mobile Safari is a memory spike big enough to kill the tab
+// — the "it keeps crashing" everyone hits. Downscaling first takes a
+// typical receipt photo under 500KB, which is both survivable and plenty
+// of resolution to read a receipt.
+//
+// It also solves HEIC for free: Safari can DECODE HeIC into a canvas even
+// though it can't hand the raw bytes to an API. Drawing it and re-encoding
+// as JPEG converts it, so an iPhone photo just works instead of being
+// rejected. The explicit HEIC error stays as a fallback for browsers that
+// genuinely can't decode it.
+export const MAX_EDGE = 1600;      // px on the longest side
+export const JPEG_QUALITY = 0.85;
+
+/** Pure: the scale factor to bring an image within MAX_EDGE. Never
+ *  upscales — a small photo is left exactly as it is. */
+export function scaleFactorFor(width, height, maxEdge = MAX_EDGE) {
+  const longest = Math.max(width, height);
+  if (!longest || longest <= maxEdge) return 1;
+  return maxEdge / longest;
+}
+
+/** Downscale + re-encode to JPEG. Returns the original file untouched if
+ *  anything goes wrong, so this can only ever help, never block a scan. */
+export async function normalizeReceiptImage(file) {
+  if (typeof document === 'undefined' || typeof createImageBitmap === 'undefined') return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = scaleFactorFor(bitmap.width, bitmap.height);
+    // Already small AND already a format the API accepts — nothing to do.
+    if (scale === 1 && /jpeg|jpg|png|webp/.test(file.type || '')) {
+      bitmap.close?.();
+      return file;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', JPEG_QUALITY));
+    if (!blob) return file;
+    return new File([blob], (file.name || 'receipt').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  } catch {
+    return file; // decode failed — let the normal path deal with it
+  }
+}

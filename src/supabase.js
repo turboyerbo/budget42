@@ -762,3 +762,63 @@ export async function checkReceiptsSetup() {
   return { bucketOk, tableOk, ready: bucketOk && tableOk };
 }
 
+
+// ── Predicted income ─────────────────────────────────────────────────────────
+// This was the ONLY feature in the app with no database table at all — it
+// lived purely in localStorage, which is why it "kept disappearing": iOS
+// Safari's tracking prevention evicts localStorage for non-installed sites
+// after about seven days of no visits, and nothing here ever synced between
+// the two partners' devices either. Same graceful-degradation pattern as
+// every other table: works locally if the migration hasn't been run yet.
+const LOCAL_EXPECTED_INCOME_KEY = 'b42_expected_income';
+const readLocalIncome  = () => { try { return JSON.parse(localStorage.getItem(LOCAL_EXPECTED_INCOME_KEY) || '[]'); } catch { return []; } };
+const writeLocalIncome = rows => { try { localStorage.setItem(LOCAL_EXPECTED_INCOME_KEY, JSON.stringify(rows)); } catch {} };
+export let expectedIncomeLocalOnly = false;
+
+export async function getExpectedIncome() {
+  try {
+    const { data, error } = await supabase.from('expected_income').select('*');
+    if (error) throw error;
+    expectedIncomeLocalOnly = false;
+    const rows = data || [];
+    // First run after the migration: push anything stranded in localStorage
+    // up to the server so nothing is lost in the switchover.
+    const local = readLocalIncome();
+    if (rows.length === 0 && local.length > 0) {
+      try {
+        await supabase.from('expected_income').upsert(local, { onConflict: 'id' });
+        return local;
+      } catch { /* fall through and just show the local copy */ }
+    }
+    return rows;
+  } catch (err) {
+    if (!isMissingTable(err) && !isRlsDenied(err)) throw err;
+    expectedIncomeLocalOnly = true;
+    return readLocalIncome();
+  }
+}
+
+/** Writes the whole list. Predicted income is a short list edited as a
+ *  set (add/edit/remove one row at a time), so replacing it wholesale keeps
+ *  the server and the screen in step without a per-row diff. */
+export async function saveExpectedIncome(entries) {
+  writeLocalIncome(entries); // always keep the offline copy current
+  try {
+    const { data: existing, error: readErr } = await supabase.from('expected_income').select('id');
+    if (readErr) throw readErr;
+    const keep = new Set(entries.map(e => e.id));
+    const stale = (existing || []).map(r => r.id).filter(id => !keep.has(id));
+    if (stale.length) {
+      const { error } = await supabase.from('expected_income').delete().in('id', stale);
+      if (error) throw error;
+    }
+    if (entries.length) {
+      const { error } = await supabase.from('expected_income').upsert(entries, { onConflict: 'id' });
+      if (error) throw error;
+    }
+    expectedIncomeLocalOnly = false;
+  } catch (err) {
+    if (!isMissingTable(err) && !isRlsDenied(err)) throw err;
+    expectedIncomeLocalOnly = true; // localStorage copy above is the fallback
+  }
+}

@@ -17,13 +17,16 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
+         getExpectedIncome, saveExpectedIncome,
          getBillMonthActive, getBillMonthConfigured, setBillActiveForMonth, markMonthConfigured, setBillOverrideForMonth,
          getBillPayments, setBillPaid, syncLocalBillPayments, getAllBillPayments,
          deleteManyRows, getMonthEverything,
          getCategoryTargets, upsertCategoryTargets,
          getGoals, upsertGoals,
          uploadReceiptImage, insertReceipt, updateReceipt } from './supabase.js';
-import { analyzeReceipt, isHeic, MAX_RECEIPT_BYTES } from './receipt.js';
+import { buildMonthlyReport, renderMonthlyReportHtml } from './report.js';
+import { analyzeReceipt, isHeic, MAX_RECEIPT_BYTES, normalizeReceiptImage } from './receipt.js';
+import { stashReceiptPhoto, markReceiptUploaded, recordUploadFailure, getPendingReceipts } from './receiptStore.js';
 import { categorize } from './categorize.js';
 import { parseStatementCSV } from './parse.js';
 import { aiCategorize, AI_AVAILABLE, computeTargets, suggestCategory, spendingInsight } from './ai.js';
@@ -42,6 +45,17 @@ const CUSTOM_CATS_KEY = 'b42_custom_cats';
 const CAT_TARGETS_KEY = 'b42_cat_targets';
 const NOTIFS_KEY = 'b42_notifs';
 const EXPECTED_INCOME_KEY = 'b42_expected_income';
+
+// Predicted income used to be written straight to localStorage from six
+// different places. It now goes through here so every edit reaches the
+// database too — localStorage alone is why it kept vanishing (iOS Safari
+// evicts it after ~7 days) and why it never synced between partners.
+// Fire-and-forget: saveExpectedIncome writes the local copy synchronously
+// first, so the screen stays correct even if the network call fails.
+function persistExpectedIncome(entries) {
+  saveExpectedIncome(entries).catch(err =>
+    console.error('Could not sync predicted income to the server:', err));
+}
 const GOALS_KEY = 'b42_goals';
 const BUDGET_OVERRIDE_KEY = 'b42_budget_override';
 // Tracks the "YYYY-M" this device last saw the budget-suggestion banner —
@@ -97,6 +111,16 @@ const VIEW_COLOR = { mine: '#1d4ed8', partner: '#be185d', combined: '#1a7a4a' };
 // Used everywhere a transaction can be logged on behalf of either partner —
 // whichever name comes back here is what every filter, avatar, and total
 // downstream will treat as the real owner of the record.
+// Which month a transaction belongs to. Always the transaction's OWN date,
+// falling back to the month on screen only when the date is unusable — a
+// receipt scanned in August for a purchase made in July belongs to July,
+// not to whichever month happened to be open when it was scanned.
+export function monthStampFor(dateStr, viewYear, viewMonth) {
+  const d = parseLocalDate(dateStr);
+  if (!dateStr || isNaN(d)) return { year: viewYear, month: viewMonth };
+  return { year: d.getFullYear(), month: d.getMonth() };
+}
+
 export function resolveWho(selection, myFullName, partnerFullName, meKey = 'mine') {
   const isMine = selection === meKey || selection === firstName(myFullName);
   if (isMine) return myFullName || 'unknown';
@@ -715,7 +739,9 @@ export function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRu
 }
 
 // ─── EXPORT MODAL ─────────────────────────────────────────────────────────────
-function ExportModal({year, month, txns, bankImports, billPayments, billRules, onClose, showToast, C, SERIF, SANS, MONTHS}) {
+function ExportModal({year, month, txns, bankImports, billPayments, billRules, history, allCats,
+                      profile, partnerName, billActiveKeys, billConfiguredMonths,
+                      onClose, showToast, C, SERIF, SANS, MONTHS}) {
   const [exporting, setExporting] = React.useState(false);
   const allTx = [...txns, ...(bankImports||[])];
   
@@ -739,87 +765,26 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, o
     setExporting(false);
   }
   
-  function generateMonthlyPDF(year, month, txns, bills, rules) {
-    const spent = txns.reduce((a,t) => a + Math.abs(t.amount||0), 0);
-    const billsPaid = bills?.length || 0;
-    const totalBills = rules?.length || 0;
-    
-    // Build transaction rows separately
-    const txnRows = txns.slice(0, 20).map(t => 
-      `<tr>
-        <td>${t.date}</td>
-        <td>${t.description || t.note || 'Transaction'}</td>
-        <td class="amount">$${Math.abs(t.amount).toFixed(2)}</td>
-      </tr>`
-    ).join('');
-    
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Budget For Two — ${MONTHS[month]} ${year}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 40px; color: #1a1a18; }
-    h1 { margin: 0 0 8px; font-size: 28px; }
-    .date { color: #888; font-size: 14px; margin-bottom: 30px; }
-    .summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 40px; }
-    .card { border: 1px solid #ddd; padding: 16px; border-radius: 10px; }
-    .card-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
-    .card-value { font-size: 24px; font-weight: 600; color: #1a7a4a; }
-    .section { margin-bottom: 40px; }
-    .section h2 { font-size: 16px; margin: 0 0 12px; font-weight: 600; }
-    table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; padding: 8px; font-size: 12px; color: #888; border-bottom: 1px solid #ddd; font-weight: 600; }
-    td { padding: 8px; border-bottom: 1px solid #eee; }
-    tr:last-child td { border-bottom: none; }
-    .amount { text-align: right; font-family: 'Courier New', monospace; }
-  </style>
-</head>
-<body>
-  <h1>Budget For Two</h1>
-  <p class="date">${MONTHS[month]} ${year}</p>
-  
-  <div class="summary">
-    <div class="card">
-      <div class="card-label">Bills Paid</div>
-      <div class="card-value">${billsPaid}/${totalBills}</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Total Spent</div>
-      <div class="card-value">$${spent.toLocaleString('en-CA', {maximumFractionDigits: 0})}</div>
-    </div>
-    <div class="card">
-      <div class="card-label">Transactions</div>
-      <div class="card-value">${txns.length}</div>
-    </div>
-  </div>
-  
-  <div class="section">
-    <h2>Recent Transactions</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Description</th>
-          <th class="amount">Amount</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${txnRows}
-      </tbody>
-    </table>
-  </div>
-  
-  <p style="font-size: 12px; color: #888; margin-top: 40px; text-align: center;">
-    Generated on ${new Date().toLocaleDateString()} • Budget For Two
-  </p>
-</body>
-</html>
-    `;
-    return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+  /** The monthly export. Builds a full report — per-person spending, who
+   *  paid which bills, transfers between the two of you, cash withdrawn
+   *  and who spent it — instead of the three cards and twenty arbitrary
+   *  rows this used to produce. All the arithmetic lives in report.js so
+   *  it can be tested without a browser. */
+  function generateMonthlyPDF(year, month, allTxns, payments, rules) {
+    const detected = detectRecurring(history || []);
+    const merged = applyBillRules(detected, rules || [], billActiveKeys || new Map(),
+                                  billConfiguredMonths || new Set(), year, month)
+                     .filter(b => b.confidence === 'high');
+    const sched = buildSchedule(merged, allTxns, year, month, new Date(), payments || []);
+    const report = buildMonthlyReport({
+      year, month, txns, bankImports: bankImports || [],
+      billEntries: sched.entries,
+      myName: profile?.name || '', partnerName: partnerName || '',
+      allCats: allCats || [],
+    });
+    return 'data:text/html;charset=utf-8,' + encodeURIComponent(renderMonthlyReportHtml(report));
   }
-  
+
   function generateYearlyPDF(year, txns, bills, rules) {
     const spent = txns.reduce((a,t) => a + Math.abs(t.amount||0), 0);
     const billsPaid = bills?.length || 0;
@@ -2403,7 +2368,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
       });
       const updated = (expectedIncome || []).filter(e => e.id !== entry.id);
       setExpectedIncome(updated);
-      localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+      persistExpectedIncome(updated);
       showToast(`Confirmed ${fmt(amt)} received — added to Actual Income`);
       setConfirmingId(null);
     } catch {
@@ -2430,7 +2395,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
       : list.map(e => e.id === editingId ? {...e, ...entry} : e);
     updated.sort((a,b)=>new Date(a.date)-new Date(b.date));
     setExpectedIncome(updated);
-    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    persistExpectedIncome(updated);
     showToast(editingId === 'new' ? 'Income entry added' : 'Income entry updated');
     setEditingId(null);
   }
@@ -2438,7 +2403,7 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
   function remove(id) {
     const updated = (expectedIncome || []).filter(e => e.id !== id);
     setExpectedIncome(updated);
-    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    persistExpectedIncome(updated);
     showToast('Income entry deleted');
   }
 
@@ -2856,6 +2821,15 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
               textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Actual Income</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
               color:'rgba(255,255,255,0.95)'}}>{fmt(totalIncome)}</p>
+            {/* Predicted sits faintly beneath the real figure — context for
+                what's still expected, never added into any total. */}
+            {predictedIncomeTotal > 0 && (
+              <p style={{margin:'2px 0 0',fontFamily:SERIF,fontSize:12,fontWeight:500,
+                color:'rgba(255,255,255,0.5)'}}
+                title="Predicted income for this month — not counted in Available Money until it actually lands">
+                {fmt(predictedIncomeTotal)} predicted
+              </p>
+            )}
           </div>
 
           <div>
@@ -4427,7 +4401,7 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
     const entry = {id:'income-'+Date.now(), date:dateStr, amount:amt, description:newIncSource.trim(), account:newIncAccount.trim(), person:'both'};
     const updated = [...expectedIncome, entry].sort((a,b)=>new Date(a.date)-new Date(b.date));
     setExpectedIncome(updated);
-    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    persistExpectedIncome(updated);
     showToast('Income entry added');
     setAddingIncome(false); setNewIncAmount(''); setNewIncSource(''); setNewIncAccount('');
   }
@@ -4435,13 +4409,13 @@ function DayDetailPanel({day, year, month, bills, incomeEntries, actualEntries, 
   function updateIncome(id, field, value) {
     const updated = expectedIncome.map(e => e.id === id ? {...e, [field]: field === 'amount' ? (parseFloat(value)||0) : value} : e);
     setExpectedIncome(updated);
-    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    persistExpectedIncome(updated);
   }
 
   function deleteIncome(id) {
     const updated = expectedIncome.filter(e => e.id !== id);
     setExpectedIncome(updated);
-    localStorage.setItem(EXPECTED_INCOME_KEY, JSON.stringify(updated));
+    persistExpectedIncome(updated);
     showToast('Income entry deleted');
   }
 
@@ -7202,6 +7176,12 @@ export default function App() {
         // Which bills are switched on for which month, and which months have
         // been explicitly set up at all — small datasets, fetched in full
         getBillMonthActive().then(setBillMonthActiveState).catch(()=>{});
+        // Predicted income now comes from the server, so it survives a
+        // localStorage eviction and is shared between both partners.
+        getExpectedIncome().then(rows => { if (rows) setExpectedIncome(rows); }).catch(()=>{});
+        // Retry any receipt photo stranded on this device by an earlier
+        // failed upload — quietly, in the background.
+        flushPendingReceipts().catch(()=>{});
         getBillMonthConfigured().then(setBillMonthConfiguredState).catch(()=>{});
         // Load category targets from Supabase (shared with partner)
         const remoteTargets = await getCategoryTargets();
@@ -7598,7 +7578,25 @@ export default function App() {
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(null),2600);}
   function changeMonth(dir){let m=month+dir,y=year;if(m<0){m=11;y--;}if(m>11){m=0;y++;}setMonth(m);setYear(y);}
-  async function addTxn(tx){await insertTxn({...tx,id:uid(),ts:Date.now(),year,month});}
+  /** Adds a transaction AND puts it on screen. It used to only do the
+   *  first half: the row reached the database fine, but nothing refreshed,
+   *  and the realtime listener deliberately ignores our own writes (so the
+   *  partner's changes don't echo back at us) — so a scanned receipt, or
+   *  anything added by hand, wouldn't show up in Charges until a reload.
+   *
+   *  It also stamped year/month from whichever month you were VIEWING
+   *  rather than from the transaction's own date, so a receipt dated last
+   *  month filed itself under this one. */
+  async function addTxn(tx){
+    const { year: txYear, month: txMonth } = monthStampFor(tx.date, year, month);
+    const row = {...tx, id:uid(), ts:Date.now(), year:txYear, month:txMonth};
+    const saved = await insertTxn(row);
+    // Only add it to the visible list if it belongs to the month on screen.
+    if (txYear === year && txMonth === month) {
+      setTxns(prev => [...prev, saved || row]);
+    }
+    return saved || row;
+  }
   async function removeTxn(id){await deleteTxn(id);}
   async function removeImport(id){await deleteBankImport(id);setImports(p=>p.filter(t=>t.id!==id));}
 
@@ -7608,30 +7606,94 @@ export default function App() {
    * can show the photo next to what Claude read off it, and so confirming
    * later can link back to this exact receipt.
    */
-  async function scanReceipt(file) {
-    // Check the file BEFORE spending an upload on something that's going to
-    // fail anyway — HEIC (the default iPhone photo format) isn't something
-    // Claude's vision API can read, and a mismatched-format file was
-    // previously uploaded and inserted first, only to fail once analysis
-    // actually ran. Catching it here means "Choose a file" from an iPhone
-    // library (which iOS auto-converts to JPEG when the input asks for it)
-    // never wastes a round trip, and the error is immediate and specific.
-    if (isHeic(file)) {
-      throw new Error(
-        "That photo is in Apple's HEIC format, which can't be read directly. " +
-        'Try "Choose a file" instead of the camera roll for this one — it converts ' +
-        'automatically. Or in Settings > Camera > Formats, switch to "Most Compatible."'
-      );
+  /** Upload with retries. Transient network failures are the norm on a
+   *  phone; one blip shouldn't cost someone their receipt. */
+  async function uploadWithRetry(file, id, attempts = 3) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await uploadReceiptImage(file, id);
+      } catch (err) {
+        lastErr = err;
+        // A missing bucket or a permissions problem won't fix itself by
+        // trying again — fail fast so the message is useful.
+        if (/bucket|permission|policy|row-level/i.test(err.message || '')) throw err;
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 500 * Math.pow(2, i)));
+      }
     }
-    if (file.size > MAX_RECEIPT_BYTES) {
-      throw new Error('That photo is larger than 15MB — try retaking it at a lower resolution.');
+    throw lastErr;
+  }
+
+  /** Anything stranded on this device from a previous failed attempt gets
+   *  another go, quietly, whenever the app loads. */
+  async function flushPendingReceipts() {
+    let pending = [];
+    try { pending = await getPendingReceipts(); } catch { return; }
+    for (const row of pending) {
+      if (!row.blob || (row.attempts || 0) > 8) continue;
+      try {
+        const { url } = await uploadReceiptImage(row.blob, row.id);
+        await markReceiptUploaded(row.id, url);
+        try { await updateReceipt(row.id, { image_path: url, status: 'analyzed' }); } catch {}
+      } catch (err) {
+        try { await recordUploadFailure(row.id, err.message); } catch {}
+      }
+    }
+  }
+
+  /**
+   * Photo -> local vault -> Storage -> a row in `receipts` -> Claude reads it.
+   *
+   * The order matters. The photo is written to the on-device vault FIRST,
+   * before any network call, because a receipt is a tax record and must
+   * survive a crash, a dead connection, or a misconfigured bucket. Every
+   * step after that can fail and be retried without the original being at
+   * risk, and nothing below ever throws away the photo.
+   */
+  async function scanReceipt(file) {
+    const id = uid();
+
+    // 1. Shrink it. A 12MP phone photo becomes a ~20MB base64 string, and
+    //    building that on mobile Safari is what crashes the tab. This also
+    //    converts HEIC to JPEG via canvas, so iPhone photos just work.
+    let working = file;
+    try { working = await normalizeReceiptImage(file); } catch { working = file; }
+
+    // 2. Vault it locally before anything can go wrong.
+    let stashed = false;
+    try {
+      await stashReceiptPhoto(id, working, { name: file.name, originalSize: file.size });
+      stashed = true;
+    } catch (err) {
+      console.error('Local receipt vault unavailable:', err);
     }
 
-    const id = uid();
-    let url;
+    // 3. Only now reject what genuinely can't be read — and only if
+    //    normalizing didn't already convert it.
+    if (isHeic(working)) {
+      throw new Error(
+        "That photo is in Apple's HEIC format and this browser couldn't convert it. " +
+        (stashed ? "The photo is saved on this device and will upload once it can be converted. " : '') +
+        'Try "Choose a file" instead of the camera roll, or set Settings > Camera > Formats to "Most Compatible."'
+      );
+    }
+    if (working.size > MAX_RECEIPT_BYTES) {
+      throw new Error('That photo is still larger than 15MB after compression — try retaking it at a lower resolution.');
+    }
+
+    // 4. Upload, with retries.
+    let url = null;
     try {
-      ({ url } = await uploadReceiptImage(file, id));
+      ({ url } = await uploadWithRetry(working, id));
+      if (stashed) await markReceiptUploaded(id, url);
     } catch (err) {
+      if (stashed) {
+        try { await recordUploadFailure(id, err.message); } catch {}
+        throw new Error(
+          (err.message || 'Upload failed') +
+          " — but the photo is saved on this device and will upload automatically next time you open the app."
+        );
+      }
       throw new Error('Could not upload that photo: ' + (err.message || err));
     }
 
@@ -7642,13 +7704,15 @@ export default function App() {
         uploaded_at: new Date().toISOString(), status: 'pending',
       });
     } catch (err) {
-      // The photo is already safely in Storage even if this row fails —
-      // don't lose the upload over a metadata-row problem, just note it.
-      console.error('insertReceipt failed (image still uploaded):', err);
+      // The photo is already safe in Storage AND on the device — a failed
+      // metadata row must never discard it.
+      console.error('insertReceipt failed (image is still stored):', err);
     }
 
+    // 5. Read it. If Claude can't, the photo is still kept and the person
+    //    can fill the fields in by hand rather than losing the receipt.
     try {
-      const extracted = await analyzeReceipt(file, allCats.map(c => c.id));
+      const extracted = await analyzeReceipt(working, allCats.map(c => c.id));
       try {
         await updateReceipt(id, {
           status: 'analyzed', merchant: extracted.merchant, amount: extracted.amount,
@@ -7656,19 +7720,22 @@ export default function App() {
           confidence: extracted.confidence, note: extracted.itemsSummary,
         });
       } catch (err) {
-        // Reading succeeded — don't let a status-row update failure block
-        // the review screen from showing what Claude actually found.
         console.error('updateReceipt (analyzed) failed:', err);
       }
       return { id, imageUrl: url, ...extracted };
     } catch (err) {
       try { await updateReceipt(id, { status: 'failed', note: String(err.message || err) }); } catch {}
-      throw err;
+      const e = new Error(
+        (err.message || 'Could not read that receipt') +
+        ' — the photo itself is saved, so nothing is lost. You can enter the details by hand.'
+      );
+      e.photoSaved = true;
+      e.receiptId = id;
+      e.imageUrl = url;
+      throw e;
     }
   }
 
-  /** Turns a reviewed/edited receipt into a real transaction, and marks the
-   *  receipt row confirmed so the two stay linked. */
   async function confirmReceiptTxn(receiptId, fields) {
     const who = fields.who || profile?.name || 'unknown';
     const tx = {
@@ -7960,6 +8027,12 @@ export default function App() {
           bankImports={imports}
           billPayments={billPayments}
           billRules={billRules}
+          history={history}
+          allCats={allCats}
+          profile={profile}
+          partnerName={partnerName}
+          billActiveKeys={billActiveKeys}
+          billConfiguredMonths={billConfiguredMonths}
           onClose={() => setShowExport(false)}
           showToast={showToast}
           C={C}

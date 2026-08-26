@@ -15,11 +15,11 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, ReceiptHistoryModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, shouldShowBudgetSuggestions,
+  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, monthStampFor, shouldShowBudgetSuggestions,
   buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, describeReceiptsBackendIssue,
   describeBillPaidBy,
   C, SERIF, SANS } from '../src/App.jsx';
-import { isHeic } from '../src/receipt.js';
+import { isHeic, scaleFactorFor, MAX_EDGE } from '../src/receipt.js';
 import { isRlsDenied } from '../src/supabase.js';
 
 const mk = (o = {}) => ({
@@ -269,6 +269,53 @@ check('HomeTab: Available Money = Income − Spent − Bills Paid, no double-cou
 // category happened to be excluded — so a real, ticked-paid $480 credit
 // card bill contributed exactly $0 to Home's figure, even though the
 // Bills tab correctly counted it.
+// Predicted income should sit faintly under Actual Income as context —
+// visible, but never folded into any total.
+// A scanned receipt saved to the database but never appeared in Charges.
+// Two causes: addTxn didn't update on-screen state (and the realtime
+// listener deliberately ignores our own writes, so nothing refreshed it),
+// and it stamped year/month from the month being VIEWED rather than the
+// transaction's own date — so a July receipt scanned in August filed
+// itself under August. monthStampFor covers the second half.
+check('monthStampFor: uses the transaction\'s own date, not the month on screen', () => {
+  // Viewing August 2026 (month index 7), receipt dated 12 July 2026
+  const r = monthStampFor('2026-07-12', 2026, 7);
+  if (r.year !== 2026 || r.month !== 6) {
+    throw new Error(`a July receipt must file under July (month 6), got year=${r.year} month=${r.month}`);
+  }
+});
+
+check('monthStampFor: falls back to the viewed month when the date is missing or unusable', () => {
+  const missing = monthStampFor('', 2026, 7);
+  if (missing.year !== 2026 || missing.month !== 7) throw new Error('expected the viewed month when no date is given');
+  const junk = monthStampFor('not-a-date', 2026, 7);
+  if (junk.year !== 2026 || junk.month !== 7) throw new Error('expected the viewed month when the date is unparseable');
+});
+
+check('monthStampFor: keeps a same-month transaction in that month', () => {
+  const r = monthStampFor('2026-08-03', 2026, 7);
+  if (r.year !== 2026 || r.month !== 7) throw new Error('an August transaction viewed in August must stay in August');
+});
+
+check('HomeTab: shows predicted income beneath actual, without adding it to any total', () => {
+  const paycheck = mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15' });
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [paycheck], ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+    history: [], billRules: [], billPayments: [],
+    expectedIncome: [{ id:'p1', date:'2026-07-28', amount:1200, description:'Second paycheck', person:'both' }],
+    setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop
+  }));
+  if (!html.includes('1,200.00')) throw new Error('expected the $1,200 predicted income to be shown');
+  if (!html.includes('predicted')) throw new Error('expected the predicted figure to be labelled as predicted');
+  // Actual income must stay $5,000 — predicted is context, never added in
+  if (html.includes('6,200.00')) throw new Error('predicted income was added into actual income — it must never be');
+});
+
 check('HomeTab: a bill categorized as a credit card payment counts as Bills Paid, matching the Bills tab — not silently dropped', () => {
   const ccPaymentBill = { key:'manual:scotiabank', label:'Scotiabank Credit Card', amount:480, day:15, status:'manual', category:'cc_payment' };
   const groceries = mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' });
@@ -1244,6 +1291,35 @@ check('buildBillsPrintHtml: produces a complete, well-formed HTML document', () 
 // Claude's vision API as "image/jpeg" regardless of their real format —
 // genuinely mismatched data that Claude can't reliably read. isHeic() is
 // the detector that now catches this BEFORE any upload or API call happens.
+// Receipt uploads kept crashing. Cause: a 12MP phone photo turned into a
+// ~20MB base64 string, and building that on mobile Safari is a memory
+// spike big enough to kill the tab. Downscaling first is the fix — it
+// also converts HEIC via canvas, so iPhone photos stop being rejected.
+check('scaleFactorFor: shrinks an oversized phone photo to the max edge', () => {
+  // A typical 12MP iPhone photo
+  const f = scaleFactorFor(4032, 3024);
+  if (f >= 1) throw new Error('a 4032px photo must be scaled down');
+  if (Math.round(4032 * f) !== MAX_EDGE) {
+    throw new Error(`expected the long edge to land on ${MAX_EDGE}, got ${Math.round(4032 * f)}`);
+  }
+});
+
+check('scaleFactorFor: never upscales a photo that is already small', () => {
+  if (scaleFactorFor(800, 600) !== 1) throw new Error('a small photo must be left alone, not enlarged');
+  if (scaleFactorFor(MAX_EDGE, 900) !== 1) throw new Error('a photo exactly at the limit must be left alone');
+});
+
+check('scaleFactorFor: uses the LONGEST edge, so portrait photos shrink too', () => {
+  const portrait = scaleFactorFor(3024, 4032); // taller than wide
+  if (Math.round(4032 * portrait) !== MAX_EDGE) {
+    throw new Error('a portrait photo must be measured by its height, not its width');
+  }
+});
+
+check('scaleFactorFor: survives missing dimensions without dividing by zero', () => {
+  if (scaleFactorFor(0, 0) !== 1) throw new Error('expected a safe 1 when dimensions are unknown');
+});
+
 check('isHeic: detects HEIC/HEIF by MIME type', () => {
   if (!isHeic({ type: 'image/heic', name: 'IMG_1234.heic' })) {
     throw new Error('expected image/heic to be detected as HEIC');
@@ -1433,4 +1509,109 @@ Promise.all(pending).then(() => {
   const failed = results.filter(r => r[0] === 'FAIL').length;
   console.log('\n' + (failed ? failed + ' FAILURE(S)' : 'All smoke tests passed'));
   process.exit(failed ? 1 : 0);
+});
+
+// ─── Monthly report ───────────────────────────────────────────────────────────
+// The old export was three summary cards plus txns.slice(0,20) — an
+// arbitrary handful of rows, with a "Total Spent" that didn't even exclude
+// income. These cover the questions the report is actually meant to answer.
+import { buildMonthlyReport, renderMonthlyReportHtml, isCashWithdrawal,
+         isInterPartnerTransfer, describesPerson } from '../src/report.js';
+
+const rptBase = {
+  year: 2026, month: 6, myName: 'Jordan Yerbury', partnerName: 'Mariel Ko',
+  allCats: [{id:'groceries',label:'Groceries'},{id:'rent',label:'Home'}],
+};
+
+check('report: splits spending by person and excludes income from the spend total', () => {
+  const r = buildMonthlyReport({ ...rptBase, bankImports: [
+    mk({ description:'LOBLAWS', amount:120, category:'groceries', who:'Jordan Yerbury' }),
+    mk({ description:'METRO',   amount:80,  category:'groceries', who:'Mariel Ko' }),
+    mk({ description:'NORR PAY',amount:5000,category:'income', direction:'credit', who:'Jordan Yerbury' }),
+  ]});
+  if (r.perPerson.jordan.total !== 120) throw new Error(`Jordan should have spent $120, got ${r.perPerson.jordan.total}`);
+  if (r.perPerson.mariel.total !== 80) throw new Error(`Mariel should have spent $80, got ${r.perPerson.mariel.total}`);
+  if (r.totals.spent !== 200) throw new Error(`spend total must exclude income; expected 200, got ${r.totals.spent}`);
+  if (r.totals.income !== 5000) throw new Error('income should be reported separately');
+});
+
+check('report: records who paid which bills', () => {
+  const r = buildMonthlyReport({ ...rptBase, billEntries: [
+    { label:'Rent', amount:1900, status:'paid', tickedBy:'Jordan Yerbury' },
+    { label:'Gym',  amount:60,   status:'paid', tickedBy:'Mariel Ko' },
+    { label:'Hydro',amount:140,  status:'due',  tickedBy:null },
+  ]});
+  if (r.bills.byPayer.jordan.total !== 1900) throw new Error('Jordan should be credited with the $1,900 rent');
+  if (r.bills.byPayer.mariel.total !== 60) throw new Error('Mariel should be credited with the $60 gym');
+  if (r.totals.billsPaid !== 1960) throw new Error('bills paid should total $1,960');
+  if (r.totals.billsOutstanding !== 140) throw new Error('the unpaid $140 hydro should be outstanding, not paid');
+});
+
+check('report: identifies transfers between the two partners, in both directions', () => {
+  const r = buildMonthlyReport({ ...rptBase, bankImports: [
+    mk({ description:'INTERAC ETRNSFR SENT MARIEL KO', amount:450, category:'transfer' }),
+    mk({ description:'INTERAC ETRNSFR AD RECVD NESS MARIEL KO', amount:1000, category:'transfer' }),
+    mk({ description:'LOBLAWS', amount:50, category:'groceries', who:'Jordan Yerbury' }),
+  ]});
+  if (r.transfers.rows.length !== 2) throw new Error(`expected 2 inter-partner transfers, got ${r.transfers.rows.length}`);
+  if (r.transfers.out !== 450) throw new Error(`expected $450 sent, got ${r.transfers.out}`);
+  if (r.transfers.in !== 1000) throw new Error(`expected $1,000 received, got ${r.transfers.in}`);
+  if (r.transfers.net !== 550) throw new Error(`expected net +$550, got ${r.transfers.net}`);
+  // Transfers must never be counted as spending — the money stayed in the household
+  if (r.totals.spent !== 50) throw new Error(`transfers leaked into the spend total: got ${r.totals.spent}, expected 50`);
+});
+
+check('report: flags cash withdrawals nobody is assigned to', () => {
+  const r = buildMonthlyReport({ ...rptBase, bankImports: [
+    mk({ description:'ATM WITHDRAWAL', amount:200, category:'other', who:'Jordan Yerbury' }),
+    // The shared mk() fixture defaults who:'jordan', so this must be
+    // cleared explicitly — otherwise the "unattributed" case isn't
+    // actually being tested at all.
+    mk({ description:'ABM CASH WITHDRAWAL', amount:100, category:'other', who:'' }),
+  ]});
+  if (r.cash.total !== 300) throw new Error(`expected $300 cash out, got ${r.cash.total}`);
+  if (r.cash.unattributed !== 100) throw new Error(`expected $100 unattributed cash, got ${r.cash.unattributed}`);
+});
+
+check('report: works out who carried more of the household', () => {
+  const r = buildMonthlyReport({ ...rptBase,
+    bankImports: [ mk({ description:'LOBLAWS', amount:100, category:'groceries', who:'Jordan Yerbury' }) ],
+    billEntries: [ { label:'Rent', amount:1900, status:'paid', tickedBy:'Jordan Yerbury' },
+                   { label:'Gym', amount:60, status:'paid', tickedBy:'Mariel Ko' } ],
+  });
+  if (r.contribution.byPerson.jordan.total !== 2000) throw new Error('Jordan: $100 spending + $1,900 bills = $2,000');
+  if (r.contribution.byPerson.mariel.total !== 60) throw new Error('Mariel: $60 bills');
+  if (r.contribution.aheadBy !== 'jordan') throw new Error('Jordan put in more, so he should be the one ahead');
+  if (r.contribution.difference !== 1940) throw new Error(`expected a $1,940 gap, got ${r.contribution.difference}`);
+});
+
+check('report: renders a complete HTML document covering every section', () => {
+  const r = buildMonthlyReport({ ...rptBase, bankImports: [
+    mk({ description:'LOBLAWS', amount:120, category:'groceries', who:'Jordan Yerbury' }) ]});
+  const html = renderMonthlyReportHtml(r);
+  if (!html.includes('<!DOCTYPE html>') || !html.includes('</html>')) throw new Error('expected a complete HTML document');
+  for (const heading of ['What each of you spent','Who paid which bills','Money moved between you','Cash withdrawn','Where the money went','Who carried more']) {
+    if (!html.includes(heading)) throw new Error(`report is missing the "${heading}" section`);
+  }
+});
+
+check('report: escapes HTML so a merchant name can never inject markup', () => {
+  const r = buildMonthlyReport({ ...rptBase, bankImports: [
+    mk({ description:'<script>alert(1)</script>', amount:10, category:'other', who:'Jordan Yerbury' }) ],
+    billEntries: [{ label:'<img onerror=x>', amount:5, status:'paid', tickedBy:'Jordan Yerbury' }] });
+  const html = renderMonthlyReportHtml(r);
+  if (html.includes('<script>alert')) throw new Error('a description was written into the report as raw HTML');
+  if (html.includes('<img onerror=')) throw new Error('a bill label was written into the report as raw HTML');
+});
+
+check('isCashWithdrawal / isInterPartnerTransfer / describesPerson behave sensibly', () => {
+  if (!isCashWithdrawal({ description:'ATM WITHDRAWAL' })) throw new Error('ATM withdrawal not detected');
+  if (isCashWithdrawal({ description:'LOBLAWS GROCERIES' })) throw new Error('a grocery run must not count as cash out');
+  if (!isInterPartnerTransfer({ description:'INTERAC ETRNSFR SENT MARIEL KO' }, 'Jordan Yerbury', 'Mariel Ko')) {
+    throw new Error('a transfer naming the partner should be detected');
+  }
+  if (isInterPartnerTransfer({ description:'INTERAC ETRNSFR SENT STELA' }, 'Jordan Yerbury', 'Mariel Ko')) {
+    throw new Error('a transfer to a third party must not count as an inter-partner transfer');
+  }
+  if (describesPerson('SENT JAZMINE YERBURY', 'Mariel Ko')) throw new Error('a different person must not match');
 });

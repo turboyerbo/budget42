@@ -15,6 +15,7 @@ export default [
         FileReader:'readonly', Blob:'readonly', URL:'readonly', Response:'readonly',
         Request:'readonly', TextDecoder:'readonly', Uint8Array:'readonly',
         process:'readonly', navigator:'readonly', alert:'readonly', confirm:'readonly',
+        indexedDB:'readonly', createImageBitmap:'readonly', File:'readonly',
         __BUILD_ID__:'readonly', __APP_VERSION__:'readonly',
       },
     },
