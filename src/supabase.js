@@ -39,6 +39,49 @@ export async function signOut() {
   await supabase.auth.signOut();
 }
 
+/**
+ * Make sure the signed-in user belongs to a household. Every table is scoped
+ * by household_id, so a user without one would see nothing at all — and,
+ * before the security fix, a user without one saw EVERYONE's data. This runs
+ * on every sign-in, so an account created before the fix gets repaired the
+ * next time it signs in rather than staying broken.
+ *
+ * A brand-new account gets its OWN household. To share a budget, the second
+ * person joins the first person's household via joinHousehold() — sharing is
+ * something you opt into deliberately, never the default.
+ */
+export async function ensureHousehold() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+  try {
+    const { data: existing, error } = await supabase
+      .from('household_members').select('household_id').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    if (existing?.household_id) return existing.household_id;
+
+    const { data: h, error: e1 } = await supabase
+      .from('households').insert({ name: (user.user_metadata?.name || 'My') + ' household' })
+      .select().single();
+    if (e1) throw e1;
+    const { error: e2 } = await supabase
+      .from('household_members').insert({ user_id: user.id, household_id: h.id });
+    if (e2) throw e2;
+    return h.id;
+  } catch (err) {
+    // Migration not run yet — the app still works, it just isn't isolated.
+    if (isMissingTable(err)) { console.warn('SECURITY: household tables missing — run SECURITY_FIX_MIGRATION.sql'); return null; }
+    throw err;
+  }
+}
+
+/** Has the security migration been run? Used to warn in the UI. */
+export async function isDataIsolated() {
+  try {
+    const { error } = await supabase.from('household_members').select('user_id').limit(1);
+    return !error;
+  } catch { return false; }
+}
+
 export async function getSession() {
   const { data: { session } } = await supabase.auth.getSession();
   return session;

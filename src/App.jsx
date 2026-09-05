@@ -13,7 +13,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getBankImports, insertBankImports, deleteBankImport, getAllBankImports,
          updateBankImport, updateTransaction, getOtherImports,
          subscribeToMonth, subscribeToPartnerActivity,
-         signUp, signIn, signOut, onAuthChange, updateUserMeta,
+         signUp, signIn, signOut, onAuthChange, updateUserMeta, ensureHousehold, isDataIsolated,
          getAllBankImportsRaw, exportAllData, countMonthData, countAllData,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
@@ -119,6 +119,40 @@ export function monthStampFor(dateStr, viewYear, viewMonth) {
   const d = parseLocalDate(dateStr);
   if (!dateStr || isNaN(d)) return { year: viewYear, month: viewMonth };
   return { year: d.getFullYear(), month: d.getMonth() };
+}
+
+/**
+ * How the household's bills should be split, based on what each person
+ * actually earned this month.
+ *
+ * Splitting bills evenly when incomes differ is unfair in a specific way:
+ * the lower earner hands over a much bigger slice of their pay for the same
+ * roof. Proportional splitting means each person contributes the same
+ * PERCENTAGE of their income, which is what most couples actually mean by
+ * "fair". On $7,000 and $3,000 that's 70/30.
+ *
+ * Falls back to an even split when there isn't enough income data to say —
+ * and reports which it did, so the UI can be honest rather than presenting
+ * a guess as a calculation.
+ */
+export function incomeShares(everything, myFullName, partnerFullName) {
+  const me = firstName(myFullName), them = firstName(partnerFullName);
+  let mine = 0, theirs = 0;
+  (everything || []).forEach(t => {
+    if ((t.category || t.cat) !== 'income') return;
+    const who = firstName(t.who);
+    if (who && who === me) mine += t.amount || 0;
+    else if (who && who === them) theirs += t.amount || 0;
+  });
+  const total = mine + theirs;
+  if (total <= 0 || mine <= 0 || theirs <= 0) {
+    // One or both have no recorded income — an even split is the only
+    // defensible assumption, but say so rather than implying it was derived.
+    return { mineShare: 0.5, partnerShare: 0.5, myIncome: mine, partnerIncome: theirs,
+             total, basis: 'even-split-fallback' };
+  }
+  return { mineShare: mine / total, partnerShare: theirs / total,
+           myIncome: mine, partnerIncome: theirs, total, basis: 'income' };
 }
 
 export function resolveWho(selection, myFullName, partnerFullName, meKey = 'mine') {
@@ -2754,7 +2788,22 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // everything else: every non-excluded category that ISN'T one of these
   // recognized bill categories, so the two buckets never double-count.
   const billCategoryIds = new Set(recurring.map(b => b.category));
-  const billsPaidThisMonth = sched.paidTotal;
+
+  // Bills are a HOUSEHOLD cost, so a personal view has to show that person's
+  // share of them — not the whole thing. This previously used the full
+  // household total in every view, so Jordan's screen and Ness's screen each
+  // showed 100% of the bills; added together the household appeared to have
+  // paid everything twice.
+  //
+  // The share is proportional to income, not 50/50: on $7,000 and $3,000 the
+  // split is 70/30, so each person is contributing the same percentage of
+  // their own pay rather than the lower earner losing a far bigger slice.
+  const shares = incomeShares(everything, profile?.name, partnerName);
+  const billShare = view === 'mine' ? shares.mineShare
+                  : view === 'partner' ? shares.partnerShare
+                  : 1;                                   // combined = the whole household
+  const billsPaidThisMonth = sched.paidTotal * billShare;
+  const householdBillsPaid = sched.paidTotal;
   let discretionarySpent = 0;
   Object.entries(txByCat).forEach(([catId, amt]) => {
     if (excludedIds.has(catId)) return;       // cc_payment/transfer/income — never "spending"
@@ -2859,9 +2908,12 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         <p style={{margin:'12px 0 0', fontSize:10, color:'rgba(255,255,255,0.6)', fontFamily:SANS,
           borderTop:'1px solid rgba(255,255,255,0.15)', paddingTop:8}}>
           {fmt(totalIncome)} income − {fmt(discretionarySpent)} other spending − {fmt(billsPaidThisMonth)} bills paid = {fmt(availableMoney)}.
-          "Bills Paid" here always matches the Bills tab's own "Already paid" exactly — including
-          bills like a credit card payment, which is real money out even though it's not counted
-          as everyday spending.
+          {view === 'combined'
+            ? ' "Bills Paid" matches the Bills tab\'s "Already paid" exactly — including bills like a credit card payment, which is real money out even though it isn\'t everyday spending.'
+            : ` That's ${(billShare * 100).toFixed(0)}% of the household's ${fmt(householdBillsPaid)} in bills — ${
+                shares.basis === 'income'
+                  ? `split by income, since ${capitalize(view === 'mine' ? me : firstName(partnerName))} earned ${fmt(view === 'mine' ? shares.myIncome : shares.partnerIncome)} of the ${fmt(shares.total)} between you.`
+                  : 'split evenly, because there isn\'t recorded income for both of you this month. Add income for each person and this will follow your real earnings instead.'}`}
         </p>
 
         {(dueTotal + carriedOverTotal) > 0 && (
@@ -6757,7 +6809,7 @@ export function DuplicateModal({ rows, allCats, onDelete, onClose, showToast }) 
 // Deleting shared data is not reversible and affects both people, so this
 // screen states plainly what will go, offers a backup first, and requires the
 // full reset to be typed out rather than tapped.
-export function ResetModal({ year, month, onClose, onDone, showToast }) {
+export function ResetModal({ year, month, onClose, onDone, showToast, onSignOut, profile, dataIsolated }) {
   const [mode,    setMode]    = useState(null);    // null | 'month' | 'all'
   const [scope,   setScope]   = useState('all');   // for month mode
   const [counts,  setCounts]  = useState(null);
@@ -6857,7 +6909,7 @@ export function ResetModal({ year, month, onClose, onDone, showToast }) {
           display:'flex', alignItems:'flex-start', gap:12 }}>
           <div style={{ flex:1 }}>
             <h2 style={{ margin:0, fontFamily:SERIF, fontSize:22, fontWeight:600, color:C.ink }}>
-              Reset data
+              Settings
             </h2>
             <p style={{ margin:'4px 0 0', fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6 }}>
               Start a month over, or wipe the budget and begin again. Both of you share
@@ -6870,6 +6922,32 @@ export function ResetModal({ year, month, onClose, onDone, showToast }) {
         </div>
 
         <div style={{ overflowY:'auto', flex:1, padding:'14px 16px' }}>
+
+          {/* Account. Sign-out existed in code but had no button anywhere in
+              the app, so there was genuinely no way to leave. */}
+          <Card style={{ marginBottom:12 }}>
+            <p style={{margin:'0 0 2px', fontSize:13, fontWeight:700, color:C.ink, fontFamily:SANS}}>
+              Signed in as {profile?.name || 'you'}
+            </p>
+            {profile?.email && (
+              <p style={{margin:'0 0 10px', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>{profile.email}</p>
+            )}
+            {dataIsolated === false && (
+              <p style={{margin:'0 0 10px', padding:'9px 11px', background:C.redLight,
+                border:`1px solid ${C.red}44`, borderRadius:8,
+                fontSize:11, color:'#9b2c2c', fontFamily:SANS, lineHeight:1.55}}>
+                <b>This budget isn't private yet.</b> Until SECURITY_FIX_MIGRATION.sql is
+                run in Supabase, anyone who signs up can see and edit this data.
+                Don't share the app until that's done.
+              </p>
+            )}
+            <button onClick={onSignOut} style={{width:'100%', border:`1px solid ${C.sandDark}`,
+              background:C.white, color:C.ink, padding:'11px', borderRadius:10,
+              fontWeight:600, fontSize:13, fontFamily:SANS, cursor:'pointer',
+              display:'flex', alignItems:'center', justifyContent:'center', gap:7}}>
+              <LogOut size={14} color={C.ink}/> Sign out
+            </button>
+          </Card>
 
           {/* Backup first */}
           <Card style={{ border:`1px solid ${C.green}44`, background:C.greenLight }}>
@@ -7038,6 +7116,7 @@ export default function App() {
   const [receiptsSetup, setReceiptsSetup]=useState(null); // null = still checking; {bucketOk,tableOk,ready}
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
+  const [dataIsolated, setDataIsolated]=useState(null); // null=unknown, false=migration not run
   const [showExport, setShowExport]=useState(false);
   const [showEmailPreview, setShowEmailPreview]=useState(false);
   const [billRules,  setBillRules ]=useState([]);
@@ -7128,7 +7207,15 @@ export default function App() {
     supabase.auth.getSession().then(({data:{session}})=>{
       if(session?.user){
         const meta=session.user.user_metadata;
-        if(meta?.name){setProfile({...meta,email:session.user.email,id:session.user.id});setAuthState('app');}
+        if(meta?.name){
+          setProfile({...meta,email:session.user.email,id:session.user.id});
+          setAuthState('app');
+          // Every table is scoped by household. Provision one if this account
+          // doesn't have it yet, and check whether the security migration has
+          // been run at all so Settings can warn if the data isn't private.
+          ensureHousehold().catch(err=>console.error('household setup failed:',err));
+          isDataIsolated().then(setDataIsolated).catch(()=>setDataIsolated(false));
+        }
         else{setAuthState('auth');}
       } else {
         setAuthState('auth');
@@ -7139,7 +7226,15 @@ export default function App() {
     const unsub=onAuthChange((event,session)=>{
       if(event==='SIGNED_IN'&&session?.user){
         const meta=session.user.user_metadata;
-        if(meta?.name){setProfile({...meta,email:session.user.email,id:session.user.id});setAuthState('app');}
+        if(meta?.name){
+          setProfile({...meta,email:session.user.email,id:session.user.id});
+          setAuthState('app');
+          // Every table is scoped by household. Provision one if this account
+          // doesn't have it yet, and check whether the security migration has
+          // been run at all so Settings can warn if the data isn't private.
+          ensureHousehold().catch(err=>console.error('household setup failed:',err));
+          isDataIsolated().then(setDataIsolated).catch(()=>setDataIsolated(false));
+        }
         else{setAuthState('auth');}
       }
       if(event==='SIGNED_OUT'){setProfile(null);setAuthState('auth');}
@@ -7909,6 +8004,7 @@ export default function App() {
         <ResetModal
           year={year} month={month}
           showToast={showToast}
+          onSignOut={handleSignOut} profile={profile} dataIsolated={dataIsolated}
           onClose={()=>setShowReset(false)}
           onDone={async ()=>{
             setShowReset(false);

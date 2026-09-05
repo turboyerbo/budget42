@@ -15,7 +15,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, ReceiptHistoryModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, monthStampFor, shouldShowBudgetSuggestions,
+  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, incomeShares, monthStampFor, shouldShowBudgetSuggestions,
   buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, describeReceiptsBackendIssue,
   describeBillPaidBy,
   C, SERIF, SANS } from '../src/App.jsx';
@@ -1614,4 +1614,106 @@ check('isCashWithdrawal / isInterPartnerTransfer / describesPerson behave sensib
     throw new Error('a transfer to a third party must not count as an inter-partner transfer');
   }
   if (describesPerson('SENT JAZMINE YERBURY', 'Mariel Ko')) throw new Error('a different person must not match');
+});
+
+
+// ─── Security / account ───────────────────────────────────────────────────────
+// Two real bugs, reported together: there was no way to sign out, and sharing
+// the app let other people see this budget.
+//
+// Sign-out: handleSignOut() existed in the code but was referenced NOWHERE in
+// the UI, so it could never be called. Rendering alone wouldn't catch that —
+// the function was defined and the app compiled fine. This asserts the button
+// is actually reachable.
+check('Settings: a working Sign out button is actually rendered', () => {
+  const html = renderToString(React.createElement(ResetModal, {
+    year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop,
+    onSignOut: noop, profile: { name:'Jordan', email:'j@example.com' }, dataIsolated: true,
+  }));
+  if (!html.includes('Sign out')) throw new Error('no Sign out button — there is no way to leave the app');
+  if (!html.includes('Jordan')) throw new Error('expected the signed-in account to be shown');
+});
+
+check('Settings: warns loudly when the data is not yet private', () => {
+  const html = renderToString(React.createElement(ResetModal, {
+    year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop,
+    onSignOut: noop, profile: { name:'Jordan' }, dataIsolated: false,
+  }));
+  // React escapes apostrophes in SSR output, so match on unaffected text
+  if (!html.includes('SECURITY_FIX_MIGRATION')) {
+    throw new Error('must warn when the security migration has not been run — otherwise sharing the app leaks the budget');
+  }
+});
+
+check('Settings: no warning once the data IS isolated', () => {
+  const html = renderToString(React.createElement(ResetModal, {
+    year: 2026, month: 6, onClose: noop, onDone: noop, showToast: noop,
+    onSignOut: noop, profile: { name:'Jordan' }, dataIsolated: true,
+  }));
+  if (html.includes('SECURITY_FIX_MIGRATION')) throw new Error('should not cry wolf once isolation is in place');
+});
+
+
+// ─── Income-proportional bill splitting ───────────────────────────────────────
+// Reported: "Both partners are being charged 100% of the bill." HomeTab used
+// sched.paidTotal directly with no view filtering, so Jordan's screen AND
+// Ness's screen each showed the full household bill total. Added together,
+// the household looked like it had paid everything twice.
+//
+// The fix splits by income rather than 50/50: on $7,000 and $3,000 that's
+// 70/30, so each person contributes the same PERCENTAGE of their own pay.
+check('incomeShares: splits 70/30 on $7,000 and $3,000', () => {
+  const txns = [
+    mk({ category:'income', amount:7000, who:'Jordan Yerbury', direction:'credit' }),
+    mk({ category:'income', amount:3000, who:'Mariel Ko', direction:'credit' }),
+  ];
+  const r = incomeShares(txns, 'Jordan Yerbury', 'Mariel Ko');
+  if (Math.abs(r.mineShare - 0.7) > 1e-9) throw new Error(`expected 0.70 for the $7,000 earner, got ${r.mineShare}`);
+  if (Math.abs(r.partnerShare - 0.3) > 1e-9) throw new Error(`expected 0.30 for the $3,000 earner, got ${r.partnerShare}`);
+  if (r.basis !== 'income') throw new Error('should be derived from income, not a fallback');
+  if (Math.abs(r.mineShare + r.partnerShare - 1) > 1e-9) throw new Error('the two shares must add up to exactly 1');
+});
+
+check('incomeShares: falls back to an even split when income is missing, and says so', () => {
+  const r = incomeShares([mk({ category:'income', amount:5000, who:'Jordan Yerbury', direction:'credit' })],
+                         'Jordan Yerbury', 'Mariel Ko');
+  if (r.mineShare !== 0.5 || r.partnerShare !== 0.5) throw new Error('expected an even split when one person has no recorded income');
+  if (r.basis !== 'even-split-fallback') throw new Error('must report that this was a fallback, not a real calculation');
+  const none = incomeShares([], 'Jordan Yerbury', 'Mariel Ko');
+  if (none.mineShare !== 0.5) throw new Error('expected an even split with no income data at all');
+});
+
+check('HomeTab: personal views show a SHARE of bills, not 100% each', () => {
+  const bill = { key:'manual:rent', label:'Rent', amount:1000, day:1, status:'manual', category:'other' };
+  const pay  = [{ key:'manual:rent', year:2026, month:6, label:'Rent', paid_by:'Jordan Yerbury', paid_at:'2026-07-01T00:00:00.000Z' }];
+  const income = [
+    mk({ category:'income', amount:7000, who:'Jordan Yerbury', direction:'credit', date:'2026-07-02' }),
+    mk({ category:'income', amount:3000, who:'Mariel Ko',      direction:'credit', date:'2026-07-02' }),
+  ];
+  const render = (view) => renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: income, ccTarget: 0,
+    allCats, catTargets: {}, year: 2026, month: 6,
+    profile: { name:'Jordan Yerbury' }, partnerName: 'Mariel Ko', view, setView: noop,
+    history: [], billRules: [bill], billPayments: pay,
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop,
+    showToast: noop, goals: [], onSaveGoals: noop,
+    depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop,
+  }));
+
+  const combined = render('combined'), mine = render('mine'), partner = render('partner');
+
+  // Combined still shows the whole $1,000 bill
+  if (!combined.includes('1,000.00')) throw new Error('Combined should show the full $1,000 in bills');
+  // 70/30 of $1,000 = $700 / $300
+  if (!mine.includes('700.00')) throw new Error("Jordan earns 70% so should carry $700 of the bill, not the full amount");
+  if (!partner.includes('300.00')) throw new Error("Ness earns 30% so should carry $300 of the bill");
+  // The decisive check is Available Money, since the $1,000 household figure
+  // legitimately appears in both views as explanatory context.
+  //   Jordan: 7,000 income - 700 bills = 6,300   (bug would give 6,000)
+  //   Ness:   3,000 income - 300 bills = 2,700   (bug would give 2,000)
+  if (!mine.includes('6,300.00')) throw new Error("Jordan's Available Money should be $6,300 (7,000 - his $700 share)");
+  if (mine.includes('6,000.00')) throw new Error('Jordan was charged the full $1,000 household bill — the reported bug');
+  if (!partner.includes('2,700.00')) throw new Error("Ness's Available Money should be $2,700 (3,000 - her $300 share)");
+  if (partner.includes('2,000.00')) throw new Error('Ness was charged the full $1,000 household bill — the reported bug');
 });
