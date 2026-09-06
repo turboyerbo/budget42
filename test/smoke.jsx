@@ -1717,3 +1717,81 @@ check('HomeTab: personal views show a SHARE of bills, not 100% each', () => {
   if (!partner.includes('2,700.00')) throw new Error("Ness's Available Money should be $2,700 (3,000 - her $300 share)");
   if (partner.includes('2,000.00')) throw new Error('Ness was charged the full $1,000 household bill — the reported bug');
 });
+
+
+// ─── Welcome briefing ─────────────────────────────────────────────────────────
+import { buildBriefingFacts, fallbackBriefing } from '../src/briefing.js';
+
+const NOW = new Date(2026, 6, 20);   // 20 Jul 2026, fixed so tests don't drift
+const bDay = n => { const d=new Date(NOW.getTime()-n*86400000);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+
+check('briefing: counts only the last seven days, and excludes transfers and income', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan Yerbury', partnerName:'Mariel Ko',
+    everything: [
+      mk({ description:'LOBLAWS', amount:120, category:'groceries', who:'Jordan Yerbury', date:bDay(2) }),
+      mk({ description:'METRO',   amount:80,  category:'groceries', who:'Mariel Ko',      date:bDay(5) }),
+      mk({ description:'OLD BUY', amount:500, category:'groceries', who:'Jordan Yerbury', date:bDay(20) }), // too old
+      mk({ description:'PAY',     amount:5000,category:'income',    who:'Jordan Yerbury', date:bDay(1) }),
+      mk({ description:'TO NESS', amount:300, category:'transfer',  who:'Jordan Yerbury', date:bDay(1) }),
+    ]});
+  if (f.weekTotal !== 200) throw new Error(`expected $200 this week (income/transfer/old excluded), got ${f.weekTotal}`);
+  if (f.weekCount !== 2) throw new Error(`expected 2 transactions, got ${f.weekCount}`);
+  if (f.perPerson.jordan !== 120 || f.perPerson.mariel !== 80) throw new Error('per-person split is wrong');
+});
+
+check('briefing: flags unattributed spending rather than hiding it', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan Yerbury', partnerName:'Mariel Ko',
+    everything: [ mk({ description:'MYSTERY', amount:75, category:'other', who:'', date:bDay(1) }) ]});
+  if (!f.notes.some(n => n.includes('attributed'))) throw new Error('unattributed spending must be flagged');
+});
+
+check('briefing: surfaces overdue bills and a negative balance as things to look at', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan Yerbury', partnerName:'Mariel Ko',
+    everything: [], carriedOver: [{ label:'Hydro', amount:140 }], availableMoney: -50 });
+  if (!f.notes.some(n => n.includes('overdue'))) throw new Error('overdue bills must be flagged');
+  if (!f.notes.some(n => n.includes('negative'))) throw new Error('a negative balance must be flagged');
+  if (f.overdueTotal !== 140) throw new Error('overdue total is wrong');
+});
+
+check('briefing: picks the goal closest to being funded', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan', partnerName:'Mariel', everything: [],
+    goals: [ { label:'Trip', currentBalance:200, target:1000 },
+             { label:'Emergency fund', currentBalance:900, target:1000 },
+             { label:'No target', currentBalance:50, target:0 } ]});
+  if (f.closestGoal?.label !== 'Emergency fund') throw new Error(`expected the 90% goal, got ${f.closestGoal?.label}`);
+  if (Math.round(f.closestGoal.pct) !== 90) throw new Error('goal percentage is wrong');
+});
+
+check('briefing: fallback text is written from the real figures, never blank', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan Yerbury', partnerName:'Mariel Ko',
+    everything: [ mk({ description:'LOBLAWS', amount:120, category:'groceries', who:'Jordan Yerbury', date:bDay(1) }) ],
+    carriedOver: [{ label:'Hydro', amount:140 }] });
+  const t = fallbackBriefing(f);
+  if (!t || t.length < 20) throw new Error('fallback must always produce a real summary');
+  if (!t.includes('120.00')) throw new Error("the week's actual total should appear");
+  if (!t.includes('140.00')) throw new Error('the overdue amount should appear');
+});
+
+check('briefing: says so plainly when nothing has happened', () => {
+  const f = buildBriefingFacts({ now: NOW, myName:'Jordan', partnerName:'Mariel', everything: [] });
+  if (f.hasAnything) throw new Error('an empty week should not claim to have content');
+  if (!fallbackBriefing(f).includes('Nothing')) throw new Error('should say plainly that nothing was recorded');
+});
+
+check('All tab: no emoji left in the Home/All view', () => {
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [mk({ description:'LOBLAWS', amount:120, category:'groceries' })],
+    ccTarget: 0, allCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel', view: 'combined', setView: noop,
+    history: [], billRules: [], billPayments: [],
+    expectedIncome: [{ id:'p1', date:'2026-07-28', amount:1200, person:'both' }],
+    setExpectedIncome: noop, onAddTxn: noop, showToast: noop,
+    goals: [{ id:'g1', person:'couple', label:'Trip', currentBalance:100, target:1000, deposits:[] }],
+    onSaveGoals: noop, depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop,
+  }));
+  const emoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/u;
+  const m = html.match(emoji);
+  if (m) throw new Error(`emoji still present in the All tab: ${JSON.stringify(m[0])}`);
+});

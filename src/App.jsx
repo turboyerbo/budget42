@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ShoppingBasket, Utensils, Wine, Car, Train, Pill, Stethoscope,
   Ticket, Code2, CreditCard, Shirt, Plane, Scissors, Scale, Package,
@@ -6,7 +6,7 @@ import {
   Tag, Coffee, Music, BookOpen, Camera, Dumbbell, Leaf, PawPrint, Brush, Baby,
   ChevronRight, Trash2, Check, X, Sparkles, AlertCircle, Eye, EyeOff, LogOut,
   Bell, BellRing, Landmark, HelpCircle, Heart, Settings, Download,
-  Smartphone, Zap, Gift, Shield, ArrowLeftRight, FolderOpen, Printer, Image,
+  Smartphone, Zap, Gift, Shield, ArrowLeftRight, FolderOpen, Printer, Image, Pencil, User,
 } from 'lucide-react';
 import { supabase, getTxns, insertTxn, deleteTxn,
          getSettings, upsertSettings,
@@ -25,6 +25,7 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          getGoals, upsertGoals,
          uploadReceiptImage, insertReceipt, updateReceipt } from './supabase.js';
 import { buildMonthlyReport, renderMonthlyReportHtml } from './report.js';
+import { buildBriefingFacts, writeBriefing, fallbackBriefing } from './briefing.js';
 import { analyzeReceipt, isHeic, MAX_RECEIPT_BYTES, normalizeReceiptImage } from './receipt.js';
 import { stashReceiptPhoto, markReceiptUploaded, recordUploadFailure, getPendingReceipts } from './receiptStore.js';
 import { categorize } from './categorize.js';
@@ -2282,7 +2283,9 @@ function AdviceBubble({snapshot}) {
         width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px dashed ${C.purple}55`,
         background:C.purple+'0a', borderRadius:12, padding:'12px 14px', marginBottom:12, cursor:'pointer'
       }}>
-        <span style={{fontSize:18, animation:'gentleBob 2.2s ease-in-out infinite'}}>💭</span>
+        <span style={{display:'flex', animation:'gentleBob 2.2s ease-in-out infinite'}}>
+          <Sparkles size={16} color={C.green}/>
+        </span>
         <div style={{flex:1, textAlign:'left'}}>
           <p style={{margin:0, fontSize:12, fontWeight:700, color:C.purple, fontFamily:SANS}}>
             Spend it, save it, or hold off?
@@ -2326,7 +2329,7 @@ function AdviceBubble({snapshot}) {
       padding:'14px 16px', marginBottom:12, animation:'popIn 0.35s cubic-bezier(0.34,1.56,0.64,1)'
     }}>
       <div style={{display:'flex', alignItems:'flex-start', gap:10}}>
-        <span style={{fontSize:18, flexShrink:0}}>💭</span>
+        <Sparkles size={16} color={C.green} style={{flexShrink:0, marginTop:1}}/>
         <div style={{flex:1}}>
           <p style={{margin:0, fontSize:13, color:C.ink, fontFamily:SANS, lineHeight:1.5}}>
             {advice}
@@ -2697,6 +2700,101 @@ function GoalRow({goal, accent, onUpdate, onDeposit}) {
   );
 }
 
+/**
+ * The "welcome back" panel at the top of All. Shows once per person per day
+ * — an update you get every single time you tap a tab stops being an update
+ * and becomes furniture.
+ *
+ * Renders the facts immediately from local data, then swaps in Claude's
+ * phrasing when it arrives. It never blocks on the network: if the API is
+ * slow or unreachable the plainly-written version is what stays.
+ */
+export function WelcomeBriefing({facts, personName, onDismiss}) {
+  const [text, setText] = useState(() => fallbackBriefing(facts));
+  const [source, setSource] = useState('rules');
+  const [thinking, setThinking] = useState(true);
+
+  useEffect(() => {
+    let live = true;
+    writeBriefing(facts, personName)
+      .then(r => { if (live) { setText(r.text); setSource(r.source); setThinking(false); } })
+      .catch(() => { if (live) setThinking(false); });
+    return () => { live = false; };
+  }, []);
+
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+
+  return (
+    <Card style={{padding:0, marginBottom:12, overflow:'hidden', border:`1px solid ${C.green}33`}}>
+      <div style={{background:C.green, padding:'13px 16px', display:'flex', alignItems:'center', gap:9}}>
+        <Sparkles size={15} color="#fff"/>
+        <p style={{margin:0, flex:1, fontSize:13, fontWeight:700, color:'#fff', fontFamily:SANS}}>
+          {greeting}{personName ? `, ${capitalize(personName)}` : ''}
+        </p>
+        <button onClick={onDismiss} title="Hide until tomorrow"
+          style={{border:'none', background:'rgba(255,255,255,0.18)', borderRadius:7,
+            padding:'4px 9px', cursor:'pointer', color:'#fff', fontSize:10,
+            fontWeight:700, fontFamily:SANS}}>
+          Dismiss
+        </button>
+      </div>
+
+      <div style={{padding:'14px 16px'}}>
+        <p style={{margin:0, fontSize:13, color:C.ink, fontFamily:SANS, lineHeight:1.65,
+          opacity: thinking ? 0.72 : 1, transition:'opacity 0.3s'}}>
+          {text}
+        </p>
+
+        {/* The underlying numbers, so the write-up can always be checked
+            against something concrete rather than taken on trust. */}
+        <div style={{display:'flex', gap:8, flexWrap:'wrap', marginTop:12}}>
+          {facts.weekCount > 0 && (
+            <Chip label="Last 7 days" value={fmt(facts.weekTotal)} color={C.ink}/>
+          )}
+          {facts.upcomingTotal > 0 && (
+            <Chip label="Due this week" value={fmt(facts.upcomingTotal)} color={C.blue}/>
+          )}
+          {facts.overdueTotal > 0 && (
+            <Chip label="Overdue" value={fmt(facts.overdueTotal)} color={C.red}/>
+          )}
+          {facts.closestGoal?.pct != null && (
+            <Chip label={facts.closestGoal.label} value={`${Math.round(facts.closestGoal.pct)}%`} color={C.purple}/>
+          )}
+        </div>
+
+        {facts.notes.length > 0 && (
+          <p style={{margin:'11px 0 0', fontSize:11, color:C.amber, fontFamily:SANS, lineHeight:1.5}}>
+            Worth a look: {facts.notes.join('; ')}.
+          </p>
+        )}
+
+        {thinking && (
+          <p style={{margin:'9px 0 0', fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
+            Writing a fuller summary…
+          </p>
+        )}
+        {!thinking && source === 'rules' && (
+          <p style={{margin:'9px 0 0', fontSize:10, color:C.inkSoft, fontFamily:SANS}}>
+            Summary written from your figures directly — the AI write-up wasn't available.
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function Chip({label, value, color}) {
+  return (
+    <div style={{background:color+'12', border:`1px solid ${color}30`, borderRadius:9,
+      padding:'6px 10px'}}>
+      <p style={{margin:0, fontSize:9, color:C.inkSoft, fontFamily:SANS,
+        textTransform:'uppercase', letterSpacing:'0.06em'}}>{label}</p>
+      <p style={{margin:0, fontSize:13, fontWeight:700, color, fontFamily:SERIF}}>{value}</p>
+    </div>
+  );
+}
+
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
                   year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,onAddTxn,
                   billActiveKeys,billConfiguredMonths,
@@ -2849,8 +2947,30 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     showToast('Goal updated');
   }
 
+  // Welcome briefing — once per person per day. Keyed by name as well as
+  // date so each partner gets their own, rather than one dismissing it for
+  // both on a shared device.
+  const briefingKey = `b42_briefing_${me}_${new Date().toISOString().slice(0,10)}`;
+  const [briefingDismissed, setBriefingDismissed] = useState(() => {
+    try { return localStorage.getItem(briefingKey) === '1'; } catch { return false; }
+  });
+  const briefingFacts = useMemo(() => buildBriefingFacts({
+    everything: everythingThisMonth, sched, goals, carriedOver,
+    myName: profile?.name, partnerName, availableMoney,
+  }), [everythingThisMonth, sched, goals, carriedOver, profile, partnerName, availableMoney]);
+
   return (
     <div style={{padding:'16px 16px 0'}}>
+      {!briefingDismissed && briefingFacts.hasAnything && (
+        <WelcomeBriefing
+          facts={briefingFacts}
+          personName={me}
+          onDismiss={()=>{
+            setBriefingDismissed(true);
+            try { localStorage.setItem(briefingKey,'1'); } catch {}
+          }}/>
+      )}
+
       {/* Dashboard — the critical numbers, front and center */}
       <ViewToggle view={view} setView={setView} myLabel={me} partnerLabel={firstName(partnerName)}/>
 
@@ -2937,7 +3057,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: Object.keys(incomeByPerson).length ? 12 : 0}}>
           <div>
             <p style={{margin:0, fontSize:11, color:C.green, fontFamily:SANS, textTransform:'uppercase', fontWeight:700, letterSpacing:'0.08em'}}>
-              💰 Actual Income This Month
+              Actual Income This Month
             </p>
             <p style={{margin:'2px 0 0', fontSize:11, color:C.inkSoft, fontFamily:SANS}}>
               What's actually landed, read off your statements
@@ -2993,12 +3113,12 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
                     <button onClick={()=>setEditingIncomeTxn(tx)} title="Edit this deposit"
                       style={{padding:'5px 7px', border:'none', background:C.sand, color:C.ink,
                         borderRadius:6, cursor:'pointer', fontSize:11, flexShrink:0}}>
-                      ✏️
+                      <Pencil size={12} color={C.ink}/>
                     </button>
                     <button onClick={()=>onDeleteTxn?.(tx)} title="Delete — this isn't real income"
                       style={{padding:'5px 7px', border:'none', background:C.red+'20', color:C.red,
                         borderRadius:6, cursor:'pointer', fontSize:11, flexShrink:0}}>
-                      🗑️
+                      <Trash2 size={12} color={C.red}/>
                     </button>
                   </div>
                 ))}
@@ -3085,7 +3205,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
       <button onClick={()=>setShowPredictedIncomePanel(v=>!v)} style={{
         width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px solid ${C.blue}33`,
         background:C.blue+'0a', borderRadius:12, padding:'12px 14px', marginBottom:12, cursor:'pointer'}}>
-        <span style={{fontSize:16}}>📅</span>
+        <CalendarDays size={16} color={C.blue} style={{flexShrink:0}}/>
         <div style={{flex:1, textAlign:'left'}}>
           <p style={{margin:0, fontSize:12, fontWeight:700, color:C.blue, fontFamily:SANS}}>
             Predicted income {predictedIncomeTotal>0 && `— ${fmt(predictedIncomeTotal)} expected`}
@@ -3113,7 +3233,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
       <button onClick={()=>setTab?.('spending')} style={{
         width:'100%', display:'flex', alignItems:'center', gap:10, border:`1px solid ${C.sandDark}55`,
         background:C.sand, borderRadius:12, padding:'12px 14px', marginBottom:20, cursor:'pointer'}}>
-        <span style={{fontSize:16}}>🛒</span>
+        <Wallet size={16} color={C.inkMid} style={{flexShrink:0}}/>
         <div style={{flex:1, textAlign:'left'}}>
           <p style={{margin:0, fontSize:12, fontWeight:700, color:C.ink, fontFamily:SANS}}>
             Category-by-category budget
@@ -3127,7 +3247,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
       {/* Financial Goals — grouped per person, each a dropdown */}
       <h3 style={{margin: '0 0 12px', fontFamily: SERIF, fontSize: 20, fontWeight: 600, color: C.ink}}>
-        🎯 Financial Goals
+        Financial Goals
       </h3>
 
       {GOAL_GROUPS.map(({person}) => {
@@ -3140,7 +3260,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
         const groupProgress = totalTarget > 0 ? Math.min((totalBalance/totalTarget)*100, 100) : 0;
         const isOpen = expandedGroup === person;
         const accent = GOAL_GROUP_COLOR[person] || C.blue;
-        const icon = person === 'couple' ? '💑' : '👤';
+        const GroupIcon = person === 'couple' ? Heart : User;
 
         return (
           <Card key={person} style={{marginBottom: 10, padding: 0, overflow: 'hidden',
@@ -3151,9 +3271,9 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
             }}>
               <div style={{
                 width: 36, height: 36, borderRadius: 10, background: accent+'18',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 16
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
               }}>
-                {icon}
+                <GroupIcon size={17} color={accent}/>
               </div>
               <div style={{flex: 1, minWidth: 0}}>
                 <p style={{margin: 0, fontSize: 14, fontWeight: 700, color: C.ink, fontFamily: SANS}}>
