@@ -15,8 +15,13 @@
  *   SUPABASE_SERVICE_ROLE_KEY  service_role key (NOT the anon key — this
  *                              bypasses row-level security, which is exactly
  *                              why it must never be exposed to the browser)
- *   BREVO_EMAIL                the address Brevo sends from
- *   BREVO_API_KEY              Brevo SMTP key
+ *   BREVO_SMTP_LOGIN           SMTP username — the 7xxxxx@smtp-brevo.com
+ *                              string from Brevo's SMTP page. This is a
+ *                              technical identifier and Brevo explicitly
+ *                              forbids using it as a From address.
+ *   BREVO_FROM_EMAIL           the VERIFIED sender address mail comes from
+ *                              (a real mailbox you own, added under Senders)
+ *   BREVO_API_KEY              the SMTP key (NOT an API key — different thing)
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -33,9 +38,14 @@ const firstName = s => String(s || '').trim().split(/\s+/)[0].toLowerCase();
 const EXCLUDED = new Set(['income', 'cc_payment', 'transfer', '_skip']);
 
 export default async function handler() {
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_EMAIL, BREVO_API_KEY } = process.env;
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_API_KEY } = process.env;
+  // The SMTP username and the From address are two different things — Brevo
+  // rejects mail whose From is the smtp-brevo.com login. BREVO_EMAIL is
+  // honoured as a fallback so an existing setup keeps working.
+  const BREVO_SMTP_LOGIN = process.env.BREVO_SMTP_LOGIN || process.env.BREVO_EMAIL;
+  const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || process.env.BREVO_EMAIL;
 
-  const missing = Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_EMAIL, BREVO_API_KEY })
+  const missing = Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_SMTP_LOGIN, BREVO_FROM_EMAIL, BREVO_API_KEY })
     .filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
     console.error('weekly-summary: missing env vars:', missing.join(', '));
@@ -70,7 +80,7 @@ export default async function handler() {
 
     const transport = nodemailer.createTransport({
       host: 'smtp-relay.brevo.com', port: 587, secure: false,
-      auth: { user: BREVO_EMAIL, pass: BREVO_API_KEY },
+      auth: { user: BREVO_SMTP_LOGIN, pass: BREVO_API_KEY },
     });
 
     let sent = 0, skipped = 0;
@@ -92,7 +102,7 @@ export default async function handler() {
 
       const html = renderEmail(summary, from, to);
       await transport.sendMail({
-        from: `"Budget For Two" <${BREVO_EMAIL}>`,
+        from: `"Budget For Two" <${BREVO_FROM_EMAIL}>`,
         to: recipients.map(r => r.email).join(', '),   // both partners, one email
         subject: `Your week: ${money(summary.totalSpent)} spent · ${from} to ${to}`,
         html,

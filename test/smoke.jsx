@@ -1795,3 +1795,62 @@ check('All tab: no emoji left in the Home/All view', () => {
   const m = html.match(emoji);
   if (m) throw new Error(`emoji still present in the All tab: ${JSON.stringify(m[0])}`);
 });
+
+
+// ─── Calendar month scoping ───────────────────────────────────────────────────
+// Reported: predicted income "doubles up onto other months". Cause:
+// expectedIncome is the FULL history across every month, and the calendar
+// bucketed it by .getDate() alone — so an entry dated the 15th of July
+// appeared on day 15 of every month navigated to. Goal deposits had the
+// identical bug, since a goal keeps every deposit it has ever received.
+// Actual income was unaffected only because those transactions are already
+// fetched per-month by the app.
+const calBase = {
+  txns: [], bankImports: [], billRules: [], billPayments: [],
+  setExpectedIncome: noop, onSaveGoals: noop, allCats, history: [],
+  showToast: noop, onSaveRule: noop, onDeleteRule: noop,
+  profile: { name:'Jordan Yerbury' }, partnerName: 'Mariel Ko',
+  view: 'combined', setView: noop,
+};
+
+check('Calendar: predicted income appears ONLY in its own month', () => {
+  const july = { id:'p1', date:'2026-07-15', amount:2500, description:'NORR', person:'both' };
+  const inJuly = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 6, expectedIncome: [july], goals: [] }));
+  const inAugust = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 7, expectedIncome: [july], goals: [] }));
+
+  if (!inJuly.includes('$2.5k')) throw new Error('the July entry should show in July');
+  if (inAugust.includes('$2.5k')) {
+    throw new Error('a July entry is showing in August — this is the reported month-doubling bug');
+  }
+});
+
+check('Calendar: goal deposits appear ONLY in the month they were made', () => {
+  const goal = { id:'g1', person:'couple', label:'Trip', currentBalance:500, target:1000,
+                 deposits: [{ id:'d1', date:'2026-07-20', amount:500 }] };
+  const inJuly = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 6, expectedIncome: [], goals: [goal] }));
+  const inAugust = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 7, expectedIncome: [], goals: [goal] }));
+
+  if (!inJuly.includes('$500')) throw new Error('the July deposit should show in July');
+  if (inAugust.includes('$500')) {
+    throw new Error('a July deposit is showing in August — deposits must be scoped to their own month');
+  }
+});
+
+check('Calendar: an entry on the same day number in a DIFFERENT month does not collide', () => {
+  // The precise failure mode: same day-of-month, different month.
+  const entries = [
+    { id:'p1', date:'2026-07-15', amount:2500, description:'July pay', person:'both' },
+    { id:'p2', date:'2026-08-15', amount:3100, description:'August pay', person:'both' },
+  ];
+  const july = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 6, expectedIncome: entries, goals: [] }));
+  const august = renderToString(React.createElement(CalendarTab,
+    { ...calBase, year: 2026, month: 7, expectedIncome: entries, goals: [] }));
+
+  if (!july.includes('$2.5k') || july.includes('$3.1k')) throw new Error('July should show only its own $2,500');
+  if (!august.includes('$3.1k') || august.includes('$2.5k')) throw new Error('August should show only its own $3,100');
+});

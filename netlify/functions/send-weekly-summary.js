@@ -1,5 +1,7 @@
 // Netlify Function: Send weekly budget summary email via Brevo
-// Requires env vars: BREVO_EMAIL, BREVO_API_KEY
+// Requires: BREVO_SMTP_LOGIN (7xxxxx@smtp-brevo.com), BREVO_FROM_EMAIL
+// (a verified sender), BREVO_API_KEY (an SMTP key, not an API key).
+// BREVO_EMAIL is accepted as a fallback for both, for older setups.
 // Call via: curl -X POST https://budgetfortwo.netlify.app/.netlify/functions/send-weekly-summary -H "Content-Type: application/json" -d '{...}'
 
 /* eslint-disable no-undef */
@@ -27,10 +29,12 @@ exports.handler = async (event) => {
     });
 
     // Check for required env vars
-    if (!process.env.BREVO_EMAIL || !process.env.BREVO_API_KEY) {
+    const smtpLogin = process.env.BREVO_SMTP_LOGIN || process.env.BREVO_EMAIL;
+    const fromEmail = process.env.BREVO_FROM_EMAIL || process.env.BREVO_EMAIL;
+    if (!smtpLogin || !fromEmail || !process.env.BREVO_API_KEY) {
       return { 
         statusCode: 500, 
-        body: JSON.stringify({ error: 'Email service not configured. Set BREVO_EMAIL and BREVO_API_KEY env vars.' }) 
+        body: JSON.stringify({ error: 'Email not configured. Set BREVO_SMTP_LOGIN, BREVO_FROM_EMAIL and BREVO_API_KEY.' }) 
       };
     }
 
@@ -40,14 +44,14 @@ exports.handler = async (event) => {
       port: 587,
       secure: false, // TLS
       auth: {
-        user: process.env.BREVO_EMAIL,
+        user: smtpLogin,
         pass: process.env.BREVO_API_KEY,
       },
     });
 
     // Send email
     const info = await transporter.sendMail({
-      from: `"Budget For Two" <${process.env.BREVO_EMAIL}>`,
+      from: `"Budget For Two" <${fromEmail}>`,
       to: email,
       subject: `📊 Weekly Budget Summary - ${startDate} to ${endDate}`,
       html: emailHTML,

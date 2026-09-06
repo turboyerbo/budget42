@@ -2356,6 +2356,15 @@ function AdviceBubble({snapshot}) {
 }
 
 function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, showToast, onAddTxn, profile, C, SERIF, SANS}) {
+  // Is predicted income actually reaching the server, or only this browser?
+  const [localOnly, setLocalOnly] = useState(false);
+  useEffect(() => {
+    let live = true;
+    import('./supabase.js')
+      .then(m => { if (live) setLocalOnly(!!m.expectedIncomeLocalOnly); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [expectedIncome]);
   const [editingId, setEditingId] = useState(null); // id of entry being edited, or 'new'
   const [fDate, setFDate] = useState(defaultDateForMonth(year, month));
   const [fAmount, setFAmount] = useState('');
@@ -2460,6 +2469,20 @@ function PredictedIncomeEditor({expectedIncome, setExpectedIncome, year, month, 
           {fmt(sum)}
         </p>
       </div>
+
+      {/* Predicted income kept vanishing and there was no way to tell why.
+          If it's still local-only, it lives in this browser alone — iOS
+          Safari clears that after about a week, and the other partner never
+          sees it. Say so, rather than letting entries quietly evaporate. */}
+      {localOnly && (
+        <p style={{margin:'0 0 10px', padding:'8px 10px', background:C.amber+'14',
+          border:`1px solid ${C.amber}44`, borderRadius:8, fontSize:11,
+          color:'#7c4a03', fontFamily:SANS, lineHeight:1.55}}>
+          <b>Saved on this device only.</b> Predicted income isn't reaching the
+          database yet, so it can be cleared by the browser and your partner
+          won't see it. Run PREDICTED_INCOME_MIGRATION.sql in Supabase to fix it.
+        </p>
+      )}
 
       {monthEntries.length > 0 && (
         <div style={{marginBottom:10}}>
@@ -4360,12 +4383,28 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
   // Predicted (planned ahead) and actual (already landed) income are tracked
   // completely separately — never summed together into one figure, since
   // they answer different questions ("what's expected" vs "what happened").
+  // Anything held as a full history (predicted income, goal deposits) must be
+  // narrowed to the viewed month BEFORE being bucketed by day number —
+  // otherwise an entry dated the 15th of July lands on day 15 of every month.
+  const inViewedMonth = dateStr => {
+    const d = parseLocalDate(dateStr);
+    return d && !isNaN(d) && d.getFullYear() === year && d.getMonth() === month;
+  };
+
+  // Predicted income must be narrowed to the month being viewed FIRST.
+  // expectedIncome is the whole list across every month, and bucketing it by
+  // .getDate() alone means an entry dated the 15th of July lands on day 15 of
+  // every month you navigate to — which is exactly the "doubling onto other
+  // months" that was reported. Actual income avoids this only because its
+  // transactions are already fetched per-month by the app.
   const predictedIncomeByDay = {};
-  (expectedIncome || []).forEach(inc => {
-    const d = parseLocalDate(inc.date).getDate();
-    if (!predictedIncomeByDay[d]) predictedIncomeByDay[d] = [];
-    predictedIncomeByDay[d].push(inc);
-  });
+  (expectedIncome || [])
+    .filter(inc => inViewedMonth(inc.date))
+    .forEach(inc => {
+      const d = parseLocalDate(inc.date).getDate();
+      if (!predictedIncomeByDay[d]) predictedIncomeByDay[d] = [];
+      predictedIncomeByDay[d].push(inc);
+    });
 
   const actualIncomeByDay = {};
   [...(txns||[]), ...(bankImports||[])]
@@ -4379,7 +4418,7 @@ export function CalendarTab({year, month, txns, bankImports, billRules, billPaym
 
   const depositsByDay = {};
   (goals || []).filter(goalMatchesView).forEach(g => {
-    (g.deposits || []).forEach(dep => {
+    (g.deposits || []).filter(dep => inViewedMonth(dep.date)).forEach(dep => {
       const d = parseLocalDate(dep.date).getDate();
       if (!depositsByDay[d]) depositsByDay[d] = [];
       depositsByDay[d].push({...dep, goalId: g.id, goalLabel: g.label});
