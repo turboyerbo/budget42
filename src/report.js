@@ -13,6 +13,9 @@
  */
 
 const EXCLUDED = new Set(['income', 'cc_payment', 'transfer', '_skip']);
+const money = n => '$' + Math.abs(Number(n) || 0).toLocaleString('en-CA',
+  { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 
 const norm = s => String(s || '').toLowerCase();
 export const firstNameOf = s => String(s || '').trim().split(/\s+/)[0].toLowerCase();
@@ -56,7 +59,7 @@ function isSpend(t) {
  */
 export function buildMonthlyReport({
   year, month, txns = [], bankImports = [], billEntries = [],
-  myName = '', partnerName = '', allCats = [],
+  myName = '', partnerName = '', allCats = [], catTargets = {}, goals = [],
 }) {
   const all = [...txns, ...bankImports];
   const catLabel = id => (allCats.find(c => c.id === id) || {}).label || id || 'Uncategorised';
@@ -138,20 +141,79 @@ export function buildMonthlyReport({
       pct: totalSpent > 0 ? (amount / totalSpent) * 100 : 0 }))
     .sort((a, b) => b.amount - a.amount);
 
-  // ── Who carried more of the household this month ────────────────────────
-  // Spending plus bills paid, per person. Deliberately NOT a demand for
-  // settlement — couples split things in all sorts of ways — just the
-  // arithmetic, so the conversation starts from agreed numbers.
-  const contribution = {};
-  [me, them, 'unattributed'].forEach(k => {
-    const s = perPerson[k]?.total || 0;
-    const b = billsByPayer[k]?.total || 0;
-    if (s || b) contribution[k] = { spending: s, bills: b, total: s + b };
+  // ── How we're doing against our own targets ─────────────────────────────
+  // Deliberately NOT a per-person comparison. An earlier version totalled
+  // each partner's spending plus bills and named whoever "carried more" —
+  // which reads as a scoreboard and invites resentment rather than a useful
+  // conversation. What's actually actionable is where the household as a
+  // whole went over what it meant to spend, and whether the shared goals
+  // moved. Both are things the two of you can act on together.
+  const budgets = (allCats || [])
+    .filter(c => !EXCLUDED.has(c.id) && !c.excluded)
+    .map(c => {
+      const target = Number(catTargets?.[c.id] ?? c.target ?? 0);
+      const spent = byCategory[c.id] || 0;
+      return { id: c.id, label: c.label || c.id, target, spent,
+               over: target > 0 ? spent - target : 0,
+               pct: target > 0 ? (spent / target) * 100 : null };
+    })
+    .filter(c => c.target > 0);
+
+  const overBudget = budgets.filter(c => c.spent > c.target)
+    .sort((a, b) => b.over - a.over);
+  const underBudget = budgets.filter(c => c.spent <= c.target && c.spent > 0)
+    .sort((a, b) => (a.target - a.spent) - (b.target - b.spent));
+  const totalBudget = budgets.reduce((a, c) => a + c.target, 0);
+  const totalAgainstBudget = budgets.reduce((a, c) => a + c.spent, 0);
+  const overallOver = totalAgainstBudget - totalBudget;
+
+  // Goals — shared progress, since these are the thing worth celebrating
+  const goalProgress = (goals || []).map(g => {
+    const bal = Number(g.currentBalance) || 0;
+    const target = Number(g.target) || 0;
+    const thisMonth = (g.deposits || [])
+      .filter(d => {
+        const dt = String(d.date || '');
+        return dt.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`);
+      })
+      .reduce((a, d) => a + (Number(d.amount) || 0), 0);
+    return { label: g.label, balance: bal, target, addedThisMonth: thisMonth,
+             pct: target > 0 ? Math.min((bal / target) * 100, 100) : null,
+             remaining: target > 0 ? Math.max(target - bal, 0) : null };
   });
-  const namedTotals = [me, them].map(k => contribution[k]?.total || 0);
-  const difference = Math.abs(namedTotals[0] - namedTotals[1]);
-  const aheadBy = namedTotals[0] === namedTotals[1] ? null
-                : (namedTotals[0] > namedTotals[1] ? me : them);
+  const goalsFunded = goalProgress.reduce((a, g) => a + g.addedThisMonth, 0);
+
+  // Practical, specific suggestions — tied to the actual numbers, never
+  // scolding, and never about who spent it.
+  const suggestions = [];
+  overBudget.slice(0, 3).forEach(c => {
+    const weekly = c.over / 4.3;
+    suggestions.push(
+      `${c.label} came in ${money(c.over)} over the ${money(c.target)} you'd set. ` +
+      `Trimming about ${money(weekly)} a week would bring it back in line — ` +
+      `or the target may simply be lower than what this category realistically costs, which is worth a look too.`
+    );
+  });
+  if (overallOver > 0 && overBudget.length > 1) {
+    suggestions.push(
+      `Across all categories you're ${money(overallOver)} over the ${money(totalBudget)} budgeted. ` +
+      `The single biggest gap is ${overBudget[0].label} — starting there covers ${Math.round((overBudget[0].over / overallOver) * 100)}% of it.`
+    );
+  }
+  if (underBudget.length && overBudget.length) {
+    const room = underBudget.reduce((a, c) => a + (c.target - c.spent), 0);
+    if (room > 0) suggestions.push(
+      `There's ${money(room)} unspent across ${underBudget.length} other categor${underBudget.length === 1 ? 'y' : 'ies'}, ` +
+      `so the household total may be closer to plan than any single category suggests.`
+    );
+  }
+  if (goalsFunded > 0) {
+    suggestions.push(`You put ${money(goalsFunded)} towards your goals this month.`);
+  } else if (goalProgress.length) {
+    suggestions.push(
+      `No goal deposits went in this month. Even a small standing amount tends to work better than waiting for a surplus that never quite arrives.`
+    );
+  }
 
   return {
     year, month, myName, partnerName, me, them,
@@ -165,8 +227,9 @@ export function buildMonthlyReport({
              outstanding: billsOutstanding.map(b => ({ label: b.label, amount: b.amount })) },
     transfers: { rows: transfers, in: transferIn, out: transferOut, net: transferIn - transferOut },
     cash: { rows: cash, total: cashTotal, unattributed: cashUnattributed },
-    contribution: { byPerson: contribution, difference, aheadBy,
-                    halfOfDifference: difference / 2 },
+    budgets: { rows: budgets, over: overBudget, under: underBudget,
+               totalBudget, totalSpent: totalAgainstBudget, overallOver },
+    goalProgress, goalsFunded, suggestions,
     unattributedSpend: perPerson.unattributed?.total || 0,
   };
 }
@@ -177,8 +240,6 @@ const MONTH_NAMES = ['January','February','March','April','May','June',
 
 const esc = s => String(s == null ? '' : s)
   .replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const money = n => '$' + Math.abs(Number(n) || 0).toLocaleString('en-CA',
-  { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 
 export function renderMonthlyReportHtml(r) {
@@ -300,16 +361,41 @@ ${r.cash.total ? `<p class="note">${money(r.cash.total)} withdrawn as cash this 
 <table><thead><tr><th>Category</th><th class="r">Amount</th><th class="r">Share</th></tr></thead>
 <tbody>${catRows}</tbody></table>
 
-<h2>Who carried more this month</h2>
-<table><thead><tr><th>Person</th><th class="r">Spending</th><th class="r">Bills paid</th><th class="r">Total</th></tr></thead>
-<tbody>${Object.entries(r.contribution.byPerson).map(([k,v])=>
- `<tr><td>${esc(k==='unattributed'?'Not attributed':cap(k))}</td><td class="r">${money(v.spending)}</td>
-  <td class="r">${money(v.bills)}</td><td class="r"><b>${money(v.total)}</b></td></tr>`).join('')}
+<h2>How we did against our budget</h2>
+${r.budgets.rows.length ? `
+<table><thead><tr><th>Category</th><th class="r">Budgeted</th><th class="r">Spent</th><th class="r">Difference</th></tr></thead>
+<tbody>${r.budgets.rows.slice().sort((a,b)=>b.over-a.over).map(c=>`<tr>
+  <td>${esc(c.label)}</td><td class="r">${money(c.target)}</td><td class="r">${money(c.spent)}</td>
+  <td class="r" style="color:${c.spent > c.target ? '#c0392b' : '#1a7a4a'}">${
+    c.spent > c.target ? '+' + money(c.over) + ' over' : money(c.target - c.spent) + ' left'}</td></tr>`).join('')}
 </tbody></table>
-${r.contribution.aheadBy
- ? `<p class="note"><b>${esc(cap(r.contribution.aheadBy))} put in ${money(r.contribution.difference)} more this month.</b>
-    An even split would mean ${money(r.contribution.halfOfDifference)} moving the other way — shown as arithmetic only, not a suggestion about how you should split things.</p>`
- : ''}
+<div class="totals" style="margin-top:8px">
+  <p class="grand"><span>All categories</span><span style="color:${r.budgets.overallOver > 0 ? '#c0392b' : '#1a7a4a'}">${
+    r.budgets.overallOver > 0
+      ? money(r.budgets.overallOver) + ' over budget'
+      : money(-r.budgets.overallOver) + ' under budget'}</span></p>
+</div>` : '<p class="muted">No category budgets set yet — add targets in Charges and this section will track them.</p>'}
+
+<h2>Our goals</h2>
+${r.goalProgress.length ? `
+<table><thead><tr><th>Goal</th><th class="r">Saved</th><th class="r">Target</th><th class="r">Added this month</th></tr></thead>
+<tbody>${r.goalProgress.map(g=>`<tr>
+  <td>${esc(g.label)}${g.pct != null ? ` <span class="muted">${Math.round(g.pct)}%</span>` : ''}</td>
+  <td class="r">${money(g.balance)}</td>
+  <td class="r">${g.target ? money(g.target) : '—'}</td>
+  <td class="r" style="${g.addedThisMonth > 0 ? 'color:#1a7a4a;font-weight:600' : 'color:#8a8a84'}">${
+    g.addedThisMonth > 0 ? '+' + money(g.addedThisMonth) : '—'}</td></tr>`).join('')}
+</tbody></table>
+${r.goalsFunded > 0 ? `<p class="note" style="background:#e8f4ee;border-color:#1a7a4a44;color:#14603a">
+  <b>${money(r.goalsFunded)} went towards your goals this month.</b></p>` : ''}`
+: '<p class="muted">No goals set up yet.</p>'}
+
+${r.suggestions.length ? `
+<h2>Things you might try</h2>
+<ul style="padding-left:18px;margin:8px 0">
+${r.suggestions.map(t=>`<li style="font-size:13px;margin:7px 0;line-height:1.6">${esc(t)}</li>`).join('')}
+</ul>
+<p class="muted" style="margin-top:10px">These look at the household's spending as a whole, not at either of you individually.</p>` : ''}
 
 ${warnings.length ? `<h2>Worth checking</h2><div class="warn"><ul>${
   warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}

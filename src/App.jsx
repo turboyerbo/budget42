@@ -774,7 +774,7 @@ export function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRu
 }
 
 // ─── EXPORT MODAL ─────────────────────────────────────────────────────────────
-function ExportModal({year, month, txns, bankImports, billPayments, billRules, history, allCats,
+function ExportModal({year, month, txns, bankImports, billPayments, billRules, history, allCats, catTargets, goals,
                       profile, partnerName, billActiveKeys, billConfiguredMonths,
                       onClose, showToast, C, SERIF, SANS, MONTHS}) {
   const [exporting, setExporting] = React.useState(false);
@@ -815,7 +815,7 @@ function ExportModal({year, month, txns, bankImports, billPayments, billRules, h
       year, month, txns, bankImports: bankImports || [],
       billEntries: sched.entries,
       myName: profile?.name || '', partnerName: partnerName || '',
-      allCats: allCats || [],
+      allCats: allCats || [], catTargets: catTargets || {}, goals: goals || [],
     });
     return 'data:text/html;charset=utf-8,' + encodeURIComponent(renderMonthlyReportHtml(report));
   }
@@ -8284,6 +8284,8 @@ export default function App() {
           billRules={billRules}
           history={history}
           allCats={allCats}
+          catTargets={catTargets}
+          goals={goals}
           profile={profile}
           partnerName={partnerName}
           billActiveKeys={billActiveKeys}

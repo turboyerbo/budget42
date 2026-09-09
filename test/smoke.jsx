@@ -1573,16 +1573,78 @@ check('report: flags cash withdrawals nobody is assigned to', () => {
   if (r.cash.unattributed !== 100) throw new Error(`expected $100 unattributed cash, got ${r.cash.unattributed}`);
 });
 
-check('report: works out who carried more of the household', () => {
+// The report used to include a "who carried more this month" table naming
+// whichever partner had contributed more. That reads as a scoreboard and
+// invites resentment rather than a useful conversation, so it's gone. What
+// replaced it is household-level: where the two of you jointly went over
+// budget, how the shared goals moved, and what to try next.
+check('report: contains no per-person comparison or scoreboard language', () => {
   const r = buildMonthlyReport({ ...rptBase,
-    bankImports: [ mk({ description:'LOBLAWS', amount:100, category:'groceries', who:'Jordan Yerbury' }) ],
-    billEntries: [ { label:'Rent', amount:1900, status:'paid', tickedBy:'Jordan Yerbury' },
-                   { label:'Gym', amount:60, status:'paid', tickedBy:'Mariel Ko' } ],
+    bankImports: [
+      mk({ description:'BIG', amount:900, category:'groceries', who:'Jordan Yerbury' }),
+      mk({ description:'SMALL', amount:20, category:'groceries', who:'Mariel Ko' }),
+    ],
+    billEntries: [{ label:'Rent', amount:1900, status:'paid', tickedBy:'Jordan Yerbury' }],
   });
-  if (r.contribution.byPerson.jordan.total !== 2000) throw new Error('Jordan: $100 spending + $1,900 bills = $2,000');
-  if (r.contribution.byPerson.mariel.total !== 60) throw new Error('Mariel: $60 bills');
-  if (r.contribution.aheadBy !== 'jordan') throw new Error('Jordan put in more, so he should be the one ahead');
-  if (r.contribution.difference !== 1940) throw new Error(`expected a $1,940 gap, got ${r.contribution.difference}`);
+  const html = renderMonthlyReportHtml(r);
+  for (const phrase of ['carried more', 'put in', 'more this month', 'even split would mean']) {
+    if (html.toLowerCase().includes(phrase.toLowerCase())) {
+      throw new Error(`report still contains comparison language: "${phrase}"`);
+    }
+  }
+  if (r.contribution) throw new Error('the contribution/scoreboard data should no longer be produced at all');
+});
+
+check('report: flags categories the household went over budget on, with the gap', () => {
+  const r = buildMonthlyReport({ ...rptBase,
+    allCats: [{ id:'groceries', label:'Groceries', target:400 },
+              { id:'rent', label:'Home', target:2000 }],
+    bankImports: [
+      mk({ description:'LOBLAWS', amount:550, category:'groceries', who:'Jordan Yerbury' }),
+      mk({ description:'RENT',    amount:1800, category:'rent',     who:'Mariel Ko' }),
+    ],
+  });
+  const over = r.budgets.over.find(c => c.id === 'groceries');
+  if (!over) throw new Error('groceries went $150 over and should be flagged');
+  if (Math.abs(over.over - 150) > 0.01) throw new Error(`expected $150 over, got ${over.over}`);
+  if (r.budgets.over.some(c => c.id === 'rent')) throw new Error('rent came in under and must not be flagged as over');
+  // Advice should name the category and the amount, not a person
+  const tip = r.suggestions.find(t => t.includes('Groceries'));
+  if (!tip) throw new Error('expected a suggestion about the over-budget category');
+  if (/jordan|mariel|ness/i.test(tip)) throw new Error('suggestions must not name either partner');
+});
+
+check('report: reports goal progress made during the month', () => {
+  const r = buildMonthlyReport({ ...rptBase,
+    goals: [
+      { label:'Emergency fund', currentBalance:900, target:1000,
+        deposits:[{ date:'2026-07-10', amount:200 }, { date:'2026-06-10', amount:50 }] },
+      { label:'Trip', currentBalance:100, target:2000, deposits:[] },
+    ],
+  });
+  const ef = r.goalProgress.find(g => g.label === 'Emergency fund');
+  if (ef.addedThisMonth !== 200) throw new Error(`only July's $200 counts this month, got ${ef.addedThisMonth}`);
+  if (Math.round(ef.pct) !== 90) throw new Error('emergency fund should read 90% funded');
+  if (r.goalsFunded !== 200) throw new Error('total funded this month should be $200');
+  if (!r.suggestions.some(t => t.includes('towards your goals'))) {
+    throw new Error('a month with deposits should acknowledge the progress');
+  }
+});
+
+check('report: nudges gently when no goal deposits were made', () => {
+  const r = buildMonthlyReport({ ...rptBase,
+    goals: [{ label:'Trip', currentBalance:100, target:2000, deposits:[] }] });
+  const tip = r.suggestions.find(t => t.includes('No goal deposits'));
+  if (!tip) throw new Error('expected a nudge when nothing went towards goals');
+  if (/should have|failed|too much|overspent/i.test(tip)) throw new Error('the nudge must not scold');
+});
+
+check('report: says so plainly when no budgets are set, rather than inventing them', () => {
+  const r = buildMonthlyReport({ ...rptBase, allCats: [{ id:'groceries', label:'Groceries', target:0 }],
+    bankImports: [mk({ description:'X', amount:50, category:'groceries', who:'Jordan Yerbury' })] });
+  if (r.budgets.rows.length !== 0) throw new Error('a category with no target should not be treated as budgeted');
+  const html = renderMonthlyReportHtml(r);
+  if (!html.includes('No category budgets set yet')) throw new Error('should explain that no budgets are set');
 });
 
 check('report: renders a complete HTML document covering every section', () => {
@@ -1590,7 +1652,7 @@ check('report: renders a complete HTML document covering every section', () => {
     mk({ description:'LOBLAWS', amount:120, category:'groceries', who:'Jordan Yerbury' }) ]});
   const html = renderMonthlyReportHtml(r);
   if (!html.includes('<!DOCTYPE html>') || !html.includes('</html>')) throw new Error('expected a complete HTML document');
-  for (const heading of ['What each of you spent','Who paid which bills','Money moved between you','Cash withdrawn','Where the money went','Who carried more']) {
+  for (const heading of ['What each of you spent','Who paid which bills','Money moved between you','Cash withdrawn','Where the money went','How we did against our budget','Our goals']) {
     if (!html.includes(heading)) throw new Error(`report is missing the "${heading}" section`);
   }
 });
