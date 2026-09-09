@@ -10,18 +10,15 @@
  * this function queries Supabase itself using the service-role key and works
  * out the figures server-side.
  *
- * Required environment variables (Netlify → Site settings → Environment):
- *   SUPABASE_URL               your project URL
- *   SUPABASE_SERVICE_ROLE_KEY  service_role key (NOT the anon key — this
- *                              bypasses row-level security, which is exactly
- *                              why it must never be exposed to the browser)
- *   BREVO_SMTP_LOGIN           SMTP username — the 7xxxxx@smtp-brevo.com
- *                              string from Brevo's SMTP page. This is a
- *                              technical identifier and Brevo explicitly
- *                              forbids using it as a From address.
- *   BREVO_FROM_EMAIL           the VERIFIED sender address mail comes from
- *                              (a real mailbox you own, added under Senders)
- *   BREVO_API_KEY              the SMTP key (NOT an API key — different thing)
+ * EMAIL SETUP — two values, that's the whole thing.
+ *
+ *   GMAIL_USER            your.name@gmail.com
+ *   GMAIL_APP_PASSWORD    16-character App Password from Google
+ *                         (Google account password will NOT work)
+ *
+ * Plus, so the function can read the data:
+ *   SUPABASE_URL
+ *   SUPABASE_SERVICE_ROLE_KEY   (service_role, never the anon key)
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -37,19 +34,41 @@ const firstName = s => String(s || '').trim().split(/\s+/)[0].toLowerCase();
 // Never counted as spending — see the app's own ALWAYS_EXCLUDED_CATS
 const EXCLUDED = new Set(['income', 'cc_payment', 'transfer', '_skip']);
 
-export default async function handler() {
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_API_KEY } = process.env;
-  // The SMTP username and the From address are two different things — Brevo
-  // rejects mail whose From is the smtp-brevo.com login. BREVO_EMAIL is
-  // honoured as a fallback so an existing setup keeps working.
-  const BREVO_SMTP_LOGIN = process.env.BREVO_SMTP_LOGIN || process.env.BREVO_EMAIL;
-  const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || process.env.BREVO_EMAIL;
 
-  const missing = Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BREVO_SMTP_LOGIN, BREVO_FROM_EMAIL, BREVO_API_KEY })
-    .filter(([, v]) => !v).map(([k]) => k);
-  if (missing.length) {
-    console.error('weekly-summary: missing env vars:', missing.join(', '));
-    return new Response(JSON.stringify({ error: 'Missing env vars: ' + missing.join(', ') }), { status: 500 });
+/**
+ * Gmail SMTP config. Two environment variables and nothing else — no sender
+ * verification, no domain, no DNS records. Returns null if unset so the
+ * caller can say plainly what's missing.
+ */
+export function resolveMailConfig(env) {
+  if (!env.GMAIL_USER || !env.GMAIL_APP_PASSWORD) return null;
+  return {
+    from: env.GMAIL_USER,
+    transport: {
+      host: 'smtp.gmail.com', port: 587, secure: false,
+      // Must be an App Password, not the account password. Google shows it
+      // in groups of four, so spaces get stripped rather than causing a
+      // baffling authentication failure.
+      auth: {
+        user: env.GMAIL_USER,
+        pass: String(env.GMAIL_APP_PASSWORD).replace(/\s+/g, ''),
+      },
+    },
+  };
+}
+
+export default async function handler() {
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+
+  const mail = resolveMailConfig(process.env);
+  const problems = [];
+  if (!SUPABASE_URL) problems.push('SUPABASE_URL');
+  if (!SUPABASE_SERVICE_ROLE_KEY) problems.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!mail) problems.push('GMAIL_USER and GMAIL_APP_PASSWORD');
+  if (problems.length) {
+    const msg = 'Not configured yet — missing: ' + problems.join(', ');
+    console.error('weekly-summary:', msg);
+    return new Response(JSON.stringify({ ok: false, error: msg }), { status: 500 });
   }
 
   const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
@@ -61,15 +80,29 @@ export default async function handler() {
 
   try {
     // Who to email: every member of every household, with their address.
-    const { data: members, error: mErr } = await db.from('household_members').select('user_id, household_id');
-    if (mErr) throw mErr;
-    if (!members?.length) {
-      return new Response(JSON.stringify({ sent: 0, note: 'no households yet' }), { status: 200 });
+    // Households only exist once SECURITY_FIX_MIGRATION.sql has been run.
+    // Before that, everyone shares one dataset anyway, so treat all users as
+    // a single household rather than refusing to send — the email working
+    // shouldn't be gated on an unrelated migration.
+    let members = [];
+    const { data: mData, error: mErr } = await db.from('household_members').select('user_id, household_id');
+    if (mErr) {
+      console.warn('weekly-summary: household_members unavailable, treating all users as one household:', mErr.message);
+    } else {
+      members = mData || [];
     }
 
     const { data: userList, error: uErr } = await db.auth.admin.listUsers({ perPage: 1000 });
     if (uErr) throw uErr;
-    const userById = new Map((userList?.users || []).map(u => [u.id, u]));
+    const allUsers = userList?.users || [];
+    const userById = new Map(allUsers.map(u => [u.id, u]));
+
+    if (!members.length) {
+      if (!allUsers.length) {
+        return new Response(JSON.stringify({ ok: true, sent: 0, note: 'no registered users yet' }), { status: 200 });
+      }
+      members = allUsers.map(u => ({ user_id: u.id, household_id: 'all-users' }));
+    }
 
     // Group members into their households
     const households = new Map();
@@ -78,10 +111,7 @@ export default async function handler() {
       households.get(m.household_id).push(m.user_id);
     }
 
-    const transport = nodemailer.createTransport({
-      host: 'smtp-relay.brevo.com', port: 587, secure: false,
-      auth: { user: BREVO_SMTP_LOGIN, pass: BREVO_API_KEY },
-    });
+    const transport = nodemailer.createTransport(mail.transport);
 
     let sent = 0, skipped = 0;
     const results = [];
@@ -102,7 +132,7 @@ export default async function handler() {
 
       const html = renderEmail(summary, from, to);
       await transport.sendMail({
-        from: `"Budget For Two" <${BREVO_FROM_EMAIL}>`,
+        from: `"Budget For Two" <${mail.from}>`,
         to: recipients.map(r => r.email).join(', '),   // both partners, one email
         subject: `Your week: ${money(summary.totalSpent)} spent · ${from} to ${to}`,
         html,
@@ -120,7 +150,12 @@ export default async function handler() {
 }
 
 async function buildWeekSummary(db, householdId, from, to, recipients) {
-  const scoped = table => db.from(table).select('*').eq('household_id', householdId);
+  // 'all-users' is the pre-migration case: no household column to filter on
+  // yet, so take everything rather than filtering on a column that may not
+  // even exist.
+  const scoped = table => householdId === 'all-users'
+    ? db.from(table).select('*')
+    : db.from(table).select('*').eq('household_id', householdId);
 
   const [txRes, biRes, bpRes] = await Promise.all([
     scoped('transactions').gte('date', from).lte('date', to),

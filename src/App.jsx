@@ -661,7 +661,7 @@ export function WeeklyEmailPreviewModal({txns, bankImports, billPayments, billRu
       } else {
         // Show the SERVER's actual reason, not a generic guess — this was
         // the real problem before: the function usually explains exactly
-        // what's wrong (missing Brevo credentials, a send error, etc.) but
+        // what's wrong (Gmail not configured, a send error, etc.) but
         // that message was being discarded here and replaced with a vague
         // "not configured yet" regardless of the real cause.
         let reason = `Server returned ${response.status}`;

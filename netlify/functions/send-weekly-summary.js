@@ -1,174 +1,80 @@
-// Netlify Function: Send weekly budget summary email via Brevo
-// Requires: BREVO_SMTP_LOGIN (7xxxxx@smtp-brevo.com), BREVO_FROM_EMAIL
-// (a verified sender), BREVO_API_KEY (an SMTP key, not an API key).
-// BREVO_EMAIL is accepted as a fallback for both, for older setups.
-// Call via: curl -X POST https://budgetfortwo.netlify.app/.netlify/functions/send-weekly-summary -H "Content-Type: application/json" -d '{...}'
+/**
+ * Sends one summary email on demand — this is what the "Send Test Email"
+ * button in Settings calls.
+ *
+ * Setup is two environment variables in Netlify:
+ *   GMAIL_USER          your.name@gmail.com
+ *   GMAIL_APP_PASSWORD  16-character App Password from Google
+ *
+ * The weekly automatic email is a different file (weekly-summary.js): it
+ * runs on a schedule and fetches its own data, because on a schedule nobody
+ * has the app open to supply it. This one is handed its numbers by the
+ * browser, which is fine for a button press.
+ */
+import nodemailer from 'nodemailer';
+import { resolveMailConfig } from './weekly-summary.js';
 
-/* eslint-disable no-undef */
-const nodemailer = require('nodemailer');
+const money = n => '$' + Math.abs(Number(n) || 0).toLocaleString('en-CA',
+  { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const esc = s => String(s == null ? '' : s)
+  .replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: 'Method not allowed' };
+    return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) };
+  }
+
+  const mail = resolveMailConfig(process.env);
+  if (!mail) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: 'Email is not set up yet. Add GMAIL_USER and GMAIL_APP_PASSWORD in ' +
+               'Netlify (Site configuration → Environment variables), then redeploy.',
+      }),
+    };
   }
 
   try {
-    const { email, spending, bills, income, startDate, endDate } = JSON.parse(event.body);
-
+    const { email, spending = {}, bills = {}, income = 0, startDate, endDate } = JSON.parse(event.body || '{}');
     if (!email) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Missing email' }) };
+      return { statusCode: 400, body: JSON.stringify({ error: 'No recipient address was provided.' }) };
     }
 
-    const emailHTML = generateEmailHTML({
-      email,
-      spending: spending || {},
-      bills: bills || { upcoming: [], paid: 0 },
-      income: income || 0,
-      startDate,
-      endDate,
-    });
+    const transport = nodemailer.createTransport(mail.transport);
 
-    // Check for required env vars
-    const smtpLogin = process.env.BREVO_SMTP_LOGIN || process.env.BREVO_EMAIL;
-    const fromEmail = process.env.BREVO_FROM_EMAIL || process.env.BREVO_EMAIL;
-    if (!smtpLogin || !fromEmail || !process.env.BREVO_API_KEY) {
-      return { 
-        statusCode: 500, 
-        body: JSON.stringify({ error: 'Email not configured. Set BREVO_SMTP_LOGIN, BREVO_FROM_EMAIL and BREVO_API_KEY.' }) 
-      };
-    }
+    const html = `<!DOCTYPE html><html><body style="margin:0;padding:24px;background:#f5f3ef;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;color:#1a1a18">
+<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden">
+  <div style="background:#1a7a4a;padding:22px 24px">
+    <p style="margin:0;color:rgba(255,255,255,.75);font-size:11px;letter-spacing:.1em;text-transform:uppercase">
+      ${esc(startDate || '')} — ${esc(endDate || '')}
+    </p>
+    <p style="margin:6px 0 0;color:#fff;font-size:32px;font-weight:600">${money(spending.total)}</p>
+    <p style="margin:2px 0 0;color:rgba(255,255,255,.8);font-size:13px">spent this week</p>
+  </div>
+  <div style="padding:20px 24px;font-size:14px">
+    <table style="width:100%;border-collapse:collapse">
+      <tr><td style="padding:7px 0;border-bottom:1px solid #f0efed">Bills paid</td>
+          <td style="padding:7px 0;border-bottom:1px solid #f0efed;text-align:right">${money(bills.paid)}</td></tr>
+      <tr><td style="padding:7px 0;border-bottom:1px solid #f0efed">Bills upcoming</td>
+          <td style="padding:7px 0;border-bottom:1px solid #f0efed;text-align:right">${money(bills.upcoming)}</td></tr>
+      <tr><td style="padding:7px 0">Income</td>
+          <td style="padding:7px 0;text-align:right">${money(income)}</td></tr>
+    </table>
+    <a href="https://budgetfortwo.netlify.app" style="display:block;margin:22px 0 0;background:#1a7a4a;color:#fff;text-decoration:none;text-align:center;padding:13px;border-radius:10px;font-weight:600">Open Budget For Two</a>
+  </div>
+</div></body></html>`;
 
-    // Configure Brevo SMTP transport
-    const transporter = nodemailer.createTransport({
-      host: 'smtp-relay.brevo.com',
-      port: 587,
-      secure: false, // TLS
-      auth: {
-        user: smtpLogin,
-        pass: process.env.BREVO_API_KEY,
-      },
-    });
-
-    // Send email
-    const info = await transporter.sendMail({
-      from: `"Budget For Two" <${fromEmail}>`,
+    await transport.sendMail({
+      from: `"Budget For Two" <${mail.from}>`,
       to: email,
-      subject: `📊 Weekly Budget Summary - ${startDate} to ${endDate}`,
-      html: emailHTML,
+      subject: `Your week: ${money(spending.total)} spent`,
+      html,
     });
 
-    console.log('Email sent successfully:', info.messageId);
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ 
-        success: true, 
-        message: 'Email sent',
-        messageId: info.messageId,
-      }),
-    };
-  } catch (error) {
-    console.error('Error:', error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message }),
-    };
+    return { statusCode: 200, body: JSON.stringify({ ok: true, sentTo: email }) };
+  } catch (err) {
+    console.error('send-weekly-summary failed:', err);
+    return { statusCode: 500, body: JSON.stringify({ error: err.message || String(err) }) };
   }
 };
-
-function generateEmailHTML({ email, spending, bills, income, startDate, endDate }) {
-  const totalSpent = spending.total || 0;
-  const avgDaily = (totalSpent / 7).toFixed(2);
-  
-  const upcomingBillsHTML = (bills.upcoming || [])
-    .map(b => `<tr>
-      <td style="padding: 12px; border-bottom: 1px solid #eee;">
-        <strong style="color: #1a1a18;">${b.label}</strong><br>
-        <span style="color: #888; font-size: 12px;">Due ${b.date}</span>
-      </td>
-      <td style="padding: 12px; border-bottom: 1px solid #eee; text-align: right;">
-        <strong style="color: #1a1a18;">$${b.amount.toFixed(2)}</strong>
-      </td>
-    </tr>`)
-    .join('');
-
-  const paidBillsHTML = bills.paid > 0
-    ? `<p style="margin: 10px 0; font-size: 14px; color: #1a7a4a;">✅ ${bills.paid} bill${bills.paid !== 1 ? 's' : ''} paid this week</p>`
-    : '';
-
-  const incomeHTML = income > 0
-    ? `<p style="margin: 10px 0; font-size: 14px; color: #0369a1;">💰 Expected income: $${income.toFixed(2)}</p>`
-    : '';
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1a1a18; line-height: 1.6; background: #f9f9f9; }
-    .container { max-width: 600px; margin: 0 auto; padding: 20px; background: white; border-radius: 12px; }
-    .header { background: linear-gradient(135deg, #1a7a4a 0%, #15654a 100%); color: white; padding: 30px 20px; border-radius: 10px; margin-bottom: 20px; text-align: center; }
-    .header h1 { margin: 0; font-size: 28px; font-weight: 600; }
-    .header p { margin: 5px 0 0; opacity: 0.9; font-size: 14px; }
-    .card { background: #f5f3ef; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-    .stat { display: inline-block; width: 48%; margin-right: 2%; text-align: center; }
-    .stat-value { font-size: 32px; font-weight: 600; color: #1a7a4a; }
-    .stat-label { font-size: 11px; color: #888; text-transform: uppercase; margin-top: 4px; }
-    table { width: 100%; border-collapse: collapse; }
-    .footer { font-size: 12px; color: #888; text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; }
-    .cta { background: #1a7a4a; color: white; padding: 12px 20px; border-radius: 8px; text-decoration: none; display: inline-block; margin: 15px 0; font-weight: 600; }
-  </style>
-</head>
-<body style="margin: 0; padding: 20px; background: #f9f9f9;">
-  <div class="container">
-    <div class="header">
-      <h1>📊 Weekly Budget Summary</h1>
-      <p>${startDate} — ${endDate}</p>
-    </div>
-
-    <div class="card">
-      <h2 style="margin-top: 0; color: #1a1a18; font-size: 20px;">This Week's Overview</h2>
-      <div>
-        <div class="stat">
-          <div class="stat-value">$${totalSpent.toFixed(2)}</div>
-          <div class="stat-label">Total Spent</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value">$${avgDaily}</div>
-          <div class="stat-label">Daily Average</div>
-        </div>
-      </div>
-      ${paidBillsHTML}
-      ${incomeHTML}
-    </div>
-
-    ${bills.upcoming && bills.upcoming.length > 0 ? `
-    <div class="card">
-      <h2 style="margin-top: 0; color: #1a1a18; font-size: 20px;">📅 Upcoming Bills & Deadlines</h2>
-      <table>
-        ${upcomingBillsHTML}
-      </table>
-      <p style="margin-top: 15px; font-size: 12px; color: #888; background: #fff; padding: 10px; border-radius: 6px;">
-        💡 Go to your Bills tab to mark items as paid and track payment status.
-      </p>
-    </div>
-    ` : ''}
-
-    <div style="background: #e8f4f8; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-      <p style="margin: 0; font-size: 14px; color: #0369a1;">
-        <strong>💚 Great work!</strong> You're tracking your spending and managing bills responsibly. Keep it up!
-      </p>
-    </div>
-
-    <div style="text-align: center;">
-      <a href="https://budgetfortwo.netlify.app" class="cta">View Your Budget</a>
-    </div>
-
-    <div class="footer">
-      <p style="margin: 0;">Budget For Two • budgetfortwo.netlify.app</p>
-      <p style="margin: 8px 0 0; font-size: 11px;">Privacy first • No data collection • Educational tool</p>
-    </div>
-  </div>
-</body>
-</html>`;
-}
