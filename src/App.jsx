@@ -18,6 +18,8 @@ import { supabase, getTxns, insertTxn, deleteTxn,
          deleteMonthData, deleteAllData,
          getBillRules, upsertBillRule, deleteBillRule, syncLocalBillRules,
          getExpectedIncome, saveExpectedIncome,
+         invitePartner, getHouseholdInvites, cancelInvite, setSoloMode,
+         getHouseholdSettings, getHouseholdMemberCount,
          getBillMonthActive, getBillMonthConfigured, setBillActiveForMonth, markMonthConfigured, setBillOverrideForMonth,
          getBillPayments, setBillPaid, syncLocalBillPayments, getAllBillPayments,
          deleteManyRows, getMonthEverything,
@@ -36,6 +38,7 @@ import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
 import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
          applyBillRules, getCarriedOverBills } from './recurring.js';
+import { merchantKey } from './merchant.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
 import { buildValidationReport, findExistingDuplicates } from './validate.js';
@@ -2818,6 +2821,139 @@ function Chip({label, value, color}) {
   );
 }
 
+
+/**
+ * Shown once, after the first sign-in, before the app proper.
+ *
+ * Two paths, and neither is a dead end: invite your partner, or track on
+ * your own for now. Solo is a first-class choice rather than a consolation
+ * prize — plenty of people want to get their own finances straight before
+ * involving anyone else, and an app that nags about a missing partner every
+ * session is one you stop opening.
+ */
+export function PartnerSetup({profile, onDone, showToast}) {
+  const [mode, setMode] = useState(null);       // null | 'invite' | 'sending'
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const validEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const inputStyle = {
+    width:'100%', padding:'11px 12px', border:`1px solid ${C.sandDark}`,
+    borderRadius:10, background:C.sand, color:C.ink, fontFamily:SANS,
+    fontSize:14, outline:'none', boxSizing:'border-box',
+  };
+
+  async function sendInvite() {
+    if (!validEmail || busy) return;
+    setBusy(true);
+    try {
+      await invitePartner(email, name, profile?.name);
+      // The email itself is best-effort: the invite record is what matters,
+      // because they can also just sign up with that address directly.
+      try {
+        await fetch('/.netlify/functions/send-invite', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ email: email.trim(), name: name.trim(),
+                                 fromName: profile?.name || 'Your partner' }),
+        });
+      } catch { /* invite still stands */ }
+      showToast(`Invite sent to ${email.trim()}`);
+      onDone({ invited: true });
+    } catch (e) {
+      showToast('Could not send that invite — ' + (e.message || e));
+      setBusy(false);
+    }
+  }
+
+  async function goSolo() {
+    setBusy(true);
+    try { await setSoloMode(true); } catch { /* not fatal */ }
+    onDone({ solo: true });
+  }
+
+  return (
+    <div style={{minHeight:'100dvh', background:C.sand, display:'flex',
+      alignItems:'center', justifyContent:'center', padding:20}}>
+      <div style={{maxWidth:420, width:'100%'}}>
+        <div style={{textAlign:'center', marginBottom:24}}>
+          <B42Logo size={44}/>
+          <h1 style={{margin:'14px 0 4px', fontFamily:SERIF, fontSize:26, fontWeight:600, color:C.ink}}>
+            Who's budgeting?
+          </h1>
+          <p style={{margin:0, fontSize:13, color:C.inkSoft, fontFamily:SANS, lineHeight:1.6}}>
+            Budget For Two works on your own, and works better with both of you.
+            You can change this whenever you like.
+          </p>
+        </div>
+
+        {mode !== 'invite' ? (
+          <>
+            <button onClick={()=>setMode('invite')} style={{
+              width:'100%', border:'none', background:C.green, color:'#fff',
+              padding:'16px', borderRadius:14, fontSize:15, fontWeight:700,
+              fontFamily:SANS, cursor:'pointer', marginBottom:10,
+              display:'flex', alignItems:'center', justifyContent:'center', gap:9}}>
+              <Heart size={16} color="#fff" fill="#fff"/> Invite my partner
+            </button>
+
+            <button onClick={goSolo} disabled={busy} style={{
+              width:'100%', border:`1px solid ${C.sandDark}`, background:C.white,
+              color:C.ink, padding:'16px', borderRadius:14, fontSize:15,
+              fontWeight:600, fontFamily:SANS, cursor:busy?'default':'pointer',
+              display:'flex', alignItems:'center', justifyContent:'center', gap:9}}>
+              <User size={16} color={C.ink}/> {busy ? 'Setting up…' : 'Just me for now'}
+            </button>
+
+            <p style={{margin:'14px 0 0', fontSize:11, color:C.inkSoft,
+              fontFamily:SANS, textAlign:'center', lineHeight:1.6}}>
+              Tracking on your own keeps every feature. You can invite someone
+              later from Settings, and nothing you've entered is lost when you do.
+            </p>
+          </>
+        ) : (
+          <Card style={{padding:'18px 18px 20px'}}>
+            <p style={{margin:'0 0 14px', fontSize:13, color:C.inkMid, fontFamily:SANS, lineHeight:1.6}}>
+              They'll get an email with a link to join. Once they sign up with
+              this address, you'll both see the same budget.
+            </p>
+
+            <SL>Their name</SL>
+            <input value={name} onChange={e=>setName(e.target.value)}
+              placeholder="e.g. Ness" style={{...inputStyle, marginBottom:12}}/>
+
+            <SL>Their email</SL>
+            <input value={email} onChange={e=>setEmail(e.target.value)}
+              type="email" inputMode="email" autoCapitalize="none" autoCorrect="off"
+              placeholder="name@example.com" style={{...inputStyle, marginBottom:4}}/>
+            {email.length > 3 && !validEmail && (
+              <p style={{margin:'0 0 8px', fontSize:11, color:C.red, fontFamily:SANS}}>
+                That doesn't look like a complete email address yet.
+              </p>
+            )}
+
+            <button onClick={sendInvite} disabled={!validEmail || busy} style={{
+              width:'100%', marginTop:12, border:'none',
+              background: validEmail && !busy ? C.green : C.sandDark,
+              color:'#fff', padding:'14px', borderRadius:12, fontSize:14,
+              fontWeight:700, fontFamily:SANS,
+              cursor: validEmail && !busy ? 'pointer' : 'default'}}>
+              {busy ? 'Sending…' : 'Send invite'}
+            </button>
+
+            <button onClick={()=>setMode(null)} disabled={busy} style={{
+              width:'100%', marginTop:8, border:'none', background:'none',
+              color:C.inkSoft, padding:'10px', fontSize:12, fontFamily:SANS,
+              cursor:'pointer'}}>
+              Back
+            </button>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setView,
                   year,month,history,billRules,billPayments,allBillPayments,expectedIncome,setExpectedIncome,onAddTxn,
                   billActiveKeys,billConfiguredMonths,
@@ -2909,6 +3045,21 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // everything else: every non-excluded category that ISN'T one of these
   // recognized bill categories, so the two buckets never double-count.
   const billCategoryIds = new Set(recurring.map(b => b.category));
+  // Which individual transactions ARE the recognised bills. Matching on the
+  // merchant key is exactly how buildSchedule decides a bill is paid, so this
+  // identifies the same rows — letting us leave the rest of a shared category
+  // (a furniture purchase filed under Home, say) counted as normal spending.
+  // A detected bill's key IS the merchant key. A MANUAL bill's key is
+  // "manual:<uid>", which matches nothing — so its label is normalised the
+  // same way and added too, otherwise hand-added bills were never recognised
+  // in the data and got counted twice.
+  const billMerchantKeys = new Set();
+  recurring.forEach(b => {
+    billMerchantKeys.add(b.key);
+    if (b.label) billMerchantKeys.add(merchantKey(b.label));
+  });
+  const isBillTxn = t => billMerchantKeys.has(merchantKey(t.description || t.note || t.merchant || ''))
+                      || (t.source === 'bill-manual');
 
   // Bills are a HOUSEHOLD cost, so a personal view has to show that person's
   // share of them — not the whole thing. This previously used the full
@@ -2928,9 +3079,14 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   let discretionarySpent = 0;
   Object.entries(txByCat).forEach(([catId, amt]) => {
     if (excludedIds.has(catId)) return;       // cc_payment/transfer/income — never "spending"
-    if (billCategoryIds.has(catId)) return;   // already counted in billsPaidThisMonth above
     discretionarySpent += amt;
   });
+  // Subtract only the transactions that ARE bills, rather than dropping
+  // every category a bill happens to use. Filing rent under Home previously
+  // removed ALL Home spending from the figures.
+  allTx.filter(t => !excludedIds.has(t.category || t.cat) && isBillTxn(t))
+       .forEach(t => { discretionarySpent -= t.amount; });
+  if (discretionarySpent < 0) discretionarySpent = 0;
 
   // Predicted income comes from what you've entered as expected for THIS month,
   // not from transactions, and not from entries you predicted for other months
@@ -3413,6 +3569,20 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   const recurring = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Map(), year, month)
     .filter(b => b.confidence === 'high');
   const billCategoryIds = new Set(recurring.map(b => b.category));
+  // Same fix as All: identify the bill TRANSACTIONS, not the categories they
+  // use. Excluding whole categories made a category shared with a bill
+  // (rent filed under Home) vanish from Charges entirely.
+  // A detected bill's key IS the merchant key. A MANUAL bill's key is
+  // "manual:<uid>", which matches nothing — so its label is normalised the
+  // same way and added too, otherwise hand-added bills were never recognised
+  // in the data and got counted twice.
+  const billMerchantKeys = new Set();
+  recurring.forEach(b => {
+    billMerchantKeys.add(b.key);
+    if (b.label) billMerchantKeys.add(merchantKey(b.label));
+  });
+  const isBillTxn = t => billMerchantKeys.has(merchantKey(t.description || t.note || t.merchant || ''))
+                      || (t.source === 'bill-manual');
 
   // Each view shows what that person was ACTUALLY charged — the real
   // transactions attributed to them, not a synthetic half-share. (An
@@ -3424,29 +3594,35 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   // and that's correct: one of you genuinely spends more some months.)
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
 
-  const isCountable = k => !excludedIds.has(k) && !billCategoryIds.has(k);
+  // A transaction counts as everyday spending unless it's an excluded
+  // category or it IS one of the recognised bills.
+  const isCountable = t => !excludedIds.has(t.category || t.cat) && !isBillTxn(t);
 
   // allTx is already narrowed to the selected person (or everyone, for
   // Combined) by filterByView above, so every figure below follows the
   // view automatically and consistently.
+  // Per-category totals, built from the countable transactions only — so a
+  // category shared with a bill still shows its non-bill spending instead of
+  // disappearing.
+  const countable = allTx.filter(isCountable);
   const txByCat = {};
-  allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
-  const totalSpent = Object.entries(txByCat)
-    .filter(([k])=>isCountable(k))
-    .reduce((a,[,v])=>a+v,0);
-  const weekSpent = allTx
-    .filter(t => isCountable(t.category||t.cat) && parseLocalDate(t.date) >= weekAgo)
+  countable.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
+  const totalSpent = Object.values(txByCat).reduce((a,v)=>a+v,0);
+  const weekSpent = countable
+    .filter(t => parseLocalDate(t.date) >= weekAgo)
     .reduce((a,t)=>a+t.amount,0);
 
   // Combined stays available for the "your share of the household" line
   // shown alongside an individual view, so it's always clear how one
   // person's spending relates to the total.
   const combinedTotalSpent = [...txns,...bankImports]
-    .filter(t => isCountable(t.category||t.cat))
+    .filter(isCountable)
     .reduce((a,t)=>a+t.amount,0);
 
+  // A category keeps its budget unless EVERY use of it is a bill.
+  const categoriesWithSpending = new Set(Object.keys(txByCat));
   const categoryBudgetSum = allCats
-    .filter(c=>!excludedIds.has(c.id) && !billCategoryIds.has(c.id))
+    .filter(c=>!excludedIds.has(c.id) && (!billCategoryIds.has(c.id) || categoriesWithSpending.has(c.id)))
     .reduce((a,c)=>a+(catTargets[c.id] ?? c.target ?? 0), 0);
   const budgetedForSpending = budgetOverride != null ? budgetOverride : categoryBudgetSum;
   const remainingToSpend = budgetedForSpending - totalSpent;
@@ -3461,7 +3637,9 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   // transactions regardless of view, which is what the screenshot caught:
   // Jordan's rows listed underneath a Ness total.) Each row keeps its
   // avatar so who-spent-what stays visible at a glance.
-  const rowsFor=catId=>allTx
+  // Drilldown shows the same transactions the category total is built from,
+  // so tapping a category can't reveal rows that aren't in its figure.
+  const rowsFor=catId=>countable
     .filter(t=>(t.category||t.cat)===catId)
     .sort((a,b)=>new Date(b.date)-new Date(a.date));
 
@@ -3714,7 +3892,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
 
       <SL>Spending this month</SL>
       <Card style={{padding:'8px 0'}}>
-        {allCats.filter(cat=>!billCategoryIds.has(cat.id)).map((cat,i)=>{
+        {allCats.filter(cat=>!billCategoryIds.has(cat.id) || (txByCat[cat.id]||0) > 0).map((cat,i)=>{
           const spent=txByCat[cat.id]||0;
           const target=catTargets[cat.id]||cat.target;
           const over=spent>target&&target>0;
@@ -7276,6 +7454,7 @@ export default function App() {
   const [history,    setHistory   ]=useState([]);   // all imports, for recurring detection
   const [showReset,  setShowReset ]=useState(false);
   const [dataIsolated, setDataIsolated]=useState(null); // null=unknown, false=migration not run
+  const [needsPartnerSetup, setNeedsPartnerSetup]=useState(false);
   const [showExport, setShowExport]=useState(false);
   const [showEmailPreview, setShowEmailPreview]=useState(false);
   const [billRules,  setBillRules ]=useState([]);
@@ -7372,7 +7551,20 @@ export default function App() {
           // Every table is scoped by household. Provision one if this account
           // doesn't have it yet, and check whether the security migration has
           // been run at all so Settings can warn if the data isn't private.
-          ensureHousehold().catch(err=>console.error('household setup failed:',err));
+          ensureHousehold()
+            .then(async () => {
+              // Ask about a partner once — only when they're genuinely alone
+              // and haven't already answered. Someone who joined via an
+              // invite is already in a household with someone, so skip it.
+              const [settings, memberCount] = await Promise.all([
+                getHouseholdSettings(), getHouseholdMemberCount(),
+              ]);
+              if (settings.available && !settings.onboarded && memberCount < 2) {
+                const invites = await getHouseholdInvites();
+                if (!invites.some(i => i.status === 'pending')) setNeedsPartnerSetup(true);
+              }
+            })
+            .catch(err=>console.error('household setup failed:',err));
           isDataIsolated().then(setDataIsolated).catch(()=>setDataIsolated(false));
         }
         else{setAuthState('auth');}
@@ -7391,7 +7583,20 @@ export default function App() {
           // Every table is scoped by household. Provision one if this account
           // doesn't have it yet, and check whether the security migration has
           // been run at all so Settings can warn if the data isn't private.
-          ensureHousehold().catch(err=>console.error('household setup failed:',err));
+          ensureHousehold()
+            .then(async () => {
+              // Ask about a partner once — only when they're genuinely alone
+              // and haven't already answered. Someone who joined via an
+              // invite is already in a household with someone, so skip it.
+              const [settings, memberCount] = await Promise.all([
+                getHouseholdSettings(), getHouseholdMemberCount(),
+              ]);
+              if (settings.available && !settings.onboarded && memberCount < 2) {
+                const invites = await getHouseholdInvites();
+                if (!invites.some(i => i.status === 'pending')) setNeedsPartnerSetup(true);
+              }
+            })
+            .catch(err=>console.error('household setup failed:',err));
           isDataIsolated().then(setDataIsolated).catch(()=>setDataIsolated(false));
         }
         else{setAuthState('auth');}
@@ -8045,6 +8250,12 @@ export default function App() {
         }
       });
     }}/>
+  );
+
+  // Asked once, right after the first sign-in, before the app proper.
+  if(profile && needsPartnerSetup) return (
+    <PartnerSetup profile={profile} showToast={showToast}
+      onDone={()=>setNeedsPartnerSetup(false)}/>
   );
 
   if(!profile) return (

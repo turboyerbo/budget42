@@ -59,6 +59,20 @@ export async function ensureHousehold() {
     if (error) throw error;
     if (existing?.household_id) return existing.household_id;
 
+    // Was this person invited? If so they join the EXISTING household rather
+    // than getting a new empty one — otherwise the two of you end up with
+    // separate budgets and the invite achieves nothing.
+    const invite = await findMyInvite(user.email);
+    if (invite) {
+      const { error: jErr } = await supabase
+        .from('household_members').insert({ user_id: user.id, household_id: invite.household_id });
+      if (jErr) throw jErr;
+      await supabase.from('household_invites')
+        .update({ status: 'accepted', accepted_at: new Date().toISOString() })
+        .eq('id', invite.id);
+      return invite.household_id;
+    }
+
     const { data: h, error: e1 } = await supabase
       .from('households').insert({ name: (user.user_metadata?.name || 'My') + ' household' })
       .select().single();
@@ -864,4 +878,103 @@ export async function saveExpectedIncome(entries) {
     if (!isMissingTable(err) && !isRlsDenied(err)) throw err;
     expectedIncomeLocalOnly = true; // localStorage copy above is the fallback
   }
+}
+
+
+// ── Partner invites ──────────────────────────────────────────────────────────
+
+/** A pending invite addressed to this email, if any. Readable before the
+ *  user belongs to any household — see the RLS policy in the migration. */
+export async function findMyInvite(email) {
+  if (!email) return null;
+  try {
+    const { data, error } = await supabase.from('household_invites')
+      .select('*').eq('status', 'pending').ilike('email', email).maybeSingle();
+    if (error) throw error;
+    return data || null;
+  } catch (err) {
+    if (isMissingTable(err) || isRlsDenied(err)) return null;
+    throw err;
+  }
+}
+
+/** Invite a partner. Re-inviting the same address updates the existing row
+ *  rather than creating a duplicate that would get nudged twice. */
+export async function invitePartner(email, name, invitedBy) {
+  const householdId = await ensureHousehold();
+  if (!householdId) throw new Error('Your household isn\'t set up yet — run the security migration in Supabase first.');
+  const row = {
+    household_id: householdId,
+    email: String(email).trim().toLowerCase(),
+    name: (name || '').trim() || null,
+    invited_by: invitedBy || null,
+    status: 'pending',
+    created_at: new Date().toISOString(),
+    nudge_count: 0,
+    last_nudge_at: null,
+  };
+  const { data: existing } = await supabase.from('household_invites')
+    .select('id').eq('status', 'pending').ilike('email', row.email).maybeSingle();
+  if (existing?.id) {
+    const { data, error } = await supabase.from('household_invites')
+      .update(row).eq('id', existing.id).select().single();
+    if (error) throw error;
+    return data;
+  }
+  const { data, error } = await supabase.from('household_invites')
+    .insert(row).select().single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getHouseholdInvites() {
+  try {
+    const { data, error } = await supabase.from('household_invites')
+      .select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    if (isMissingTable(err) || isRlsDenied(err)) return [];
+    throw err;
+  }
+}
+
+export async function cancelInvite(id) {
+  const { error } = await supabase.from('household_invites')
+    .update({ status: 'cancelled' }).eq('id', id);
+  if (error) throw error;
+}
+
+/** "It's just me for now" — stops the app asking about a partner. Reversible:
+ *  inviting someone later clears it. */
+export async function setSoloMode(on) {
+  const householdId = await ensureHousehold();
+  if (!householdId) return;
+  const { error } = await supabase.from('households')
+    .update({ solo_mode: !!on, onboarded: true }).eq('id', householdId);
+  if (error) throw error;
+}
+
+export async function getHouseholdSettings() {
+  try {
+    const householdId = await ensureHousehold();
+    if (!householdId) return { soloMode: false, onboarded: false, available: false };
+    const { data, error } = await supabase.from('households')
+      .select('solo_mode, onboarded').eq('id', householdId).maybeSingle();
+    if (error) throw error;
+    return { soloMode: !!data?.solo_mode, onboarded: !!data?.onboarded, available: true };
+  } catch {
+    return { soloMode: false, onboarded: false, available: false };
+  }
+}
+
+/** Members currently in the household, so the UI can tell whether the
+ *  partner has actually joined. */
+export async function getHouseholdMemberCount() {
+  try {
+    const { count, error } = await supabase.from('household_members')
+      .select('user_id', { count: 'exact', head: true });
+    if (error) throw error;
+    return count ?? 1;
+  } catch { return 1; }
 }

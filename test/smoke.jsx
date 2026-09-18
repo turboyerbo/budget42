@@ -15,7 +15,7 @@ import { buildValidationReport } from '../src/validate.js';
 import { detectPartnerTransfers } from '../src/together.js';
 import App, { HomeTab, SpendingTab, BillsTab, CalendarTab, HistoryTab, ChartsTab, UploadTab,
   AutomationTab, AuthScreen, AddTab, AddCatModal, ReceiptScanModal, ReceiptHistoryModal, EditTransactionModal, OtherReviewModal, ActivityPanel,
-  ResetModal, BillEditModal, DuplicateModal, filterByView, resolveWho, incomeShares, monthStampFor, shouldShowBudgetSuggestions,
+  ResetModal, BillEditModal, DuplicateModal, PartnerSetup, filterByView, resolveWho, incomeShares, monthStampFor, shouldShowBudgetSuggestions,
   buildBillsPrintHtml, WeeklyEmailPreviewModal, resolveTestEmailTarget, describeReceiptsBackendIssue,
   describeBillPaidBy,
   C, SERIF, SANS } from '../src/App.jsx';
@@ -384,12 +384,13 @@ check('SpendingTab and HomeTab show the exact same spending total for identical 
     onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop
   }));
 
-  // Both should show $120 (groceries only) — NOT $135 (groceries + the
-  // $15 Netflix bill charge), and NOT disagree with each other.
-  if (!homeHtml.includes('120.00')) throw new Error('expected Home\'s Other Spending to show $120 (Netflix excluded as a bill category)');
-  if (!spendingHtml.includes('120.00')) throw new Error('expected Spending\'s total to show $120 (Netflix excluded as a bill category) — this is the reported mismatch');
+  // Both should show $120 (groceries only) — the $15 Netflix charge IS the
+  // recognised bill, so it's counted under bills rather than twice. What
+  // matters is that the two tabs agree.
+  if (!homeHtml.includes('120.00')) throw new Error("expected All's Other Spending to show $120");
+  if (!spendingHtml.includes('120.00')) throw new Error("expected Charges to show $120 — this is the reported mismatch");
   if (spendingHtml.includes('135.00') || homeHtml.includes('135.00')) {
-    throw new Error('a bill-category transaction leaked into the discretionary total on one of the two tabs');
+    throw new Error('the bill transaction was double-counted as everyday spending');
   }
 });
 
@@ -1915,4 +1916,82 @@ check('Calendar: an entry on the same day number in a DIFFERENT month does not c
 
   if (!july.includes('$2.5k') || july.includes('$3.1k')) throw new Error('July should show only its own $2,500');
   if (!august.includes('$3.1k') || august.includes('$2.5k')) throw new Error('August should show only its own $3,100');
+});
+
+
+// ─── Partner invite / solo onboarding ─────────────────────────────────────────
+check('PartnerSetup: offers both inviting a partner and tracking solo', () => {
+  const html = renderToString(React.createElement(PartnerSetup, {
+    profile: { name:'Jordan Yerbury' }, onDone: noop, showToast: noop }));
+  if (!html.includes('Invite my partner')) throw new Error('expected an invite option');
+  if (!html.includes('Just me for now')) throw new Error('expected a solo option');
+  // Solo must read as a real choice, not a fallback for failing to find someone
+  if (!html.includes('keeps every feature')) {
+    throw new Error('solo mode should be presented as fully supported, not a lesser option');
+  }
+});
+
+check('PartnerSetup: makes clear the invite can be changed later', () => {
+  const html = renderToString(React.createElement(PartnerSetup, {
+    profile: { name:'Jordan' }, onDone: noop, showToast: noop }));
+  if (!html.includes('later')) throw new Error('should say the decision is reversible');
+});
+
+
+// ─── Home / rent category ─────────────────────────────────────────────────────
+// Reported: "Home is not being charged and rent is not being recorded
+// properly." Cause: Charges excluded any CATEGORY a bill used, rather than
+// the bill transactions themselves. Rent is filed under Home, so the entire
+// Home category — and every non-bill purchase in it — vanished from Charges,
+// its total, and its budget.
+const rentCats = [
+  { id:'rent', label:'Home', icon:'Home', color:'#92400e', target:1900 },
+  { id:'groceries', label:'Groceries', icon:'ShoppingBasket', color:'#1a7a4a', target:400 },
+];
+const rentBill = { key:'manual:stela', label:'Stela Rent', amount:1900, day:1,
+                   status:'manual', category:'rent' };
+
+check('Charges: the Home category survives having the rent bill in it', () => {
+  const html = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [
+      mk({ description:'STELA RENT', amount:1900, category:'rent', date:'2026-07-01' }),
+      mk({ description:'IKEA', amount:250, category:'rent', date:'2026-07-12' }),   // home spend, not the bill
+      mk({ description:'LOBLAWS', amount:120, category:'groceries', date:'2026-07-10' }),
+    ],
+    allCats: rentCats, catTargets: {}, suggested: {},
+    onAcceptSuggested: noop, onAddCat: noop, onDeleteCat: noop,
+    profile, partnerName: 'Mariel Ko', onReviewOther: noop, otherCount: 0,
+    onChangeCategory: noop, view: 'combined', setView: noop,
+    onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop, setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop,
+    year: 2026, month: 6, history: [], billRules: [rentBill],
+    billActiveKeys: new Map(), billConfiguredMonths: new Set(),
+  }));
+
+  if (!html.includes('Home')) throw new Error('the Home category disappeared from Charges entirely');
+  if (!html.includes('250.00')) throw new Error('the $250 non-bill Home purchase is missing');
+  if (html.includes('1,900.00')) throw new Error('the rent bill is being double-counted as everyday spending');
+});
+
+check('All: rent counts as a bill, other Home spending still counts as spending', () => {
+  const html = renderToString(React.createElement(HomeTab, {
+    txns: [], bankImports: [
+      mk({ description:'STELA RENT', amount:1900, category:'rent', date:'2026-07-01' }),
+      mk({ description:'IKEA', amount:250, category:'rent', date:'2026-07-12' }),
+      mk({ description:'NORR PAYROLL', amount:5000, category:'income', direction:'credit', date:'2026-07-15' }),
+    ],
+    ccTarget: 0, allCats: rentCats, catTargets: {}, year: 2026, month: 6,
+    profile, partnerName: 'Mariel Ko', view: 'combined', setView: noop,
+    history: [], billRules: [rentBill],
+    billPayments: [{ key:'manual:stela', year:2026, month:6, label:'Stela Rent',
+                     paid_by:'Jordan Yerbury', paid_at:'2026-07-01T00:00:00.000Z' }],
+    expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop, showToast: noop,
+    goals: [], onSaveGoals: noop, depositingGoalId: null, setDepositingGoalId: noop,
+    setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop,
+  }));
+  // Other Spending should be the $250 IKEA purchase, NOT $0 (whole category
+  // dropped) and NOT $2,150 (rent counted twice).
+  if (!html.includes('250.00')) throw new Error('non-bill Home spending was dropped from Other Spending');
+  if (html.includes('2,150.00')) throw new Error('rent leaked into Other Spending as well as bills');
 });
