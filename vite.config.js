@@ -10,6 +10,6 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
-    __APP_VERSION__: JSON.stringify('v20'),
+    __APP_VERSION__: JSON.stringify('v21'),
   },
 });

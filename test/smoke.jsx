@@ -389,8 +389,12 @@ check('SpendingTab and HomeTab show the exact same spending total for identical 
   // matters is that the two tabs agree.
   if (!homeHtml.includes('120.00')) throw new Error("expected All's Other Spending to show $120");
   if (!spendingHtml.includes('120.00')) throw new Error("expected Charges to show $120 — this is the reported mismatch");
-  if (spendingHtml.includes('135.00') || homeHtml.includes('135.00')) {
+  if (spendingHtml.includes('135.00')) {
     throw new Error('the bill transaction was double-counted as everyday spending');
+  }
+  // Home's Total Spending is legitimately $135: $120 charges + $15 bill.
+  if (!/Total Spending[\s\S]*\$120\.00(<!-- -->)? charges \+ (<!-- -->)?\$15\.00/.test(homeHtml)) {
+    throw new Error('Home should break Total Spending down as $120 charges + $15 bills');
   }
 });
 
@@ -1993,5 +1997,167 @@ check('All: rent counts as a bill, other Home spending still counts as spending'
   // Other Spending should be the $250 IKEA purchase, NOT $0 (whole category
   // dropped) and NOT $2,150 (rent counted twice).
   if (!html.includes('250.00')) throw new Error('non-bill Home spending was dropped from Other Spending');
-  if (html.includes('2,150.00')) throw new Error('rent leaked into Other Spending as well as bills');
+  // Total Spending is legitimately $2,150 (250 + 1,900); what must NOT
+  // happen is Charges itself being $2,150.
+  if (!/\$250\.00(<!-- -->)? charges \+ (<!-- -->)?\$1,900\.00/.test(html)) {
+    throw new Error('rent leaked into Charges as well as bills');
+  }
+});
+
+// ── v85: one calculation for Charges, Bills and Total Spending ──────────────
+import { monthSpending, categoriesForMonth, signedSpend } from '../src/totals.js';
+import { buildSchedule as _buildSchedule, matchBillTransactions } from '../src/recurring.js';
+
+const JULY = { year: 2026, month: 6, today: new Date(2026, 6, 20) };
+const sumSpendAll = rows => Math.round(rows
+  .filter(t => !['income','cc_payment','transfer','_skip'].includes(t.category))
+  .reduce((a, t) => a + signedSpend(t), 0) * 100) / 100;
+
+check('Totals: a hand-added bill that shows up in a statement is marked PAID, not lost from both sides', () => {
+  // The old bug: the "Rent" bill pulled the STELA RENT transaction out of
+  // Charges (label match) but the tracker only matched on the bill's own key
+  // ("manual:…"), so the bill stayed unpaid and $1,900 vanished entirely.
+  const bill = { key:'manual:rent1', label:'Stela Rent', amount:1900, day:1, category:'rent', confidence:'high' };
+  const rows = [
+    mk({ description:'STELA RENT', amount:1900, category:'rent', date:'2026-07-01' }),
+    mk({ description:'LOBLAWS 1032', amount:120, category:'groceries', date:'2026-07-10' }),
+  ];
+  const r = monthSpending({ everything: rows, recurring: [bill], ...JULY });
+  if (r.sched.entries[0].status !== 'paid') throw new Error('bill should be paid by the statement row');
+  if (r.charges !== 120) throw new Error(`charges ${r.charges}, expected 120`);
+  if (r.billsPaid !== 1900) throw new Error(`bills paid ${r.billsPaid}, expected 1900`);
+  if (r.total !== 2020) throw new Error(`total ${r.total}, expected 2020`);
+});
+
+check('Totals: a paid bill counts what was ACTUALLY charged, not its usual amount', () => {
+  const bill = { key:'toronto hydro', label:'Toronto Hydro', amount:120, day:5, category:'rent', confidence:'high' };
+  const rows = [
+    mk({ description:'TORONTO HYDRO', amount:134.27, category:'rent', date:'2026-07-05' }),
+    mk({ description:'LOBLAWS 1032', amount:80, category:'groceries', date:'2026-07-10' }),
+  ];
+  const r = monthSpending({ everything: rows, recurring: [bill], ...JULY });
+  if (r.billsPaid !== 134.27) throw new Error(`bills paid ${r.billsPaid}, expected 134.27 (was using the usual $120)`);
+  if (r.total !== sumSpendAll(rows)) throw new Error(`total ${r.total} ≠ money actually spent ${sumSpendAll(rows)}`);
+  if (r.sched.monthTotal !== r.sched.paidTotal + r.sched.outstandingTotal) throw new Error('whole month ≠ paid + outstanding');
+});
+
+check('Totals: Charges + Bills Paid = every dollar spent, to the cent, on a messy month', () => {
+  const bills = [
+    { key:'netflix', label:'Netflix', amount:16.99, day:2, category:'subscriptions', confidence:'high' },
+    { key:'manual:gym', label:'Goodlife', amount:59, day:15, category:'health', confidence:'high' },
+    { key:'freedom mobile', label:'Freedom Mobile', amount:45, day:19, category:'phone', confidence:'high' },
+  ];
+  const rows = [
+    mk({ description:'NETFLIX.COM', amount:18.07, category:'subscriptions', date:'2026-07-02' }),
+    mk({ description:'GOODLIFE FITNESS', amount:59, category:'health', date:'2026-07-15', who:'ness' }),
+    mk({ description:'LOBLAWS 1032', amount:84.21, category:'groceries' }),
+    mk({ description:'BAR RAVAL', amount:64.5, category:'restaurant' }),
+    mk({ description:'LOBLAWS REFUND', amount:12.34, category:'groceries', direction:'credit' }),
+    mk({ description:'NORR PAYROLL', amount:4000, category:'income', direction:'credit' }),
+    mk({ description:'PC MASTERCARD', amount:500, category:'cc_payment' }),
+    { id:'m1', note:'Coffee', merchant:'Pilot', amount:5.25, cat:'coffee', date:'2026-07-11', who:'jordan' },
+  ];
+  const r = monthSpending({ everything: rows, recurring: bills, ...JULY });
+  // Freedom Mobile hasn't been charged yet, so it isn't spending yet.
+  const expectedTotal = sumSpendAll(rows.map(t => ({ ...t, category: t.category || t.cat })));
+  if (r.total !== expectedTotal) throw new Error(`total ${r.total} ≠ ${expectedTotal}`);
+  if (Math.round((r.charges + r.billsPaid) * 100) !== Math.round(r.total * 100)) throw new Error('charges + bills ≠ total');
+  const rowSum = Math.round(Object.values(r.chargesByCat).reduce((a, v) => a + v, 0) * 100) / 100;
+  if (rowSum !== r.charges) throw new Error(`category rows add to ${rowSum}, charges says ${r.charges}`);
+  if (r.chargesByCat.groceries !== 71.87) throw new Error(`refund should reduce groceries to 71.87, got ${r.chargesByCat.groceries}`);
+});
+
+check('Totals: a ticked-off bill with no statement yet is counted once, not zero and not twice', () => {
+  const bill = { key:'manual:rent2', label:'Landlord', amount:1900, day:1, category:'rent', confidence:'high' };
+  // Ticking creates a stand-in transaction (source bill-manual)
+  const rows = [
+    { id:'bm1', note:'__bill:manual:rent2', merchant:'Landlord', amount:1900, cat:'rent', date:'2026-07-01', source:'bill-manual' },
+    mk({ description:'LOBLAWS 1032', amount:100, category:'groceries' }),
+  ];
+  const r = monthSpending({ everything: rows, recurring: [bill],
+    billPayments: [{ key:'manual:rent2', year:2026, month:6 }], ...JULY });
+  if (r.charges !== 100) throw new Error(`charges ${r.charges}, the stand-in leaked into charges`);
+  if (r.billsPaid !== 1900) throw new Error(`bills paid ${r.billsPaid}`);
+  if (r.sched.entries[0].seenInData) throw new Error('a stand-in must not lock the tick as statement evidence');
+});
+
+check('Totals: personal views split bills by share, and the two add back up to Combined', () => {
+  const bill = { key:'netflix', label:'Netflix', amount:20, day:2, category:'subscriptions', confidence:'high' };
+  const rows = [
+    mk({ description:'NETFLIX.COM', amount:20, category:'subscriptions', date:'2026-07-02' }),
+    mk({ description:'LOBLAWS 1032', amount:100, category:'groceries', who:'jordan' }),
+    mk({ description:'BAR RAVAL', amount:40, category:'restaurant', who:'ness' }),
+  ];
+  const all = monthSpending({ everything: rows, recurring: [bill], ...JULY });
+  const j = monthSpending({ everything: rows, viewTx: rows.filter(t => t.who === 'jordan'), recurring: [bill], billShare: 0.7, ...JULY });
+  const n = monthSpending({ everything: rows, viewTx: rows.filter(t => t.who === 'ness'), recurring: [bill], billShare: 0.3, ...JULY });
+  if (Math.abs(j.total + n.total - all.total) > 0.011) throw new Error(`${j.total} + ${n.total} ≠ ${all.total}`);
+});
+
+check('getCarriedOverBills: a hand-added bill paid via statement last month is NOT carried over as overdue', () => {
+  const bill = { key:'manual:rent3', label:'Stela Rent', amount:1900, day:1, category:'rent' };
+  const hist = [
+    mk({ description:'STELA RENT', amount:1900, category:'rent', date:'2026-07-01', year:2026, month:6 }),
+    mk({ description:'LOBLAWS', amount:10, category:'groceries', date:'2026-08-03', year:2026, month:7 }),
+  ];
+  const out = getCarriedOverBills([bill], hist, [], 2026, 7, new Date(2026, 7, 10));
+  if (out.length) throw new Error('July rent was paid by statement but shows as overdue');
+});
+
+check('matchBillTransactions: money in is never a bill payment', () => {
+  const bill = { key:'netflix', label:'Netflix', amount:20, day:2 };
+  const { chargedByBill } = matchBillTransactions([bill], [mk({ description:'NETFLIX.COM', amount:20, direction:'credit' })]);
+  if (chargedByBill.size) throw new Error('a Netflix refund marked the bill paid');
+});
+
+// ── v85: categories belong to the month they were created in ────────────────
+check('categoriesForMonth: a category made in September does not appear in October', () => {
+  const defs = [{ id:'groceries', label:'Groceries' }];
+  const custom = [{ id:'custom_pets', label:'Pets', custom:true, year:2026, month:8 }];
+  const sep = categoriesForMonth(defs, custom, 2026, 8, []);
+  const oct = categoriesForMonth(defs, custom, 2026, 9, []);
+  if (!sep.some(c => c.id === 'custom_pets')) throw new Error('missing from its own month');
+  if (oct.some(c => c.id === 'custom_pets')) throw new Error('copied onto October');
+});
+check('categoriesForMonth: a category still shows in a month that actually has spending in it', () => {
+  const custom = [{ id:'custom_pets', label:'Pets', custom:true, year:2026, month:8 }];
+  const oct = categoriesForMonth([], custom, 2026, 9, [{ category:'custom_pets', amount:5 }]);
+  if (!oct.some(c => c.id === 'custom_pets')) throw new Error('October spending in Pets lost its category');
+});
+check('categoriesForMonth: an older category with no month is not spread across every month', () => {
+  const custom = [{ id:'custom_old', label:'Old', custom:true }];
+  if (categoriesForMonth([], custom, 2026, 9, []).length) throw new Error('legacy category still copied everywhere');
+});
+
+check('SpendingTab: category rows always add up to Spent so far (removed category gets its own row)', () => {
+  const html = renderToString(React.createElement(SpendingTab, {
+    txns: [], bankImports: [
+      mk({ description:'LOBLAWS 1032', amount:100, category:'groceries' }),
+      mk({ description:'PETSMART', amount:33.33, category:'custom_gone' }),
+    ],
+    allCats, catTargets: {}, year: 2026, month: 6, history: [], billRules: [],
+    billActiveKeys: new Map(), billConfiguredMonths: new Set(), billPayments: [],
+    suggested: {}, onAcceptSuggested: noop, onDismissSuggested: noop,
+    onAddCat: noop, onDeleteCat: noop, profile, partnerName: 'Mariel',
+    onReviewOther: noop, otherCount: 0, onChangeCategory: noop,
+    view: 'combined', setView: noop, onDeleteRow: noop, duplicateCount: 0, onReviewDuplicates: noop,
+    setQuickAddCat: noop, setTab: noop, setEditingCatTarget: noop, showToast: noop,
+    onScanReceipt: noop, onConfirmReceipt: noop, onEditTxnSave: noop,
+  }));
+  if (!html.includes('133.33')) throw new Error('Spent so far should be $133.33');
+  if (!html.includes('Removed or unknown category')) throw new Error('the $33.33 has no visible row');
+});
+
+['combined','mine','partner'].forEach(v => {
+  check('HomeTab: Total Spending tile renders (' + v + ')', () => {
+    const html = renderToString(React.createElement(HomeTab, {
+      txns: [], bankImports: imports, ccTarget: 0, allCats, catTargets: {}, year: 2026, month: 6,
+      profile, partnerName: 'Ness', view: v, setView: noop, history, billRules: [], billPayments: [],
+      billActiveKeys: new Map(), billConfiguredMonths: new Set(),
+      expectedIncome: [], setExpectedIncome: noop, onAddTxn: noop, showToast: noop,
+      goals: [], onSaveGoals: noop, depositingGoalId: null, setDepositingGoalId: noop,
+      setTab: noop, onEditTxnSave: noop, onDeleteTxn: noop,
+    }));
+    if (!html.includes('Total Spending')) throw new Error('no Total Spending tally on Home');
+  });
 });

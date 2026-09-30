@@ -38,6 +38,7 @@ import { parsePDFStatement, PDF_AVAILABLE } from './pdf.js';
 import { checkAI, aiDiagnostics } from './claude.js';
 import { detectRecurring, splitRecurring, buildSchedule, relativeDay,
          applyBillRules, getCarriedOverBills } from './recurring.js';
+import { monthSpending, signedSpend, categoriesForMonth } from './totals.js';
 import { merchantKey } from './merchant.js';
 import { detectBank, INSTITUTIONS, instLabel, instColor, instKind } from './detect.js';
 import { detectPartnerTransfers, findSharedMoments, summariseTogether, firstName } from './together.js';
@@ -968,6 +969,9 @@ const PICKABLE_ICONS = Object.keys(ICON_MAP);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt   = n => '$' + Math.abs(n).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});
+// Like fmt, but keeps the sign — for figures that can genuinely go negative,
+// such as a refund, which reduces spending rather than adding to it.
+const fmtS  = n => (n < -0.004 ? '−' : '') + fmt(n);
 const fmtK  = n => n>=1000 ? '$'+(n/1000).toFixed(1)+'k' : fmt(n);
 
 // Builds a clean, self-contained printable page for a month's bills — pulled
@@ -1564,7 +1568,7 @@ export function EditTransactionModal({tx, allCats, onSave, onClose}) {
   );
 }
 
-export function AddCatModal({onSave,onClose}) {
+export function AddCatModal({onSave,onClose,monthLabel}) {
   const [label, setLabel] = useState('');
   const [target,setTarget]= useState(100);
   const [icon,  setIcon]  = useState('Tag');
@@ -1580,6 +1584,11 @@ export function AddCatModal({onSave,onClose}) {
             <X size={20} color={C.inkSoft}/>
           </button>
         </div>
+        {monthLabel && (
+          <p style={{margin:'-8px 0 16px',fontSize:12,color:C.inkSoft,fontFamily:SANS,lineHeight:1.5}}>
+            This category is for {monthLabel} only. It won't be added to any other month.
+          </p>
+        )}
         <SL>Name</SL>
         <input value={label} onChange={e=>setLabel(e.target.value)} placeholder="e.g. Pet supplies"
           style={{width:'100%',border:`1px solid ${C.sandDark}`,borderRadius:10,padding:'12px 14px',
@@ -2999,16 +3008,12 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // the two tabs never disagree about what's due, paid, or overdue.
   const recurring = applyBillRules(detectRecurring(history || []), billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Set(), year, month)
     .filter(b => b.confidence === 'high');
-  const sched = buildSchedule(recurring, everythingThisMonth, year, month, new Date(), billPayments || []);
-  const dueTotal = sched.outstandingTotal;
-  const dueBills = sched.outstanding;
 
   // Bills from a past month that were never paid don't just disappear — they're
   // still owed, so they count toward what's still to pay too.
   const carriedOver = getCarriedOverBills(recurring, history || [], allBillPayments || [], year, month);
   const carriedOverTotal = carriedOver.reduce((a,b)=>a+b.amount,0);
 
-  // Same logic for the card payment: only pledge it if it hasn't gone out yet
   // Which numbers show depends on the view: just yours, just your partner's,
   // or the whole household together.
   const allTx = filterByView(everything, view, me, firstName(partnerName));
@@ -3026,67 +3031,28 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
     incomeByPerson[k]=(incomeByPerson[k]||0)+t.amount;
   });
 
-  const txByCat={};
-  allTx.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
-  // Money moved between accounts is tracked but never counted as spending
-  const totalSpent=Object.entries(txByCat)
-    .filter(([k])=>!excludedIds.has(k))
-    .reduce((a,[,v])=>a+v,0);
-
-  // Two honest, non-overlapping buckets that always add up to the same
-  // total money out. Bills Paid matches the Bills tab's own "Already paid"
-  // figure EXACTLY (buildSchedule's paidTotal) — this used to be computed
-  // separately here by filtering transactions to bill-matching categories,
-  // which silently dropped any bill whose category is normally excluded
-  // from spending (a credit card payment, categorized 'cc_payment', is the
-  // common case) — so paying off a card didn't reduce Available Money at
-  // all, and Home's "Bills Paid" could read far lower than what the Bills
-  // tab showed as paid for the exact same month. Discretionary is
-  // everything else: every non-excluded category that ISN'T one of these
-  // recognized bill categories, so the two buckets never double-count.
-  const billCategoryIds = new Set(recurring.map(b => b.category));
-  // Which individual transactions ARE the recognised bills. Matching on the
-  // merchant key is exactly how buildSchedule decides a bill is paid, so this
-  // identifies the same rows — letting us leave the rest of a shared category
-  // (a furniture purchase filed under Home, say) counted as normal spending.
-  // A detected bill's key IS the merchant key. A MANUAL bill's key is
-  // "manual:<uid>", which matches nothing — so its label is normalised the
-  // same way and added too, otherwise hand-added bills were never recognised
-  // in the data and got counted twice.
-  const billMerchantKeys = new Set();
-  recurring.forEach(b => {
-    billMerchantKeys.add(b.key);
-    if (b.label) billMerchantKeys.add(merchantKey(b.label));
-  });
-  const isBillTxn = t => billMerchantKeys.has(merchantKey(t.description || t.note || t.merchant || ''))
-                      || (t.source === 'bill-manual');
-
-  // Bills are a HOUSEHOLD cost, so a personal view has to show that person's
-  // share of them — not the whole thing. This previously used the full
-  // household total in every view, so Jordan's screen and Ness's screen each
-  // showed 100% of the bills; added together the household appeared to have
-  // paid everything twice.
-  //
-  // The share is proportional to income, not 50/50: on $7,000 and $3,000 the
-  // split is 70/30, so each person is contributing the same percentage of
-  // their own pay rather than the lower earner losing a far bigger slice.
+  // Bills are a HOUSEHOLD cost, so a personal view shows that person's share
+  // of them, proportional to income (70/30 on $7,000 and $3,000), not 100%
+  // each — otherwise the two personal screens add up to twice the bills.
   const shares = incomeShares(everything, profile?.name, partnerName);
   const billShare = view === 'mine' ? shares.mineShare
                   : view === 'partner' ? shares.partnerShare
                   : 1;                                   // combined = the whole household
-  const billsPaidThisMonth = sched.paidTotal * billShare;
-  const householdBillsPaid = sched.paidTotal;
-  let discretionarySpent = 0;
-  Object.entries(txByCat).forEach(([catId, amt]) => {
-    if (excludedIds.has(catId)) return;       // cc_payment/transfer/income — never "spending"
-    discretionarySpent += amt;
+
+  // Charges, Bills Paid and Total Spending all come from monthSpending(), the
+  // exact same calculation the Charges and Bills tabs use, so
+  // Charges + Bills Paid = Total Spending on every screen, to the cent.
+  const spend = monthSpending({
+    everything: everythingThisMonth, viewTx: allTx, recurring,
+    billPayments: billPayments || [], excludedIds, year, month, billShare,
   });
-  // Subtract only the transactions that ARE bills, rather than dropping
-  // every category a bill happens to use. Filing rent under Home previously
-  // removed ALL Home spending from the figures.
-  allTx.filter(t => !excludedIds.has(t.category || t.cat) && isBillTxn(t))
-       .forEach(t => { discretionarySpent -= t.amount; });
-  if (discretionarySpent < 0) discretionarySpent = 0;
+  const sched = spend.sched;
+  const dueTotal = sched.outstandingTotal;
+  const discretionarySpent  = spend.charges;
+  const billsPaidThisMonth  = spend.billsPaid;
+  const householdBillsPaid  = spend.billsPaidHousehold;
+  const totalSpending       = spend.total;
+  const totalSpent          = spend.charges;
 
   // Predicted income comes from what you've entered as expected for THIS month,
   // not from transactions, and not from entries you predicted for other months
@@ -3102,7 +3068,7 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
   // just a relabeling of it. That's intentional: it's what makes Available
   // Money correctly drop when a credit card gets paid off, instead of that
   // payment silently going unaccounted for.
-  const availableMoney = totalIncome - discretionarySpent - billsPaidThisMonth;
+  const availableMoney = totalIncome - totalSpending;
 
   // A lightweight budget figure just for the advice snapshot below — the
   // editable override with its own UI lives on the Spending tab now.
@@ -3182,9 +3148,18 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
 
           <div>
             <p style={{margin:0,fontSize:11,color:'rgba(255,255,255,0.65)',
-              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Other Spending</p>
+              textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>
+              Charges
+              {setTab && (
+                <button onClick={()=>setTab('spending')} style={{border:'none',background:'none',padding:0,
+                  marginLeft:5,color:'rgba(255,255,255,0.75)',cursor:'pointer',fontFamily:SANS,
+                  fontSize:9,textDecoration:'underline',verticalAlign:'middle'}}>
+                  see Charges
+                </button>
+              )}
+            </p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:18,fontWeight:600,
-              color:'rgba(255,255,255,0.95)'}}>{fmt(discretionarySpent)}</p>
+              color:'rgba(255,255,255,0.95)'}}>{fmtS(discretionarySpent)}</p>
           </div>
 
           <div>
@@ -3204,11 +3179,27 @@ export function HomeTab({txns,bankImports,ccTarget,allCats,catTargets,view,setVi
           </div>
         </div>
 
+        {/* Total Spending — Charges and Bills Paid combined into the one number
+            that answers "how much went out this month?" */}
+        <div data-testid="total-spending" style={{margin:'14px 0 0', padding:'12px 14px', borderRadius:12,
+          background:'rgba(255,255,255,0.14)', display:'flex', alignItems:'center', gap:12}}>
+          <div style={{flex:1, minWidth:0}}>
+            <p style={{margin:0, fontSize:11, color:'rgba(255,255,255,0.8)', textTransform:'uppercase',
+              letterSpacing:'0.08em', fontFamily:SANS, fontWeight:700}}>Total Spending</p>
+            <p style={{margin:'2px 0 0', fontSize:10, color:'rgba(255,255,255,0.65)', fontFamily:SANS}}>
+              {fmtS(discretionarySpent)} charges + {fmt(billsPaidThisMonth)} bills
+            </p>
+          </div>
+          <p style={{margin:0, fontFamily:SERIF, fontSize:26, fontWeight:600, color:'#fff', whiteSpace:'nowrap'}}>
+            {fmtS(totalSpending)}
+          </p>
+        </div>
+
         <p style={{margin:'12px 0 0', fontSize:10, color:'rgba(255,255,255,0.6)', fontFamily:SANS,
           borderTop:'1px solid rgba(255,255,255,0.15)', paddingTop:8}}>
-          {fmt(totalIncome)} income − {fmt(discretionarySpent)} other spending − {fmt(billsPaidThisMonth)} bills paid = {fmt(availableMoney)}.
+          {fmt(totalIncome)} income − {fmtS(totalSpending)} total spending = {fmtS(availableMoney)}.
           {view === 'combined'
-            ? ' "Bills Paid" matches the Bills tab\'s "Already paid" exactly — including bills like a credit card payment, which is real money out even though it isn\'t everyday spending.'
+            ? ' Charges matches the Charges tab and Bills Paid matches the Bills tab\'s "Already paid", each to the cent. A paid bill counts what was actually charged.'
             : ` That's ${(billShare * 100).toFixed(0)}% of the household's ${fmt(householdBillsPaid)} in bills — ${
                 shares.basis === 'income'
                   ? `split by income, since ${capitalize(view === 'mine' ? me : firstName(partnerName))} earned ${fmt(view === 'mine' ? shares.myIncome : shares.partnerIncome)} of the ${fmt(shares.total)} between you.`
@@ -3533,7 +3524,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                   onDeleteRow,duplicateCount,onReviewDuplicates,setQuickAddCat,setTab,
                   setEditingCatTarget,showToast,onScanReceipt,onConfirmReceipt,onEditTxnSave,
                   predictedIncomeTotal,receiptsSetup,
-                  year,month,history,billRules,billActiveKeys,billConfiguredMonths}) {
+                  year,month,history,billRules,billActiveKeys,billConfiguredMonths,billPayments}) {
   const [openCat, setOpenCat] = useState(null);   // which category is expanded
   const [busyId,  setBusyId]  = useState(null);   // row currently saving
   const [showAdd, setShowAdd] = useState(false);
@@ -3566,58 +3557,43 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
   // totals are now genuinely the same calculation, not two different
   // approximations of a similar idea.
   const detected = detectRecurring(history || []);
-  const recurring = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Map(), year, month)
+  const recurring = applyBillRules(detected, billRules || [], billActiveKeys || new Map(), billConfiguredMonths || new Set(), year, month)
     .filter(b => b.confidence === 'high');
   const billCategoryIds = new Set(recurring.map(b => b.category));
-  // Same fix as All: identify the bill TRANSACTIONS, not the categories they
-  // use. Excluding whole categories made a category shared with a bill
-  // (rent filed under Home) vanish from Charges entirely.
-  // A detected bill's key IS the merchant key. A MANUAL bill's key is
-  // "manual:<uid>", which matches nothing — so its label is normalised the
-  // same way and added too, otherwise hand-added bills were never recognised
-  // in the data and got counted twice.
-  const billMerchantKeys = new Set();
-  recurring.forEach(b => {
-    billMerchantKeys.add(b.key);
-    if (b.label) billMerchantKeys.add(merchantKey(b.label));
+
+  // Everything below comes from monthSpending() — the same calculation Home
+  // uses — so "Spent so far" here is exactly Home's "Charges", and the
+  // category rows add up to it. Bill payments are identified by the same rule
+  // the Bills tab uses to mark a bill paid, so a transaction is counted in
+  // exactly one of the two places, never both and never neither.
+  const spend = monthSpending({
+    everything, viewTx: allTx, recurring, billPayments: billPayments || [],
+    excludedIds, year, month,
   });
-  const isBillTxn = t => billMerchantKeys.has(merchantKey(t.description || t.note || t.merchant || ''))
-                      || (t.source === 'bill-manual');
-
-  // Each view shows what that person was ACTUALLY charged — the real
-  // transactions attributed to them, not a synthetic half-share. (An
-  // earlier version split Combined evenly on the theory that shared-card
-  // attribution was unreliable; attribution is now solid enough — every
-  // transaction carries a "who," visible as an avatar on each row — that
-  // showing real personal spending is both more honest and more useful.
-  // The two people's totals will NOT generally each be half of Combined,
-  // and that's correct: one of you genuinely spends more some months.)
+  const isCountable = spend.isCharge;
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
-
-  // A transaction counts as everyday spending unless it's an excluded
-  // category or it IS one of the recognised bills.
-  const isCountable = t => !excludedIds.has(t.category || t.cat) && !isBillTxn(t);
-
-  // allTx is already narrowed to the selected person (or everyone, for
-  // Combined) by filterByView above, so every figure below follows the
-  // view automatically and consistently.
-  // Per-category totals, built from the countable transactions only — so a
-  // category shared with a bill still shows its non-bill spending instead of
-  // disappearing.
-  const countable = allTx.filter(isCountable);
-  const txByCat = {};
-  countable.forEach(t=>{const k=t.category||t.cat;if(k&&k!=='_skip')txByCat[k]=(txByCat[k]||0)+t.amount;});
-  const totalSpent = Object.values(txByCat).reduce((a,v)=>a+v,0);
+  const countable = spend.countable;
+  const txByCat = spend.chargesByCat;
+  const totalSpent = spend.charges;
   const weekSpent = countable
     .filter(t => parseLocalDate(t.date) >= weekAgo)
-    .reduce((a,t)=>a+t.amount,0);
+    .reduce((a,t)=>a+signedSpend(t),0);
 
   // Combined stays available for the "your share of the household" line
-  // shown alongside an individual view, so it's always clear how one
-  // person's spending relates to the total.
-  const combinedTotalSpent = [...txns,...bankImports]
+  // shown alongside an individual view.
+  const combinedTotalSpent = everything
     .filter(isCountable)
-    .reduce((a,t)=>a+t.amount,0);
+    .reduce((a,t)=>a+signedSpend(t),0);
+
+  // Spending filed under a category that isn't in this month's list (one
+  // that was removed, say) still counts — so it gets its own row rather than
+  // silently making the rows add up to less than the total.
+  const shownCatIds = new Set(allCats.map(c => c.id));
+  const orphanSpent = Object.entries(txByCat)
+    .filter(([k]) => !shownCatIds.has(k))
+    .reduce((a,[,v]) => a + v, 0);
+  const orphanRows = countable.filter(t => !shownCatIds.has(t.category || t.cat))
+    .sort((a,b)=>new Date(b.date)-new Date(a.date));
 
   // A category keeps its budget unless EVERY use of it is a bill.
   const categoriesWithSpending = new Set(Object.keys(txByCat));
@@ -3674,7 +3650,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.65)',
               textTransform:'uppercase',letterSpacing:'0.08em',fontFamily:SANS}}>Spent so far</p>
             <p style={{margin:0,fontFamily:SERIF,fontSize:17,fontWeight:600,
-              color:'rgba(255,255,255,0.95)'}}>{fmt(totalSpent)}</p>
+              color:'rgba(255,255,255,0.95)'}}>{fmtS(totalSpent)}</p>
           </div>
           <div>
             <p style={{margin:0,fontSize:10,color:'rgba(255,255,255,0.65)',
@@ -3927,7 +3903,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                       </span>
                       <div style={{display:'flex',alignItems:'baseline',gap:4}}>
                         <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,
-                          color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmt(spent)}</span>
+                          color:over?C.red:spent>0?C.ink:C.sandDark}}>{fmtS(spent)}</span>
                         {target>0&&<div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:0}}>
                           <button 
                             onClick={e=>{e.stopPropagation();setEditingCatTarget(cat.id);}}
@@ -4023,7 +3999,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
                       </div>
                       {tx.who && <UserAvatar name={tx.who} size={18}/>}
                       <p style={{margin:0,fontFamily:SERIF,fontSize:14,fontWeight:600,
-                        color:C.ink,minWidth:56,textAlign:'right'}}>{fmt(tx.amount)}</p>
+                        color:C.ink,minWidth:56,textAlign:'right'}}>{fmtS(signedSpend(tx))}</p>
                       {busyId===tx.id
                         ? <Spinner size={13}/>
                         : (<>
@@ -4070,6 +4046,36 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
             </div>
           );
         })}
+        {Math.abs(orphanSpent) >= 0.005 && (
+          <>
+            <Divider/>
+            <div style={{padding:'11px 18px'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                <span style={{fontSize:14,color:C.ink,fontFamily:SANS,fontWeight:500}}>
+                  Removed or unknown category
+                </span>
+                <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,color:C.ink}}>{fmtS(orphanSpent)}</span>
+              </div>
+              <p style={{margin:'3px 0 0',fontSize:10,color:C.inkSoft,fontFamily:SANS,lineHeight:1.5}}>
+                {orphanRows.length} charge{orphanRows.length===1?'':'s'} filed under a category that's no longer in
+                this month's list — still counted in Spent so far. Edit {orphanRows.length===1?'it':'them'} to move
+                {orphanRows.length===1?' it':' them'} somewhere else.
+              </p>
+              {orphanRows.map(tx=>(
+                <div key={tx.id} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0 0'}}>
+                  <span style={{flex:1,minWidth:0,fontSize:12,color:C.ink,fontFamily:SANS,
+                    overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                    {tx.note||tx.description||'Charge'} · {tx.date}
+                  </span>
+                  <span style={{fontFamily:SERIF,fontSize:13,fontWeight:600,color:C.ink}}>{fmtS(signedSpend(tx))}</span>
+                  <button onClick={()=>setEditingTxn(tx)} title="Edit date, amount, or category"
+                    style={{border:'none',background:C.sandMid,color:C.inkSoft,borderRadius:6,
+                      padding:'4px 6px',cursor:'pointer',fontSize:11,flexShrink:0}}>✏️</button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         <Divider/>
         <button onClick={()=>setShowAdd(true)} style={{display:'flex',alignItems:'center',gap:10,
           padding:'12px 18px',width:'100%',border:'none',background:'none',cursor:'pointer'}}>
@@ -4081,7 +4087,7 @@ export function SpendingTab({txns,bankImports,allCats,catTargets,suggested,onAcc
         </button>
       </Card>
 
-      {showAdd&&<AddCatModal onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
+      {showAdd&&<AddCatModal monthLabel={MONTHS[month]} onSave={cat=>{onAddCat(cat);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
       {showScan&&<ReceiptScanModal allCats={allCats} profile={profile} partnerName={partnerName} onScan={onScanReceipt}
         presetCategory={scanPresetCat}
         onConfirm={onConfirmReceipt} onClose={()=>{setShowScan(false);setScanPresetCat(null);}}/>}
@@ -5098,10 +5104,12 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
 
   // Who paid what, of the bills already settled this month.
   const paidEntries = sched.entries.filter(e => e.status === 'paid');
-  const paidByViewTotal = paidEntries.filter(matchesView).reduce((a, e) => a + e.amount, 0);
+  // Paid bills count what was actually charged (paidAmount), matching
+  // "Already paid" and Home's Bills Paid.
+  const paidByViewTotal = paidEntries.filter(matchesView).reduce((a, e) => a + e.paidAmount, 0);
   const unattributedPaidTotal = paidEntries
     .filter(e => !billPaidByFirst(e))
-    .reduce((a, e) => a + e.amount, 0);
+    .reduce((a, e) => a + e.paidAmount, 0);
 
   /** Saving a bill's details (amount, label, day, category) only ever
    *  affects the month you're looking at — amounts genuinely change month
@@ -5237,7 +5245,10 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
           <div style={{ textAlign:'right', flexShrink:0 }}>
             <p style={{ margin:0, fontFamily:SERIF, fontSize:17, fontWeight:600,
               color: done ? C.inkSoft : C.ink,
-              textDecoration: done ? 'line-through' : 'none' }}>{fmt(e.amount)}</p>
+              textDecoration: done ? 'line-through' : 'none' }}>{fmt(done && e.paidAmount != null ? e.paidAmount : e.amount)}</p>
+            {done && e.seenInData && e.paidAmount != null && Math.abs(e.paidAmount - e.amount) >= 0.01 && (
+              <p style={{ margin:0, fontSize:9, color:C.inkSoft, fontFamily:SANS }}>usually {fmt(e.amount)}</p>
+            )}
             <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.06em',
               color:st.color, fontFamily:SANS }}>{st.label}</span>
           </div>
@@ -5306,7 +5317,7 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
   function handlePrint() {
     const toRow = e => ({
       label: e.label,
-      amount: e.amount,
+      amount: e.status === 'paid' && e.paidAmount != null ? e.paidAmount : e.amount,
       categoryLabel: (allCats.find(c => c.id === e.category) || {}).label || e.category || '',
       dateLabel: e.date ? new Date(e.date).toLocaleDateString('en-CA', {month:'short', day:'numeric'}) : '',
       statusLabel: STATUS_PRINT_LABEL[e.status] || e.status || '',
@@ -5382,13 +5393,13 @@ export function BillsTab({history, txns, bankImports, allCats, year, month,
           </p>
         )}
         <p style={{ margin:'10px 0 0', fontSize:11, color:'rgba(255,255,255,0.65)', fontFamily:SANS }}>
-          Once a bill is actually charged, it shows up as regular spending too — see{' '}
+          A charged bill counts here, at what it actually cost, and never again under{' '}
           {setTab ? (
             <button onClick={()=>setTab('spending')} style={{border:'none', background:'none', padding:0,
               color:'#fff', fontWeight:700, cursor:'pointer', fontFamily:SANS, fontSize:11, textDecoration:'underline'}}>
-              Spending
+              Charges
             </button>
-          ) : 'Spending'}.
+          ) : 'Charges'}. Charges + Already paid = Total Spending on Home.
         </p>
       </Card>
 
@@ -7494,8 +7505,13 @@ export default function App() {
 
   // Alphabetical everywhere, so a category is always where you expect it —
   // including custom ones added later.
-  const allCats=[...DEFAULT_CATS,...customCats]
+  const allCatsEver=[...DEFAULT_CATS,...customCats]
     .sort((a,b)=>a.label.localeCompare(b.label,'en',{sensitivity:'base'}));
+  // A category you create belongs to the month you created it in — it is
+  // never copied onto other months. Other months only show it if they
+  // actually have transactions filed under it. allCatsEver is kept purely
+  // for looking up names/colours of rows from other months (charts, export).
+  const allCats=categoriesForMonth(DEFAULT_CATS, customCats, year, month, [...txns, ...imports]);
 
   // Fast lookups for "which bills are on for the month being viewed, and
   // with what amount/label/day/category" — see applyBillRules() in
@@ -7977,7 +7993,7 @@ export default function App() {
         }).catch(()=>{});
       }
 
-      const {who,text}=describeChange(payload,allCats);
+      const {who,text}=describeChange(payload,allCatsEver);
       const entry={id:uid(),who,text,at:Date.now()};
       setNotifs(prev=>{
         const next=[entry,...prev].slice(0,50);
@@ -8218,7 +8234,7 @@ export default function App() {
     showToast(`Added ${fmt(fields.amount)} from receipt`);
   }
 
-  function addCustomCat(cat){const u=[...customCats,cat];setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));showToast(`"${cat.label}" added`);}
+  function addCustomCat(cat){cat={...cat,year,month};const u=[...customCats,cat];setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));showToast(`"${cat.label}" added to ${MONTHS[month]} only`);}
   function deleteCustomCat(id){const u=customCats.filter(c=>c.id!==id);setCustomCats(u);localStorage.setItem(CUSTOM_CATS_KEY,JSON.stringify(u));}
   function acceptSuggested(){
     const m={...catTargets,...suggested};
@@ -8344,7 +8360,8 @@ export default function App() {
           onScanReceipt={scanReceipt} onConfirmReceipt={confirmReceiptTxn}
           onEditTxnSave={handleEditTxnSave} predictedIncomeTotal={predictedIncomeTotal} receiptsSetup={receiptsSetup}
           year={year} month={month} history={history} billRules={billRules}
-          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}/>}
+          billActiveKeys={billActiveKeys} billConfiguredMonths={billConfiguredMonths}
+          billPayments={billPayments}/>}
       {tab==='add'     && <AddTab profile={profile} partnerName={partnerName} allCats={allCats} quickCat={quickAddCat} onAdd={async tx=>{await addTxn(tx);showToast(`Added ${fmt(tx.amount)}`);setQuickAddCat(null);setTab('home');}}/>}
       {tab==='history' && <HistoryTab txns={txns} bankImports={imports} allCats={allCats}
           profile={profile} partnerName={partnerName}
@@ -8366,7 +8383,7 @@ export default function App() {
           goals={goals} onSaveGoals={saveGoals} allCats={allCats} history={history}
           showToast={showToast} onSaveRule={saveBillRule} onDeleteRule={removeBillRule}
           profile={profile} partnerName={partnerName} view={view} setView={setView}/>}
-      {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCats}
+      {tab==='automation' && <AutomationTab txns={txns} bankImports={imports} allCats={allCatsEver}
           year={year} month={month} personView={view} setView={setView} profile={profile} partnerName={partnerName}
           showToast={showToast} onImported={loadAll} aiOn={aiOn} aiDiag={aiDiag}/>}
 
@@ -8494,7 +8511,7 @@ export default function App() {
           billPayments={billPayments}
           billRules={billRules}
           history={history}
-          allCats={allCats}
+          allCats={allCatsEver}
           catTargets={catTargets}
           goals={goals}
           profile={profile}

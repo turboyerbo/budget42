@@ -113,25 +113,88 @@ export function detectRecurring(imports, { minMonths = 2, tolerance = 0.3 } = {}
   return out.sort((a, b) => b.amount - a.amount);
 }
 
+// ── Matching bills to transactions ───────────────────────────────────────────
+/** The text a transaction is matched on. Statement rows carry `description`;
+ *  rows added by hand carry `note`/`merchant` instead. */
+const txnText  = t => t.description || t.note || t.merchant || '';
+const isCredit = t => (t.direction ?? t._type ?? 'debit') === 'credit';
+
+/**
+ * Every merchant key a bill answers to: its own key (a detected bill's key IS
+ * the merchant key) plus its label normalised the same way (a hand-added
+ * bill's key is "manual:<uid>", which never matches a statement on its own).
+ */
+export function billMatchKeys(bill) {
+  const keys = new Set([bill.key]);
+  if (bill.label) {
+    const k = merchantKey(bill.label);
+    if (k && k.length >= 3) keys.add(k);
+  }
+  return keys;
+}
+
+/**
+ * THE one rule for "which of this month's transactions are bill payments".
+ *
+ * Before this existed, two different rules were in play: the bill tracker
+ * decided a bill was paid by matching `description||note` against the bill's
+ * key only, while Home and Charges decided which transactions to leave out of
+ * everyday spending by matching `description||note||merchant` against the key
+ * AND the label. A hand-added "Rent" bill therefore pulled the real rent
+ * transaction out of Charges without ever marking the bill paid, so that money
+ * vanished from both sides and Charges + Bills never added up.
+ *
+ * Returns:
+ *   isBillTxn(t)  — true for every transaction that belongs to a bill (these
+ *                   are counted under Bills, never under Charges)
+ *   chargedByBill — bill key → total actually charged per the statements
+ */
+export function matchBillTransactions(recurring, monthTx) {
+  const keyToBill = new Map();
+  (recurring || []).forEach(r =>
+    billMatchKeys(r).forEach(k => { if (!keyToBill.has(k)) keyToBill.set(k, r.key); }));
+
+  const billTxnIds    = new Set();
+  const billTxnObjs   = new Set();
+  const chargedByBill = new Map();
+
+  (monthTx || []).forEach(t => {
+    // A bill ticked off by hand creates a stand-in transaction so the money
+    // shows as spent before the statement arrives. It always belongs to Bills,
+    // but it is NOT statement evidence, so it never locks the tick.
+    if (t.source === 'bill-manual') {
+      if (t.id != null) billTxnIds.add(t.id); else billTxnObjs.add(t);
+      return;
+    }
+    if (isCredit(t)) return;                    // money in is never a bill payment
+    const billKey = keyToBill.get(merchantKey(txnText(t)));
+    if (!billKey) return;
+    if (t.id != null) billTxnIds.add(t.id); else billTxnObjs.add(t);
+    chargedByBill.set(billKey, (chargedByBill.get(billKey) || 0) + (Number(t.amount) || 0));
+  });
+
+  const isBillTxn = t => (t.id != null ? billTxnIds.has(t.id) : billTxnObjs.has(t));
+  return { isBillTxn, chargedByBill };
+}
+
+const cents = n => Math.round(n * 100) / 100;
+
 /**
  * Split recurring charges into those already seen this month and those still
- * expected. Only the latter is a commitment.
+ * expected. Only the latter is a commitment. A paid bill counts what was
+ * actually charged, not the amount it usually is.
  */
 export function splitRecurring(recurring, thisMonthTx) {
-  const seenKeys = new Set(
-    thisMonthTx
-      .filter(t => (t.direction ?? t._type ?? 'debit') !== 'credit')
-      .map(t => merchantKey(t.description || t.note || ''))
-  );
+  const { chargedByBill } = matchBillTransactions(recurring, thisMonthTx);
 
   const paid = [], due = [];
-  recurring.forEach(r => (seenKeys.has(r.key) ? paid : due).push(r));
+  recurring.forEach(r => (chargedByBill.has(r.key) ? paid : due).push(r));
 
   return {
     paid,
     due,
     dueTotal:  due.reduce((a, r) => a + r.amount, 0),
-    paidTotal: paid.reduce((a, r) => a + r.amount, 0),
+    paidTotal: cents(paid.reduce((a, r) => a + chargedByBill.get(r.key), 0)),
   };
 }
 
@@ -156,8 +219,7 @@ function safeDate(year, month, day) {
  */
 export function buildSchedule(recurring, thisMonthTx, year, month, today = new Date(),
                               manualPaid = []) {
-  const { paid } = splitRecurring(recurring, thisMonthTx);
-  const paidKeys = new Set(paid.map(r => r.key));
+  const { chargedByBill } = matchBillTransactions(recurring, thisMonthTx);
 
   // Ticked off by hand. Useful in the gap between paying a bill and the
   // statement arriving, which can be weeks.
@@ -169,7 +231,7 @@ export function buildSchedule(recurring, thisMonthTx, year, month, today = new D
 
   const entries = recurring.map(r => {
     const date       = safeDate(year, month, r.day);
-    const seenInData = paidKeys.has(r.key);
+    const seenInData = chargedByBill.has(r.key);
     const tick       = manual.get(r.key);
     const daysAway   = Math.round((date - midnight) / DAY);
 
@@ -177,8 +239,16 @@ export function buildSchedule(recurring, thisMonthTx, year, month, today = new D
     if (seenInData || tick) status = 'paid';
     else if (viewingCurrentMonth && daysAway < 0) status = 'overdue';
 
+    // What this bill actually cost this month. Once the statement shows the
+    // charge, that real figure wins over the usual amount — a $120 hydro bill
+    // that came in at $134.27 is $134.27 of money out, and Charges has
+    // already left that transaction out, so anything else would lose $14.27.
+    const paidAmount = status !== 'paid' ? 0
+                     : seenInData ? cents(chargedByBill.get(r.key))
+                     : r.amount;
+
     return {
-      ...r, date, daysAway, status, viewingCurrentMonth,
+      ...r, date, daysAway, status, viewingCurrentMonth, paidAmount,
       seenInData,                       // a matching transaction exists
       tickedBy:  tick?.paid_by || null, // who ticked it, if anyone
       tickedAt:  tick?.paid_at || null,
@@ -195,12 +265,17 @@ export function buildSchedule(recurring, thisMonthTx, year, month, today = new D
 
   const outstanding = entries.filter(e => e.status !== 'paid');
 
+  const outstandingTotal = cents(outstanding.reduce((a, e) => a + e.amount, 0));
+  const paidTotal        = cents(entries.filter(e => e.status === 'paid').reduce((a, e) => a + e.paidAmount, 0));
+
   return {
     entries,
     outstanding,
-    outstandingTotal: outstanding.reduce((a, e) => a + e.amount, 0),
-    paidTotal:        entries.filter(e => e.status === 'paid').reduce((a, e) => a + e.amount, 0),
-    monthTotal:       entries.reduce((a, e) => a + e.amount, 0),
+    outstandingTotal,
+    paidTotal,
+    // Paid (at what it actually cost) + still to come (at the usual amount),
+    // so "whole month" is always exactly "already paid" + "still to pay".
+    monthTotal:       cents(paidTotal + outstandingTotal),
     // What is landing in the next week, which is the figure that decides
     // whether this week is tight
     dueThisWeek: outstanding.filter(e => e.daysAway >= 0 && e.daysAway <= 7),
@@ -325,7 +400,7 @@ export function getCarriedOverBills(confirmed, history, allPayments, year, month
     if (t.direction === 'credit' || t._type === 'credit') return;
     const mk = monthKey(t);
     if (!txByMonth.has(mk)) txByMonth.set(mk, new Set());
-    txByMonth.get(mk).add(merchantKey(t.description || t.note || ''));
+    txByMonth.get(mk).add(merchantKey(txnText(t)));
   });
 
   const out = [];
@@ -337,7 +412,8 @@ export function getCarriedOverBills(confirmed, history, allPayments, year, month
       while (checkMonth < 0) { checkMonth += 12; checkYear -= 1; }
       const mkKey = `${checkYear}-${checkMonth}`;
 
-      const chargedThatMonth = txByMonth.get(mkKey)?.has(bill.key);
+      const seen = txByMonth.get(mkKey);
+      const chargedThatMonth = !!seen && [...billMatchKeys(bill)].some(k => seen.has(k));
       const tickedThatMonth  = manualPaidSet.has(`${bill.key}|${mkKey}`);
       // Paid (or ticked) that month — nothing owed from here further back
       if (chargedThatMonth || tickedThatMonth) break;
