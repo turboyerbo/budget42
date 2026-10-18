@@ -167,9 +167,12 @@ export function categorize(description) {
  *
  * The point is to get transactions into the right bucket at import time rather
  * than dumping hundreds of rows into "Other" for someone to sort by hand.
+ *
+ * Keep "nsf" as a whole word: BMO writes e-transfers as "ETRNSFR", which contains
+ * the letters nsf and used to land every e-transfer in "Banking fees & interest".
  */
 const BUDGET_RULES = [
-  ['banking',          /finance charge|performance plan|overdraft|o\/d per item|monthly plan fee|interest charge|nsf|service charge|annual fee|foreign (currency )?(conversion|transaction)/i],
+  ['banking',          /finance charge|performance plan|overdraft|o\/d per item|monthly plan fee|interest charge|\bnsf\b|service charge|annual fee|foreign (currency )?(conversion|transaction)/i],
   ['phone',            /freedom mobile|rogers|telus|bell canada|fido|koodo|virgin plus|chatr/i],
   // Electricity/utility bills are tracked via the Bills tab (merchant-based
   // detection), not as their own spending category — route the underlying

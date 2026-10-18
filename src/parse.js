@@ -131,7 +131,8 @@ const FORMATS = [
   {
     id: 'WEALTHSIMPLE',
     match: h => h.includes('net_cash_amount'),
-    date: ['transaction_date'],
+    // Newer exports call it effective_date; older ones transaction_date.
+    date: ['effective_date', 'transaction_date'],
     // Monthly exports have no description column at all; the sub-type carries
     // the meaning (SPEND, E_TRFIN, E_TRFOUT, Interest).
     desc: ['description', 'activity_sub_type', 'activity_type'],
@@ -294,7 +295,11 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
     const isTransfer =
       TRANSFER_CODE.test(desc.trim()) ||
       /money transfer (in|out)|interac e-?transfer.*(in|out)$/i.test(desc) ||
-      /^\[cw\]\s*tf\b|^\[ck\]no\.|returned item/i.test(desc);
+      /^\[cw\]\s*tf\b|^\[ck\]no\.|returned item/i.test(desc) ||
+      // BMO e-transfers (SENT / FULFILL / AD RECVD) move money between people or
+      // accounts. A specific rule such as rent to the landlord has already
+      // claimed its own e-transfers, so only the unclaimed ones count as transfers.
+      (cat === '_skip' && /interac etrnsfr/i.test(desc));
 
     // Money arriving is income unless it is a card payment or an internal
     // move. Without this, every paycheque and refund sat in "Other".

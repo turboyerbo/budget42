@@ -10,6 +10,7 @@ import path from 'node:path';
 
 const { parseStatementCSV, parseDate } = await import('../src/parse.js');
 const { fingerprintBank } = await import('../src/detect.js');
+const { categorizeBudget } = await import('../src/categorize.js');
 
 const dir = path.join(import.meta.dirname, 'fixtures');
 const read = f => fs.readFileSync(path.join(dir, f), 'utf8');
@@ -97,8 +98,41 @@ assert('WS six-month export prefers the real description',
 assert('WS splits two accounts in one file',
   new Set(wss.map(r => r.source)).size === 2);
 
+// Wealthsimple renamed transaction_date to effective_date in newer exports.
+// Reading only the old name made the whole file fail with "could not find the date column".
+const wse_raw = parseStatementCSV(read('ws_effective.csv'), 'WS_JOINT');
+assert('WS export with effective_date parses', !wse_raw.error && wse_raw.rows.length === 5,
+  wse_raw.error ? wse_raw.error.split('\n')[0] : 'rows: ' + wse_raw.rows.length);
+const wse = wse_raw.rows || [];
+assert('WS effective_date becomes the row date',
+  wse.find(r => r.amount === 30)?.date === '2026-09-03');
+assert('WS effective_date export still maps accounts',
+  wse.find(r => r.amount === 30)?.source === 'WS_PERS' &&
+  wse.find(r => r.amount === 3.3)?.source === 'WS_JOINT');
+assert('detect ws_effective.csv → WS_PERS',
+  fingerprintBank(read('ws_effective.csv')).id === 'WS_PERS');
+
+// ── BMO e-transfers ──
+// "ETRNSFR" contains the letters "nsf", which the banking-fee rule used to match,
+// so every e-transfer was filed under "Banking fees & interest".
+const bmoE = parseStatementCSV(read('bmo_etransfers.csv'), 'BMO').rows;
+const etr = bmoE.filter(r => /ETRNSFR/.test(r.description) && !/STELA/.test(r.description));
+assert('BMO e-transfers parsed', etr.length === 3, String(etr.length));
+assert('BMO e-transfers (sent, fulfilled, received) are transfers, not banking fees',
+  etr.every(r => r.category === 'transfer'),
+  etr.map(r => r.category).join(', '));
+assert('BMO rent e-transfer to STELA stays rent',
+  bmoE.find(r => r.description.includes('STELA'))?.category === 'rent');
+assert('BMO performance plan fee is still a banking fee',
+  bmoE.find(r => r.description.includes('PERFORMANCE PLAN'))?.category === 'banking');
+assert('a standalone NSF fee is still a banking fee',
+  bmoE.find(r => /NSF FEE/.test(r.description))?.category === 'banking');
+assert('"transfer" text alone does not trigger the banking rule',
+  categorizeBudget('INTERAC ETRNSFR SENT JANE DOE') === null &&
+  categorizeBudget('Money transfer into the account') === null);
+
 // ── Amounts are always positive, direction carries the meaning ──
-const all = [...bmo, ...ctfs, ...pc, ...wsm, ...wss];
+const all = [...bmo, ...ctfs, ...pc, ...wsm, ...wss, ...wse, ...bmoE];
 assert('no negative amounts survive parsing', all.every(r => r.amount > 0));
 assert('every row has a direction', all.every(r => r._type === 'debit' || r._type === 'credit'));
 assert('every row has a valid date', all.every(r => /^\d{4}-\d{2}-\d{2}$/.test(r.date)));

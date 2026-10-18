@@ -1,0 +1,6 @@
+effective_date,effective_time,settlement_date,account_id,account_type,activity_type,activity_sub_type,description,direction,symbol,name,currency,quantity,unit_price,commission,net_cash_amount
+2026-09-01,00:00:00,,WK63L5732CAD,Chequing,Interest,-,Interest received (executed at 2026-09-01),,,,CAD,0.24,,,0.24
+2026-09-01,07:49:41,,WK63L5732CAD,Chequing,MoneyMovement,SPEND,Withdrawal (executed at 2026-09-01),,,,CAD,-3.3,,,-3.3
+2026-09-02,10:12:00,,WK63L5732CAD,Chequing,MoneyMovement,E_TRFOUT,Interac e-Transfer® Out,,,,CAD,-250,,,-250
+2026-09-03,09:30:00,,WK5YMCW31CAD,Chequing,MoneyMovement,E_TRFIN,Interac e-Transfer® Received,,,,CAD,30,,,30
+2026-09-09,00:00:00,,WK63L5732CAD,Chequing,MoneyMovement,TRANSFER,Money transfer into the account (executed at 2026-09-09),,,,CAD,50,,,50
