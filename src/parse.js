@@ -140,6 +140,10 @@ const FORMATS = [
     typeCol: null,
     cardPositive: false,
     accountCol: 'account_id',
+    // Buying and selling investments moves money between cash and holdings. It is
+    // not spending (or income), so those rows are left out of the import.
+    skipCol: 'activity_type',
+    skipValues: /^trade$/i,
   },
   {
     id: 'CIBC',
@@ -226,6 +230,7 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
   const typeIdx = fmt.typeCol    ? findCol(headers, [fmt.typeCol])    : -1;
   const credIdx = fmt.creditCol  ? findCol(headers, [fmt.creditCol])  : -1;
   const acctIdx = fmt.accountCol ? findCol(headers, [fmt.accountCol]) : -1;
+  const skipIdx = fmt.skipCol    ? findCol(headers, [fmt.skipCol])    : -1;
 
   if (dateIdx < 0 || amtIdx < 0) {
     return { rows: [], error:
@@ -235,11 +240,15 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
 
   const rows = [];
   let skipped = 0;
-  const reasons = { date: 0, amount: 0, blank: 0 };
+  const reasons = { date: 0, amount: 0, blank: 0, investment: 0 };
 
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const cols = splitCSV(lines[i]);
     if (cols.length < 2) { skipped++; reasons.blank++; continue; }
+
+    if (skipIdx >= 0 && fmt.skipValues.test((cols[skipIdx] || '').trim())) {
+      skipped++; reasons.investment++; continue;
+    }
 
     const dateObj = parseDate(cols[dateIdx]);
     if (!dateObj) { skipped++; reasons.date++; continue; }
@@ -327,7 +336,8 @@ export function parseStatementCSV(text, source = 'UNKNOWN') {
       error:
         `Recognised the layout as ${fmt.id} and found ${skipped} rows, but none could ` +
         `be read.\n` +
-        `Unreadable dates: ${reasons.date} · unreadable amounts: ${reasons.amount}\n` +
+        `Unreadable dates: ${reasons.date} · unreadable amounts: ${reasons.amount}` +
+        (reasons.investment ? ` · investment trades left out: ${reasons.investment}` : '') + `\n` +
         `Date column: "${headers[dateIdx]}" · first value: "${splitCSV(lines[headerIdx+1] || '')[dateIdx] || ''}"` };
   }
 

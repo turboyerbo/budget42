@@ -4,3 +4,6 @@ effective_date,effective_time,settlement_date,account_id,account_type,activity_t
 2026-09-02,10:12:00,,WK63L5732CAD,Chequing,MoneyMovement,E_TRFOUT,Interac e-Transfer® Out,,,,CAD,-250,,,-250
 2026-09-03,09:30:00,,WK5YMCW31CAD,Chequing,MoneyMovement,E_TRFIN,Interac e-Transfer® Received,,,,CAD,30,,,30
 2026-09-09,00:00:00,,WK63L5732CAD,Chequing,MoneyMovement,TRANSFER,Money transfer into the account (executed at 2026-09-09),,,,CAD,50,,,50
+2026-09-08,10:00:00,,WK63L5732CAD,Chequing,Trade,BUY,EXMP - Example ETF: Bought 10 shares at $50.00 per share (executed at 2026-09-08),LONG,EXMP,Example ETF,CAD,10,50,,-500
+2026-09-10,10:00:00,,WK63L5732CAD,Chequing,Trade,SELL,EXMP - Example ETF: Sold 2 shares at $50.00 per share (executed at 2026-09-10),LONG,EXMP,Example ETF,CAD,2,50,,100
+2026-09-29,00:00:00,,WK63L5732CAD,Chequing,Dividend,-,EXMP - Example ETF: Cash dividend distribution received on 2026-09-29,,EXMP,Example ETF,CAD,,,,2.5

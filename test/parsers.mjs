@@ -101,7 +101,7 @@ assert('WS splits two accounts in one file',
 // Wealthsimple renamed transaction_date to effective_date in newer exports.
 // Reading only the old name made the whole file fail with "could not find the date column".
 const wse_raw = parseStatementCSV(read('ws_effective.csv'), 'WS_JOINT');
-assert('WS export with effective_date parses', !wse_raw.error && wse_raw.rows.length === 5,
+assert('WS export with effective_date parses', !wse_raw.error && wse_raw.rows.length === 6,
   wse_raw.error ? wse_raw.error.split('\n')[0] : 'rows: ' + wse_raw.rows.length);
 const wse = wse_raw.rows || [];
 assert('WS effective_date becomes the row date',
@@ -111,6 +111,34 @@ assert('WS effective_date export still maps accounts',
   wse.find(r => r.amount === 3.3)?.source === 'WS_JOINT');
 assert('detect ws_effective.csv → WS_PERS',
   fingerprintBank(read('ws_effective.csv')).id === 'WS_PERS');
+
+// Buying and selling investments is not spending: a $5,000 ETF purchase used to
+// land in "Other" as a debit, and the matching sale as income.
+assert('WS investment trades (Buy / Sell) are left out of the import',
+  !wse.some(r => /Bought|Sold/.test(r.description)) && wse_raw.debug?.reasons?.investment === 2,
+  'trades kept: ' + wse.filter(r => /Bought|Sold/.test(r.description)).length +
+  ', counted as left out: ' + wse_raw.debug?.reasons?.investment);
+assert('WS trades do not add to spending',
+  !wse.some(r => r._type === 'debit' && r.amount === 500));
+assert('WS dividend is still imported, as income',
+  wse.find(r => r.description.includes('Cash dividend'))?.category === 'income');
+assert('WS non-trade rows are unaffected by the trade filter',
+  wse.some(r => r.amount === 250 && r.category === 'transfer') &&
+  wse.some(r => r.amount === 30 && r.category === 'income'));
+// Older exports have the same activity_type column, so they get the same treatment
+const wsOldTrade = parseStatementCSV(
+  'transaction_date,settlement_date,account_id,account_type,activity_type,activity_sub_type,net_cash_amount\n' +
+  '2026-02-03,,WK63L5732CAD,Chequing,Trade,BUY,-100\n' +
+  '2026-02-04,,WK63L5732CAD,Chequing,MoneyMovement,SPEND,-9.5\n', 'WS_JOINT');
+assert('WS older export also drops trades and keeps spending',
+  !wsOldTrade.error && wsOldTrade.rows.length === 1 && wsOldTrade.rows[0].amount === 9.5,
+  wsOldTrade.error ? wsOldTrade.error.split('\n')[0] : 'rows: ' + wsOldTrade.rows.length);
+// A file that is only trades should say so instead of just "none could be read"
+const wsOnlyTrades = parseStatementCSV(
+  'effective_date,account_id,activity_type,activity_sub_type,net_cash_amount\n' +
+  '2026-02-03,WK63L5732CAD,Trade,BUY,-100\n', 'WS_JOINT');
+assert('a trades-only WS file explains why nothing was imported',
+  /investment trades left out: 1/.test(wsOnlyTrades.error || ''), wsOnlyTrades.error || 'no error');
 
 // ── BMO e-transfers ──
 // "ETRNSFR" contains the letters "nsf", which the banking-fee rule used to match,
